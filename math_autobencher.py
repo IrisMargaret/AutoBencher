@@ -12,7 +12,9 @@ from collections import defaultdict
 import numpy as np
 
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
-from tool_util import _generate_lm_answers, extract_json_v2, search_related_pages, search_step, get_pageviews
+from tool_util import (DEFAULT_SYSTEM_MESSAGE, _generate_lm_answers, execute_code,
+                       extract_code, extract_json_v2, search_related_pages,
+                       search_step, get_pageviews)
 from wiki_autobencher import fast_compare_answers
 
 DEFAULT_JSON_MESSAGE = """You are a helpful AI assistant.
@@ -231,12 +233,12 @@ def _generate_question_from_description(description_json, agent_lm, agent_tokeni
                                         questions_old=None):
     context = """Your goal is to come up with math questions that match the description. 
 In each iteration, you receive as input a subcategory_description that describes the types of question to ask.  
-You should come up with around 50 math questions that matches the subcategory description, and write these questions in a json file.
+You should come up with exactly 50 math questions that match the subcategory description, and write these questions in a json file.
 Each question should be a dictionary with the following keys: id, question, category, answer, difficulty levels (1-10).
 You do not need to answer the questions. 
 
 Note: do not come up with repetitive questions. If you have asked a question, do not ask it again! 
-Come up with 100 concrete questions, and write them in the following format. 
+Come up with exactly 50 concrete questions, and write them in the following format.
 Do not leave place holders or ellipsis!!!
 It's helpful to first come up with a plan for this iteration, and then write the questions.
 The questions should be exactly in the following format (a list of dictionaries): 
@@ -249,22 +251,43 @@ The questions should be exactly in the following format (a list of dictionaries)
 ``` 
 Do not use python code block. 
 Make sure that you generate a valid json block (surrounded by ```json [...] ```). Surrounded by the [] brackets.
+Do not write any explanation before or after the JSON block.
 """
 
     context = DEFAULT_JSON_MESSAGE + context + f"\nSubcategory Description:{description_json['subcategory_description']}"
-    if questions_old is not None:
+    if questions_old:
         old_q_string = ''
         for q in questions_old:
             old_q_string += str(q) + '\n'
-        context += f"\nQuestions already generated: {old_q_string}. You need to keep generating the same amount of questions for this iteration."
-    # extract the json file from the message
-    request_result = gen_from_prompt(model=agent_lm, tokenizer=agent_tokenizer, prompt=[context],
-                                     echo_prompt=False, temperature=0.0, max_tokens=4096,
-                                     process_func=None, service=agent_client,
-                                     terminate_by_linebreak='no', )
-    response = request_result.completions[0].text
-
-    extracted_json = extract_json_v2(response, f"{outfile_prefix}.questions.json")
+        remaining = max(1, 50 - len(questions_old))
+        context += (
+            f"\nQuestions already generated: {old_q_string}"
+            f"\nGenerate exactly {remaining} new, non-repetitive questions."
+        )
+    extracted_json = None
+    last_error = None
+    valid_json = False
+    for attempt in range(1, 4):
+        request_result = gen_from_prompt(model=agent_lm, tokenizer=agent_tokenizer, prompt=[context],
+                                         echo_prompt=False, temperature=0.0, max_tokens=8192,
+                                         process_func=None, service=agent_client,
+                                         terminate_by_linebreak='no', )
+        response = request_result.completions[0].text
+        try:
+            extracted_json = extract_json_v2(
+                response, f"{outfile_prefix}.questions.json"
+            )
+            if not isinstance(extracted_json[0], list) or not extracted_json[0]:
+                raise ValueError("Expected a non-empty list of math questions")
+            valid_json = True
+            break
+        except (ValueError, IndexError, TypeError) as exc:
+            last_error = exc
+            print(f"Math question generation attempt {attempt}/3 failed: {exc}")
+            with open(f"{outfile_prefix}.attempt{attempt}.txt", "w", encoding="utf-8") as f:
+                f.write(response)
+    if not valid_json:
+        raise RuntimeError("Failed to generate math questions after 3 attempts") from last_error
     for line in extracted_json[0]:
         line['category'] = description_json['category']
         line['subcat'] = description_json['subcategory_description']
@@ -367,6 +390,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_helm', type=str, default='yes')  # option that takes a value
     parser.add_argument('--top_p', type=float, default=0.9)  # option that takes a value
     parser.add_argument('--acc_target', type=str, default="0.3--0.5")  # option that takes a value
+    parser.add_argument('--num_iters', type=int, default=8)
 
     parser.add_argument('--outfile_prefix1', type=str, default='att1')  # option that takes a value
 
@@ -405,8 +429,16 @@ if __name__ == '__main__':
         history = []
         history_dict = []
         historical_psg = []
-        for iters in range(8):
+        for iters in range(args.num_iters):
             args.outfile_prefix = args.outfile_prefix1 + str(iters + 1)
+            result_cache = f"{args.outfile_prefix}.compare_answers.json"
+            if os.path.exists(result_cache):
+                print("FOUND completed iteration cache", result_cache)
+                with open(result_cache, "r", encoding="utf-8") as f:
+                    json_dict = json.load(f)
+                history_dict.append(json_dict)
+                print(get_summary_of_results(json_dict, gold_key="answer", verbose=False))
+                continue
             summarized_content = summarize_over_history(history_dict, gold_key='answer', verbose=False)
             history = [summarized_content]
             if iters == 0 and reuse_starting_qs:

@@ -2,14 +2,22 @@ import copy
 import re
 import requests
 import os, argparse, ast, json, tqdm
-from pydantic import BaseModel, Extra, root_validator
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
+import subprocess
+import sys
+from urllib.parse import quote
 from time import sleep
 from collections import defaultdict
-from autogen.code_utils import UNKNOWN, extract_code, execute_code, infer_lang
 import numpy as np
-from bs4 import BeautifulSoup
 from util import gen_from_prompt
+
+
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIMEDIA_HEADERS = {
+    "User-Agent": (
+        "AutoBencher/1.0 "
+        "(https://github.com/XiangLi1999/AutoBencher; research benchmark)"
+    )
+}
 
 
 DEFAULT_SYSTEM_MESSAGE = """You are a helpful AI assistant.
@@ -34,33 +42,58 @@ Reply "TERMINATE" in the end when everything is done.
 DEFAULT_DESCRIPTION = "A helpful and general-purpose AI assistant that has strong language skills, Python skills, and Linux command line skills."
 
 
+def extract_code(text):
+    """Return (language, code) pairs from Markdown fenced code blocks."""
+    blocks = re.findall(
+        r"```([\w.+-]*)[ \t]*\r?\n?(.*?)```", text, flags=re.DOTALL
+    )
+    return [(language or "", code.strip()) for language, code in blocks]
+
+
+def execute_code(code, lang="python", timeout=120):
+    """Execute generated Python with the active virtual-environment interpreter."""
+    if not lang.lower().startswith("python"):
+        return 1, f"Unsupported language: {lang}", None
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        cwd=os.getcwd(),
+    )
+    return result.returncode, result.stdout + result.stderr, None
+
+
 
 def extract_json_v2(json_text, outfilename):
-    response = json_text.replace("TERMINATE", "")
-    if "```json" in response:
-        # parse the json file
-        try:
-            extracted_json = extract_code(response)
-            combined_json = sum([], [ast.literal_eval(xx[1]) for xx in extracted_json])
-        except:
-            if '...' in response:
-                response = response.replace('...', '')
-                extracted_json = extract_code(response)
-                combined_json = sum([], [ast.literal_eval(xx[1]) for xx in extracted_json])
-            else:
-                response2 = "\n".join(response.split('\n')[:-1]) + "]\n```"
-                extracted_json = extract_code(response2)
-                combined_json = sum([], [ast.literal_eval(xx[1]) for xx in extracted_json])
-        # load the json_string.
-        json_dict = combined_json
-        # json_dict = ast.literal_eval(combined_json)
-        if outfilename is not None:
-            with open(outfilename, "w") as f:
-                json.dump(json_dict, f)
+    response = json_text.replace("TERMINATE", "").strip()
+    candidates = [code for language, code in extract_code(response) if language.lower() == "json"]
+    if not candidates and response.startswith(("[", "{")):
+        candidates = [response]
+    if not candidates:
+        raise ValueError("Model response did not contain a JSON block")
 
-    else:
-        assert False, "fail to output json file."
-    return json_dict
+    parsed_blocks = []
+    errors = []
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as json_exc:
+            try:
+                parsed = ast.literal_eval(candidate)
+            except (ValueError, SyntaxError) as ast_exc:
+                errors.append(f"{json_exc}; {ast_exc}")
+                continue
+        if parsed not in (None, [], {}):
+            parsed_blocks.append(parsed)
+
+    if not parsed_blocks:
+        detail = errors[-1] if errors else "the JSON value was empty"
+        raise ValueError(f"Model returned no usable JSON: {detail}")
+    if outfilename is not None:
+        with open(outfilename, "w", encoding="utf-8") as f:
+            json.dump(parsed_blocks, f, ensure_ascii=False)
+    return parsed_blocks
 
 def test_taker_inference(test_model_info, problem_json, outfile, bsz=1, temperature=0.01, max_length=50):
     if len(test_model_info) == 3:
@@ -124,13 +157,14 @@ def _generate_lm_answers(question_inputs, test_model_info, agent_model_info, out
     else:
         assert False
 
-    if isinstance(question_inputs, list) and isinstance(question_inputs[0], list):
+    if not isinstance(question_inputs, list) or not question_inputs:
+        raise RuntimeError(
+            "No benchmark questions were generated. Check the upstream dataset source and retry."
+        )
+    if isinstance(question_inputs[0], list):
         json_dict = question_inputs[0]
-    elif isinstance(question_inputs, list):
-        json_dict = question_inputs
     else:
-        print('question_inputs should be a list.')
-        assert False
+        json_dict = question_inputs
 
     full_result_lst = test_taker_inference(test_model_info, json_dict,
                                            outfile=f"{outfile_prefix}.test_taker_inference.json")
@@ -140,26 +174,50 @@ def _generate_lm_answers(question_inputs, test_model_info, agent_model_info, out
 
 
 def search_related_pages(search_query):
-    # URL for Wikipedia API search action
-    url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={search_query}&format=json&cmlimit=max"
-
-    # Making the request
-    response = requests.get(url)
-
-    # Checking if request was successful
-    if response.status_code == 200:
-        data = response.json()
-        search_results = data['query']['search']
-
-        # Extracting titles of the search results
-        related_pages = [result['title'] for result in search_results]
-        return related_pages
-    else:
-        print("Failed to retrieve data from Wikipedia API.")
+    params = {
+        "action": "query",
+        "format": "json",
+        "formatversion": 2,
+        "list": "search",
+        "srsearch": search_query,
+        "srlimit": 50,
+        "srnamespace": 0,
+    }
+    try:
+        response = requests.get(
+            WIKIPEDIA_API_URL, params=params, headers=WIKIMEDIA_HEADERS, timeout=30
+        )
+        response.raise_for_status()
+        return [item["title"] for item in response.json().get("query", {}).get("search", [])]
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        print(f"Wikipedia search failed for {search_query!r}: {exc}")
         return []
 
 
+def _resolve_wikipedia_title(search_query):
+    results = search_related_pages(search_query)
+    return results[0] if results else None
+
+
 def get_pageviews(page_title, start_date="2020040100", end_date="2023040700"):
+    resolved_title = _resolve_wikipedia_title(page_title) or page_title.replace("_", " ")
+    encoded_title = quote(resolved_title.replace(" ", "_"), safe="")
+    url = (
+        "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
+        f"en.wikipedia/all-access/all-agents/{encoded_title}/daily/{start_date}/{end_date}"
+    )
+    try:
+        response = requests.get(url, headers=WIKIMEDIA_HEADERS, timeout=30)
+        response.raise_for_status()
+        views = sum(item["views"] for item in response.json().get("items", []))
+        print("retrieved pageviews for", resolved_title)
+        return views
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        print(f"Pageview lookup failed for {resolved_title!r}: {exc}")
+        return 0
+
+
+def _legacy_get_pageviews(page_title, start_date="2020040100", end_date="2023040700"):
     access_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIwMDFkMTFmNmQ2MzVmMGY4YmI3MDlkNWViN2ZhNDRlYiIsImp0aSI6IjMzOGQ0Mzc0YzNmZjE5NjBlZDkzNjIwNTdiYjMwYjExOWYzZTY2MzVkZjM3NmY3NDcyZjczMDcyMjNiYzU4ODFjODBkOTliOTZmMjAzZGNkIiwiaWF0IjoxNzEyNjEwMTg0LjY4OTIyNywibmJmIjoxNzEyNjEwMTg0LjY4OTIzLCJleHAiOjMzMjY5NTE4OTg0LjY4NzY1Mywic3ViIjoiNzUzODczODIiLCJpc3MiOiJodHRwczovL21ldGEud2lraW1lZGlhLm9yZyIsInJhdGVsaW1pdCI6eyJyZXF1ZXN0c19wZXJfdW5pdCI6NTAwMCwidW5pdCI6IkhPVVIifSwic2NvcGVzIjpbImJhc2ljIl19.YN0ZvSzsBuYe3Mg-r0C63cWxDXPU3GOCyspUqg4mMv27Qw1FJq9F9H6JKJAUMrqQxB-xyWZqpu8mekvMoxb3Ha5S2fpPbuM4gMB0JketqG2obaDd4QqgtJjg8KDYKwR8ieKoPRLDSHv3Tv4NcvIL-EvzjkRybqrukzQwttwuBUwxmlY8vhC1BZed7URt_-KhMYPsnNfJLSBeWivYJOmrqF2S04AOS0Egjul8Pz_yXAQ7q7aqpIwg6X2jod0ZN5h1gnmAvZmoLB7mKSAxrHEUL2zaQ8BVERWostWVA9ek556cuUJe5NusQ0XW7pcsYIi0YpFjKOBuq-tXzuOlbxFhlbwrp6xkhE_grQGNs1IxyT-w_sjQc2gI48FDe0ldDrTg6ZmgLELsjJM8xOxBy1ng1fY73p-QnaDdxX4hqRw2ZBDlZ1E2j84lvVrv62x_SHPiBNAeywEPcOqDRV_XbU6ArOyJ7QTZXRu9UOT0XDQ-Fx3maCRGb35W4aOtLSWL-SSXYLI8ZuOQ2BwKQQYYbEDMp0W7NjHWzh8YPv6Y2wDaMzsAqaxk2c36pNvTToiTc_P6_a56lydQwoT8ACx1kzzw5lTNPKPEPxPGNiMgtsL3VqtxJWMR7Lgq-ZKwI7cwQ5FTp2YriQDBYuvoaDQeG_eVh8BlNlyg26OYojtYbNos3os"
     client_id = "001d11f6d635f0f8bb709d5eb7fa44eb"
     client_secret = "630b434daa4c8f6cce03b1c294b59574c1ce9431"  # Example client secret
@@ -202,32 +260,36 @@ def get_page_obs(page):
 
 
 def search_step(entity, output_more=False):
-    entity_ = entity.replace(" ", "+")
-    search_url = f"https://en.wikipedia.org/w/index.php?search={entity_}"
-    response_text = requests.get(search_url).text
-    soup = BeautifulSoup(response_text, features="html.parser")
-    result_divs = soup.find_all("div", {"class": "mw-search-result-heading"})
-    if result_divs:  # mismatch
-      result_titles = [clean_str(div.get_text().strip()) for div in result_divs]
-      # obs = f"Could not find {entity}. Similar: {result_titles[:5]}."
-      print(f"Could not find {entity}. Search for similar entities, {result_titles[0]}, instead")
-      obs, entity = search_step(result_titles[0])
-    else:
-      print('found entity', entity)
-      page = [p.get_text().strip() for p in soup.find_all("p") + soup.find_all("ul")]
-      if any("may refer to:" in p for p in page):
-        obs, entity = search_step("[" + entity + "]")
-      else:
-        page_ = ""
-        for p in page:
-          if len(p.split(" ")) > 2:
-              page_ += clean_str(p)
-              if not p.endswith("\n"):
-                  page_ += "\n"
-        obs = get_page_obs(page_)
-        if output_more:
-            obs = filter_paragraph(obs)
-        else:
-            obs = filter_paragraph(obs[:10])
-
-    return obs, entity
+    params = {
+        "action": "query",
+        "format": "json",
+        "formatversion": 2,
+        "generator": "search",
+        "gsrsearch": entity,
+        "gsrnamespace": 0,
+        "gsrlimit": 1,
+        "prop": "extracts",
+        "explaintext": 1,
+        "exsectionformat": "plain",
+        "exlimit": 1,
+        "redirects": 1,
+    }
+    try:
+        response = requests.get(
+            WIKIPEDIA_API_URL, params=params, headers=WIKIMEDIA_HEADERS, timeout=30
+        )
+        response.raise_for_status()
+        pages = response.json().get("query", {}).get("pages", [])
+        if not pages:
+            print(f"Wikipedia page not found for {entity!r}")
+            return [], entity
+        page = pages[0]
+        resolved_entity = page.get("title", entity)
+        paragraphs = filter_paragraph(get_page_obs(page.get("extract", "")))
+        if not output_more:
+            paragraphs = paragraphs[:10]
+        print("found entity", resolved_entity)
+        return paragraphs, resolved_entity
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        print(f"Wikipedia content lookup failed for {entity!r}: {exc}")
+        return [], entity

@@ -80,6 +80,18 @@ def solve_and_compare_questions(test_taker_info, agent_info, question_json, gold
                          test_taker_info,
                          agent_info,
                          outfile_prefix=outfile_prefix)
+    if len(gold_answer) != len(test_taker_output):
+        if test_taker_output and all(gold_ans_key in row for row in test_taker_output):
+            print(
+                "Question cache changed after inference; recovering gold answers "
+                "from the completed inference cache."
+            )
+            gold_answer = copy.deepcopy(test_taker_output)
+        else:
+            raise RuntimeError(
+                f"Question/inference cache mismatch: {len(gold_answer)} vs "
+                f"{len(test_taker_output)}"
+            )
     summary_prev_iteration, history_json = fast_compare_answers(gold_answer, test_taker_output,
                                                                 agent_info, outfile_prefix=outfile_prefix,
                                                                 gold_ans_key=gold_ans_key)
@@ -512,7 +524,8 @@ def generate_dataset_without_docs(line_, agent_info, outfile_prefix,
     except Exception as e:
         print(e)
         print("error in generating more questions, skipping...")
-        print(f'generated {len(ful_lst)} questions')
+        print(f'generated {len(full_lst)} questions')
+        json_questions = []
 
     for json_question in json_questions:
         line = copy.deepcopy(line_)
@@ -541,7 +554,8 @@ def generate_long_questions(line_, agent_info, outfile_prefix, generate_qa_func=
     print(len(paragraph), 'length of paragraph')
     if len(paragraph) == 0:
         print("empty paragraph, skipping...")
-        return {}
+        f.close()
+        return []
 
     full_lst = []
     for start_idx in range(0, len(paragraph), 20):
@@ -550,10 +564,9 @@ def generate_long_questions(line_, agent_info, outfile_prefix, generate_qa_func=
         try:
             json_questions = generate_qa_func(paragraph[start_idx:end_idx], agent_info, line_['additional_requirement'])
             # json_questions = generate_qa_func(paragraph[start_idx:end_idx], agent_info, line_['additional_requirement'])
-        except:
-
-            print("error in generating more questions, skipping...")
-            print(f'generated {len(ful_lst)} questions')
+        except Exception as exc:
+            print(f"error in generating more questions, skipping: {exc}")
+            print(f'generated {len(full_lst)} questions')
             continue  # skip the empty paragraph.
 
         for json_question in json_questions:
@@ -683,6 +696,14 @@ if __name__ == '__main__':
         historical_psg = []
         for iters in range(args.num_iters):
             args.outfile_prefix = args.outfile_prefix1 + str(iters + 1)
+            result_cache = f"{args.outfile_prefix}.compare_answers.json"
+            if os.path.exists(result_cache):
+                print("FOUND completed iteration cache", result_cache)
+                with open(result_cache, "r", encoding="utf-8") as f:
+                    json_dict = json.load(f)
+                history_dict.append(json_dict)
+                print(get_summary_of_results(json_dict, gold_key="gold_answer", verbose=False))
+                continue
             summarized_content = summarize_over_history(history_dict, gold_key='gold_answer', verbose=False)
             history = [summarized_content]
             historical_psg = generate_full_qa(args.theme, agent_info, history, iters + 1,

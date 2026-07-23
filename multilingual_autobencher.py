@@ -427,6 +427,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_helm', type=str, default='yes')  # option that takes a value
     parser.add_argument('--top_p', type=float, default=0.9)  # option that takes a value
     parser.add_argument('--acc_target', type=str, default="0.3--0.5")  # option that takes a value
+    parser.add_argument('--num_iters', type=int, default=8)
 
     parser.add_argument('--outfile_prefix1', type=str, default='att1')  # option that takes a value
 
@@ -463,8 +464,16 @@ if __name__ == '__main__':
         history = []
         history_dict = []
         historical_psg = []
-        for iters in range(8):
+        for iters in range(args.num_iters):
             args.outfile_prefix = args.outfile_prefix1 + str(iters + 1)
+            result_cache = f"{args.outfile_prefix}.compare_answers.json"
+            if os.path.exists(result_cache):
+                print("FOUND completed iteration cache", result_cache)
+                with open(result_cache, "r", encoding="utf-8") as f:
+                    json_dict = json.load(f)
+                history_dict.append(json_dict)
+                print(get_summary_of_results(json_dict, gold_key="gold_answer", verbose=False))
+                continue
             summarized_content = summarize_over_history(history_dict, gold_key='answer', verbose=False)
             history = [summarized_content]
 

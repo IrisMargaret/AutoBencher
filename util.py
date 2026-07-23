@@ -1,282 +1,292 @@
-import os, sys, json
-import glob, torch
-import numpy as np
-import random, re, string, argparse
-from collections import Counter
-import getpass
-from anthropic import Anthropic
+import os
+import time
+from collections import namedtuple
 
-from helm.common.authentication import Authentication
-from helm.common.perspective_api_request import PerspectiveAPIRequest, PerspectiveAPIRequestResult
-from helm.common.request import Request, RequestResult
-from helm.common.tokenization_request import TokenizationRequest, TokenizationRequestResult
-from helm.proxy.accounts import Account
-from helm.proxy.services.remote_service import RemoteService
-
-import datasets
-from collections import namedtuple, defaultdict
-from transformers import set_seed,  AutoModelForSeq2SeqLM, AutoTokenizer, AutoModelForCausalLM, AutoConfig
-import transformers
-import datasets
-import openai, time
+from dotenv import load_dotenv
 from openai import OpenAI
 
 
-# CRFM_KEY = "TODO"
-# openai.api_key = "TODO"
-# anthropic_api_key = "TODO"
-
+load_dotenv()
 
 
 def load_model(modelpath):
-    print(f'loading from {modelpath}')
+    """Load an optional local Hugging Face model.
+
+    API-only DeepSeek runs do not need torch/transformers. Keeping these imports
+    local makes the default installation small and compatible with Python 3.13.
+    """
+    try:
+        import torch
+        import transformers
+    except ImportError as exc:
+        raise RuntimeError(
+            "Local models require optional packages: pip install torch transformers accelerate"
+        ) from exc
+
+    print(f"loading from {modelpath}")
     tokenizer = transformers.AutoTokenizer.from_pretrained(modelpath)
-    tokenizer.padding_side = 'left'
+    tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
-    print('---' * 100, modelpath, '---' * 100)
-    model = transformers.AutoModelForCausalLM.from_pretrained(modelpath, torch_dtype = torch.float16,
-                                                              low_cpu_mem_usage = True,).cuda()
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        modelpath, torch_dtype=torch.float16, low_cpu_mem_usage=True
+    ).cuda()
     return model, tokenizer
 
 
 def load_via_deepspeed(model_name):
-    from transformers.deepspeed import HfDeepSpeedConfig
-    config = AutoConfig.from_pretrained(model_name)
-    world_size = int(os.getenv('WORLD_SIZE', '1'))
-    dtype = config.torch_dtype  # torch.bfloat16 if model_name in ["bigscience/bloom", "bigscience/bigscience-small-testing"] else torch.float16
-    model_hidden_size = config.hidden_size
-    train_batch_size = 1 * world_size
+    try:
+        import deepspeed
+        import torch
+        from transformers import AutoConfig, AutoModelForCausalLM
+    except ImportError as exc:
+        raise RuntimeError(
+            "DeepSpeed loading requires optional packages: torch transformers deepspeed"
+        ) from exc
 
+    config = AutoConfig.from_pretrained(model_name)
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    dtype = config.torch_dtype
+    hidden_size = config.hidden_size
     ds_config = {
-        "fp16": {
-            "enabled": dtype == torch.float16,
-        },
-        "bf16": {
-            "enabled": dtype == torch.bfloat16,
-        },
+        "fp16": {"enabled": dtype == torch.float16},
+        "bf16": {"enabled": dtype == torch.bfloat16},
         "zero_optimization": {
             "stage": 3,
             "overlap_comm": True,
             "contiguous_gradients": True,
-            "reduce_bucket_size": model_hidden_size * model_hidden_size,
-            "stage3_prefetch_bucket_size": 0.9 * model_hidden_size * model_hidden_size,
+            "reduce_bucket_size": hidden_size * hidden_size,
+            "stage3_prefetch_bucket_size": 0.9 * hidden_size * hidden_size,
             "stage3_param_persistence_threshold": 0,
         },
         "steps_per_print": 2000,
-        "train_batch_size": train_batch_size,
+        "train_batch_size": world_size,
         "train_micro_batch_size_per_gpu": 1,
         "wall_clock_breakdown": False,
     }
-
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
-    model = model.eval()
-    ds_engine = deepspeed.initialize(model=model, config_params=ds_config)[0]
-    ds_engine.module.eval()
-    model = ds_engine.module
-    return model
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).eval()
+    engine = deepspeed.initialize(model=model, config_params=ds_config)[0]
+    engine.module.eval()
+    return engine.module
 
 
-def gen_from_prompt(model, tokenizer, prompt, echo_prompt=False,
-                    temperature=0., max_tokens=20, num_completions=1, output_scores=False,
-                    service=None, seed=101, process_func=None, terminate_by_linebreak=True,
-                    verbose=False, use_helm=False, auth=None):
+def _as_request_result(texts):
+    Completion = namedtuple("Completion", ["text"])
+    RequestResult = namedtuple("RequestResult", ["completions", "success", "embedding", "cached"])
+    return RequestResult(
+        completions=[Completion(text=text) for text in texts],
+        success=True,
+        embedding=None,
+        cached=False,
+    )
+
+
+def gen_from_prompt(
+    model,
+    tokenizer,
+    prompt,
+    echo_prompt=False,
+    temperature=0.0,
+    max_tokens=20,
+    num_completions=1,
+    output_scores=False,
+    service=None,
+    seed=101,
+    process_func=None,
+    terminate_by_linebreak=True,
+    verbose=False,
+    use_helm=False,
+    auth=None,
+):
+    del output_scores
     if service is None:
-        assert model is not None
+        if model is None:
+            raise ValueError("A local model or API service is required")
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("Local inference requires torch") from exc
         if process_func is not None:
             prompt = process_func(prompt)
-        prompt_ids = tokenizer(prompt, return_tensors='pt', padding=True)
-        attention_mask = prompt_ids['attention_mask'].to(model.device)
-        prompt_ids = prompt_ids['input_ids'].to(model.device)
+        prompt_ids = tokenizer(prompt, return_tensors="pt", padding=True)
+        attention_mask = prompt_ids["attention_mask"].to(model.device)
+        input_ids = prompt_ids["input_ids"].to(model.device)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            generated_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                temperature=temperature,
+                do_sample=temperature > 0,
+                max_length=max_tokens + input_ids.size(1),
+                num_return_sequences=num_completions,
+                eos_token_id=2,
+                pad_token_id=2,
+            )
+        texts = tokenizer.batch_decode(
+            generated_ids[:, input_ids.size(1) :], skip_special_tokens=True
+        )
+        if terminate_by_linebreak != "no":
+            texts = [text.split("\n")[0] for text in texts]
+        return _as_request_result(texts)
 
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16,): # if True: # LISA_DEBUG
-            generated_ids = model.generate(input_ids=prompt_ids, attention_mask=attention_mask,
-                                           temperature=temperature, do_sample=True,
-                                           max_length=max_tokens + prompt_ids.size(1),
-                                           num_return_sequences=num_completions,
-                                           eos_token_id=2, pad_token_id=2)
-        generated_text = tokenizer.batch_decode(generated_ids[:, prompt_ids.size(1):], skip_special_tokens=True)
-        if terminate_by_linebreak == 'no':
-            generated_text = [x for x in generated_text]
-        else:
-            generated_text = [x.split('\n')[0] for x in generated_text]
+    if model.startswith(("gpt", "deepseek")):
+        texts = query_openai_compatible(
+            client=service,
+            model=model,
+            prompt_lst=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            num_completions=num_completions,
+            verbose=verbose,
+        )
+        return _as_request_result(texts)
 
-        Completion = namedtuple('Completion', ['text'])
-        compl = [Completion(text=x) for x in generated_text]
-        RequestResult = namedtuple('RequestResult', ['completions', 'success', 'embedding', 'cached'])
-        request_result = RequestResult(completions=compl, success=True, embedding=None,
-                                       cached=False)
+    if model.startswith("claude"):
+        texts = query_claude(
+            client=service,
+            model=model,
+            prompt_lst=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            num_completions=num_completions,
+            verbose=verbose,
+        )
+        return _as_request_result(texts)
 
-    elif model.startswith('gpt'):
-        generated_text = query_gpt4(client=service, model=model, prompt_lst=prompt, temperature=temperature, max_tokens=max_tokens,
-                             num_completions=num_completions, random=str(seed), verbose=verbose)  # stop_sequences=['\n']) #
-        # print(generated_text, 'turbo')
-        Completion = namedtuple('Completion', ['text'])
-        compl = [Completion(text=x) for x in generated_text]
-        RequestResult = namedtuple('RequestResult', ['completions', 'success', 'embedding', 'cached'])
-        request_result = RequestResult(completions=compl, success=True, embedding=None,
-                                       cached=False)
-    elif model.startswith('claude'):
-        generated_text = query_claude(client=service, model=model, prompt_lst=prompt, temperature=temperature,
-                                      max_tokens=max_tokens, num_completions=num_completions, random=str(seed), verbose=verbose)
-        # print(generated_text, 'turbo')
-        Completion = namedtuple('Completion', ['text'])
-        compl = [Completion(text=x) for x in generated_text]
-        RequestResult = namedtuple('RequestResult', ['completions', 'success', 'embedding', 'cached'])
-        request_result = RequestResult(completions=compl, success=True, embedding=None,
-                                       cached=False)
-    elif use_helm:
-        assert len(prompt) == 1 # only one prompt
-        request_result = None
-        num_retry = 0
-        max_retry = 5
-        while num_retry < max_retry:
+    if use_helm:
+        from helm.common.request import Request
+
+        if len(prompt) != 1:
+            raise ValueError("HELM supports one prompt per request in this project")
+        for retry in range(5):
             try:
-                request = Request(model=model, prompt=prompt[0], echo_prompt=echo_prompt,  ##"openai/text-davinci-003",
-                                  temperature=temperature, max_tokens=max_tokens,
-                                  num_completions=num_completions, random=str(seed), stop_sequences=['\n']) #
-                request_result = service.make_request(auth, request)
-                break
-            except Exception as e:
-                print(e)
-                print('retrying...')
-                num_retry += 1
+                request = Request(
+                    model=model,
+                    prompt=prompt[0],
+                    echo_prompt=echo_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    num_completions=num_completions,
+                    random=str(seed),
+                    stop_sequences=["\n"],
+                )
+                return service.make_request(auth, request)
+            except Exception:
+                if retry == 4:
+                    raise
                 time.sleep(10)
-        if request_result is None:
-            raise RuntimeError(f"Could not get completion after {max_retry} retries.")
-    else:
-        raise NotImplementedError
-    return request_result
+    raise NotImplementedError(f"Unsupported model: {model}")
 
-def query_claude(client, model, prompt_lst, temperature, max_tokens, num_completions, random, verbose, max_num_retries=5):
-    num_retries = 0
-    result_lst = []
-    # Repeat the query until we get a valid response.
-    message = None
+
+def query_claude(client, model, prompt_lst, temperature, max_tokens, num_completions, verbose, max_num_retries=5):
+    results = []
     for prompt in prompt_lst:
-        while num_retries < max_num_retries:
+        message = None
+        for retry in range(max_num_retries):
             try:
-                if verbose:
-                    print(f"+++++++++++ Model Prompt +++++++++++\n {prompt}")
                 message = client.messages.create(
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        }
-                    ],
+                    messages=[{"role": "user", "content": prompt}],
                     model=model,
                 )
                 break
-            except:  # noqa
-                print("Retrying...")
-                num_retries += 1
+            except Exception:
+                if retry == max_num_retries - 1:
+                    raise
                 time.sleep(10)
-        if message is None:
-            raise RuntimeError(f"Could not get completion after {max_num_retries} retries.")
-
-        result_txt = message.content[0].text
+        text = message.content[0].text.strip()
         if verbose:
-            print(f"+++++++++++ Model Output +++++++++++\n {result_txt}")
-        result_txt = result_txt.strip()
-
-        result_lst.append(result_txt)
-    return result_lst
+            print(text)
+        results.append(text)
+    return results
 
 
-
-def query_gpt4(client, model, prompt_lst, temperature, max_tokens, num_completions, random, verbose, max_num_retries=5):
-    # Randomly select one assistant to be presented first.
-    num_retries = 0
-    result_lst = []
-    # Repeat the query until we get a valid response.
-    completion = None
+def query_openai_compatible(
+    client, model, prompt_lst, temperature, max_tokens, num_completions, verbose, max_num_retries=5
+):
+    results = []
     for prompt in prompt_lst:
-        while num_retries < max_num_retries:
+        completion = None
+        for retry in range(max_num_retries):
             try:
-                if verbose:
-                    print(f"+++++++++++ Model Prompt +++++++++++\n {prompt}")
-                completion = client.chat.completions.create(
-                    model=model, #"gpt-4", #"gpt-3.5-turbo",
+                request_kwargs = dict(
+                    model=model,
                     messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful AI agent.",
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        },
+                        {"role": "system", "content": "You are a helpful AI agent."},
+                        {"role": "user", "content": prompt},
                     ],
                     temperature=temperature,
                     max_tokens=max_tokens,
                     n=num_completions,
-                    # stop=["\n"],
                 )
+                # V4 models can spend the entire small token budget on hidden
+                # reasoning. AutoBencher expects the original non-thinking
+                # ChatCompletions behavior, especially for 20-token judgments.
+                if model.startswith("deepseek-v4"):
+                    request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                completion = client.chat.completions.create(**request_kwargs)
+                content = completion.choices[0].message.content
+                if not content or not content.strip():
+                    raise ValueError("API returned an empty completion")
                 break
-            except Exception as e:  # noqa
-                print(e)
-                print("Retrying...")
-                num_retries += 1
+            except Exception as exc:
+                if retry == max_num_retries - 1:
+                    raise RuntimeError(
+                        f"API request failed after {max_num_retries} attempts: {exc}"
+                    ) from exc
+                print(f"API request failed ({type(exc).__name__}); retrying...")
                 time.sleep(10)
-
-        if completion is None:
-            raise RuntimeError(f"Could not get completion after {max_num_retries} retries.")
-
-        result_txt = completion.choices[0].message.content
-
+        text = content.strip()
         if verbose:
-            usage = completion.usage
-            print(usage)
-            total_tokens = usage.total_tokens
-            print(total_tokens, 'total tokens')
-
-        if verbose:
-            print(f"+++++++++++ Model Output +++++++++++\n {result_txt}")
-        result_txt = result_txt.strip()
-
-        result_lst.append(result_txt)
-    return result_lst
+            print(text)
+        results.append(text)
+    return results
 
 
+# Backward-compatible name used by older callers.
+query_gpt4 = query_openai_compatible
 
 
 def helm_process_args(experiment_model):
-
-    # An example of how to use the request API.
-    # api_key = getpass.getpass(prompt="Enter a valid API key: ")
-    auth = Authentication(api_key=CRFM_KEY)
+    try:
+        from helm.common.authentication import Authentication
+        from helm.proxy.services.remote_service import RemoteService
+    except ImportError as exc:
+        raise RuntimeError("HELM mode requires the optional crfm-helm package") from exc
+    api_key = os.getenv("CRFM_API_KEY")
+    if not api_key:
+        raise RuntimeError("CRFM_API_KEY is not configured")
+    auth = Authentication(api_key=api_key)
     service = RemoteService("https://crfm-models.stanford.edu")
-
-    # Access account and show my current quotas and usages
-    account: Account = service.get_account(auth)
-    print(account.usages)
+    print(service.get_account(auth).usages)
     return experiment_model.lower(), None, service, auth
 
 
-
 def process_args_for_models(experiment_model):
-
-    if experiment_model.startswith('gpt'):
-        modelpath = experiment_model
-        model_choice = modelpath
-        tokenizer_choice = None
-        modelpath_name = modelpath
-        model_client = OpenAI(api_key=openai.api_key, organization=openai.organization)
-
-
-    elif experiment_model.startswith('claude'):
-        client = Anthropic(
-            api_key=anthropic_api_key,
+    if experiment_model.startswith("deepseek"):
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY is not configured; add it to .env")
+        model_client = OpenAI(
+            api_key=api_key,
+            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         )
-        model_choice = experiment_model
-        tokenizer_choice = None
-        model_client = client
-        modelpath_name = experiment_model
-    else:
-        model_choice, tokenizer_choice = load_model(experiment_model)
-        modelpath_name = os.path.basename(experiment_model).replace('/', '_')
-        model_client = None
+        return experiment_model, None, experiment_model, model_client
 
-    return model_choice, tokenizer_choice, modelpath_name, model_client
+    if experiment_model.startswith("gpt"):
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        model_client = OpenAI(api_key=api_key, organization=os.getenv("OPENAI_ORG_ID"))
+        return experiment_model, None, experiment_model, model_client
+
+    if experiment_model.startswith("claude"):
+        from anthropic import Anthropic
+
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+        return experiment_model, None, experiment_model, Anthropic(api_key=api_key)
+
+    model, tokenizer = load_model(experiment_model)
+    return model, tokenizer, os.path.basename(experiment_model).replace("/", "_"), None
