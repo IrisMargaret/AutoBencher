@@ -67,9 +67,32 @@ def execute_code(code, lang="python", timeout=120):
 
 def extract_json_v2(json_text, outfilename):
     response = json_text.replace("TERMINATE", "").strip()
-    candidates = [code for language, code in extract_code(response) if language.lower() == "json"]
-    if not candidates and response.startswith(("[", "{")):
-        candidates = [response]
+    fenced_blocks = extract_code(response)
+    candidates = [
+        code for language, code in fenced_blocks if language.lower() == "json"
+    ]
+    candidates.extend(
+        code
+        for language, code in fenced_blocks
+        if language.lower() != "json" and code.startswith(("[", "{"))
+    )
+    if response.startswith(("[", "{")):
+        candidates.append(response)
+
+    # Some models add a short explanation even when asked for JSON only. Find
+    # the first decodable array/object instead of failing the entire benchmark.
+    if not candidates:
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"[\[{]", response):
+            try:
+                _, end = decoder.raw_decode(response[match.start():])
+            except json.JSONDecodeError:
+                continue
+            candidates.append(response[match.start():match.start() + end])
+            break
+
+    # Keep the original order while avoiding duplicate parsing of fenced JSON.
+    candidates = list(dict.fromkeys(candidate.strip() for candidate in candidates))
     if not candidates:
         raise ValueError("Model response did not contain a JSON block")
 
@@ -91,11 +114,73 @@ def extract_json_v2(json_text, outfilename):
         detail = errors[-1] if errors else "the JSON value was empty"
         raise ValueError(f"Model returned no usable JSON: {detail}")
     if outfilename is not None:
-        with open(outfilename, "w", encoding="utf-8") as f:
+        temporary_outfile = f"{outfilename}.tmp"
+        with open(temporary_outfile, "w", encoding="utf-8") as f:
             json.dump(parsed_blocks, f, ensure_ascii=False)
+        os.replace(temporary_outfile, outfilename)
     return parsed_blocks
 
-def test_taker_inference(test_model_info, problem_json, outfile, bsz=1, temperature=0.01, max_length=50):
+def _questions_match(expected, cached):
+    """Return whether a cached inference belongs to the expected question."""
+    required_keys = ("id", "question")
+    optional_keys = ("answer", "category", "subcat")
+    if any(cached.get(key) != expected.get(key) for key in required_keys):
+        return False
+    return all(
+        key not in expected or cached.get(key) == expected.get(key)
+        for key in optional_keys
+    )
+
+
+def _load_valid_inference_cache(outfile, problem_json):
+    """Load the valid cache prefix and discard a corrupt or stale suffix."""
+    if not os.path.exists(outfile):
+        return []
+
+    valid_results = []
+    cache_needs_rewrite = False
+    with open(outfile, "r", encoding="utf-8") as in_handle:
+        for index, raw_line in enumerate(in_handle):
+            if index >= len(problem_json):
+                cache_needs_rewrite = True
+                break
+            try:
+                cached_line = json.loads(raw_line)
+            except json.JSONDecodeError:
+                cache_needs_rewrite = True
+                break
+            if not _questions_match(problem_json[index], cached_line):
+                cache_needs_rewrite = True
+                break
+            valid_results.append(cached_line)
+
+    # Canonicalize a partial cache before appending so even a valid final JSONL
+    # record without a trailing newline cannot be concatenated with the next one.
+    if cache_needs_rewrite or (
+        valid_results and len(valid_results) < len(problem_json)
+    ):
+        temporary_outfile = f"{outfile}.tmp"
+        with open(temporary_outfile, "w", encoding="utf-8") as out_handle:
+            for line in valid_results:
+                print(json.dumps(line, ensure_ascii=False), file=out_handle)
+        os.replace(temporary_outfile, outfile)
+    if cache_needs_rewrite:
+        print(
+            f"Discarded an invalid inference-cache suffix; "
+            f"kept {len(valid_results)} verified records."
+        )
+    return valid_results
+
+
+def test_taker_inference(
+    test_model_info,
+    problem_json,
+    outfile,
+    bsz=1,
+    temperature=0.01,
+    max_length=50,
+    existing_results=None,
+):
     if len(test_model_info) == 3:
         model_choice, tokenizer_choice, client_choice = test_model_info
         auth = None
@@ -104,53 +189,60 @@ def test_taker_inference(test_model_info, problem_json, outfile, bsz=1, temperat
         model_choice, tokenizer_choice, client_choice, auth = test_model_info
         use_helm = True
 
-    print(f'writing to {outfile}')
-    out_handle = open(outfile, 'w')
-    full_result_lst = []
-    batch_lst, line_lst = [], []
-    for line in tqdm.tqdm(problem_json):
-        line['prompt'] = "Output just with the final answer to the question.\nQuestion:" + line[
-            'question'] + "\n" + "Answer:"
-        line_lst.append(line)
-        batch_lst.append(line['prompt'])
-        if len(batch_lst) < bsz:
-            continue  # batch not full yet
-        request_result = gen_from_prompt(model=model_choice, tokenizer=tokenizer_choice, prompt=batch_lst,
-                                         echo_prompt=False, temperature=temperature, max_tokens=max_length,
-                                         service=client_choice,
-                                         terminate_by_linebreak='no', use_helm=use_helm, auth=auth,
-                                         verbose=False)
+    existing_results = list(existing_results or [])
+    if len(existing_results) > len(problem_json):
+        raise ValueError("Inference cache is longer than the question list")
+    if len(existing_results) == len(problem_json):
+        return existing_results
 
-        for line, xx in zip(line_lst, request_result.completions):
-            # print(line['prompt'])
-            # print('-' * 100)
-            # print(xx.text)
-            line['test_taker_response'] = xx.text
-            print(json.dumps(line), file=out_handle)
-            full_result_lst.append(line)
-        batch_lst, line_lst = [], []
-    if len(batch_lst) > 0:
-        request_result = gen_from_prompt(model=model_choice, tokenizer=tokenizer_choice, prompt=batch_lst,
-                                         echo_prompt=False, temperature=temperature, max_tokens=max_length,
-                                         service=args.model_auth, terminate_by_linebreak='no', use_helm=use_helm,
-                                         auth=auth, verbose=False)
-        for line, xx in zip(line_lst, request_result.completions):
-            line['test_taker_response'] = xx.text
-            print(json.dumps(line), file=out_handle)
-            full_result_lst.append(line)
-    out_handle.close()
+    file_mode = "a" if existing_results else "w"
+    print(
+        f"writing to {outfile} "
+        f"(resuming at {len(existing_results) + 1}/{len(problem_json)})"
+    )
+    full_result_lst = existing_results
+    batch_lst, line_lst = [], []
+    with open(outfile, file_mode, encoding="utf-8") as out_handle:
+        for source_line in tqdm.tqdm(problem_json[len(existing_results):]):
+            line = copy.deepcopy(source_line)
+            line['prompt'] = "Output just with the final answer to the question.\nQuestion:" + line[
+                'question'] + "\n" + "Answer:"
+            line_lst.append(line)
+            batch_lst.append(line['prompt'])
+            if len(batch_lst) < bsz:
+                continue  # batch not full yet
+            request_result = gen_from_prompt(model=model_choice, tokenizer=tokenizer_choice, prompt=batch_lst,
+                                             echo_prompt=False, temperature=temperature, max_tokens=max_length,
+                                             service=client_choice,
+                                             terminate_by_linebreak='no', use_helm=use_helm, auth=auth,
+                                             verbose=False)
+
+            for line, xx in zip(line_lst, request_result.completions):
+                line['test_taker_response'] = xx.text
+                print(
+                    json.dumps(line, ensure_ascii=False),
+                    file=out_handle,
+                    flush=True,
+                )
+                full_result_lst.append(line)
+            batch_lst, line_lst = [], []
+        if len(batch_lst) > 0:
+            request_result = gen_from_prompt(model=model_choice, tokenizer=tokenizer_choice, prompt=batch_lst,
+                                             echo_prompt=False, temperature=temperature, max_tokens=max_length,
+                                             service=client_choice, terminate_by_linebreak='no', use_helm=use_helm,
+                                             auth=auth, verbose=False)
+            for line, xx in zip(line_lst, request_result.completions):
+                line['test_taker_response'] = xx.text
+                print(
+                    json.dumps(line, ensure_ascii=False),
+                    file=out_handle,
+                    flush=True,
+                )
+                full_result_lst.append(line)
     return full_result_lst
 
 
 def _generate_lm_answers(question_inputs, test_model_info, agent_model_info, outfile_prefix='att1'):
-    if os.path.exists(f"{outfile_prefix}.test_taker_inference.json"):
-        full_result_lst = []
-        with open(f"{outfile_prefix}.test_taker_inference.json", 'r') as in_handle:
-            for line in in_handle:
-                line = json.loads(line.strip())
-                full_result_lst.append(line)
-        return full_result_lst
-
     # test_taker_lm, test_taker_tokenizer, test_taker_client = test_model_info
     if isinstance(question_inputs, list) or isinstance(question_inputs, dict):
         question_inputs_str = json.dumps(question_inputs, indent=2)
@@ -166,8 +258,20 @@ def _generate_lm_answers(question_inputs, test_model_info, agent_model_info, out
     else:
         json_dict = question_inputs
 
+    inference_file = f"{outfile_prefix}.test_taker_inference.json"
+    cached_results = _load_valid_inference_cache(inference_file, json_dict)
+    if len(cached_results) == len(json_dict):
+        print(f"FOUND completed inference cache {inference_file}")
+        return cached_results
+    if cached_results:
+        print(
+            f"FOUND partial inference cache with {len(cached_results)}/"
+            f"{len(json_dict)} records; resuming."
+        )
+
     full_result_lst = test_taker_inference(test_model_info, json_dict,
-                                           outfile=f"{outfile_prefix}.test_taker_inference.json")
+                                           outfile=inference_file,
+                                           existing_results=cached_results)
 
     return full_result_lst
 

@@ -1,0 +1,174 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import math_autobencher
+import tool_util
+from tool_util import extract_json_v2
+
+
+class ExtractJsonTests(unittest.TestCase):
+    def test_extracts_json_from_supported_model_formats(self):
+        expected = [[{"id": "1", "question": "1 + 1", "answer": "2"}]]
+        responses = [
+            '```json\n[{"id": "1", "question": "1 + 1", "answer": "2"}]\n```',
+            '```\n[{"id": "1", "question": "1 + 1", "answer": "2"}]\n```',
+            '[{"id": "1", "question": "1 + 1", "answer": "2"}]',
+            'Here is the result:\n[{"id": "1", "question": "1 + 1", "answer": "2"}]\nDone.',
+        ]
+        for response in responses:
+            with self.subTest(response=response):
+                self.assertEqual(extract_json_v2(response, None), expected)
+
+    def test_writes_cache_atomically(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir, "result.json")
+            parsed = extract_json_v2('```json\n[{"id": 1}]\n```', output)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), parsed)
+            self.assertFalse(Path(f"{output}.tmp").exists())
+
+
+class MathPlanRetryTests(unittest.TestCase):
+    def test_invalid_response_is_retried_and_valid_plan_is_cached(self):
+        completion = type("Completion", (), {})
+        first = completion()
+        first.text = "I cannot provide JSON."
+        second = completion()
+        plan_items = [
+            {
+                "id": str(index),
+                "category": "Arithmetic",
+                "subcategory_description": f"subcategory {index}",
+                "difficulty": "2",
+            }
+            for index in range(1, 6)
+        ]
+        second.text = f"```json\n{json.dumps(plan_items)}\n```"
+        request_result = type("RequestResult", (), {})
+        first_result = request_result()
+        first_result.completions = [first]
+        second_result = request_result()
+        second_result.completions = [second]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration."))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                side_effect=[first_result, second_result],
+            ) as generate:
+                result = math_autobencher._generate_cat_with_aim(
+                    "0.1--0.3",
+                    "model",
+                    None,
+                    object(),
+                    [],
+                    1,
+                    prefix,
+                )
+
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(result[0][0]["category"], "Arithmetic")
+            cache = Path(f"{prefix}.question_plan_with_aim.json")
+            self.assertEqual(json.loads(cache.read_text(encoding="utf-8")), result)
+            self.assertTrue(
+                Path(f"{prefix}.question_plan_with_aim.attempt1.txt").exists()
+            )
+
+    def test_oversized_plan_is_limited_to_requested_five_items(self):
+        items = [
+            {
+                "id": str(index),
+                "category": "Arithmetic",
+                "subcategory_description": f"subcategory {index}",
+            }
+            for index in range(1, 8)
+        ]
+        self.assertEqual(
+            len(math_autobencher._normalize_math_plan([items])[0]),
+            5,
+        )
+
+
+class InferenceResumeTests(unittest.TestCase):
+    @staticmethod
+    def _questions():
+        return [
+            {
+                "id": str(index),
+                "question": f"What is {index} + 1?",
+                "answer": str(index + 1),
+                "category": "Arithmetic",
+            }
+            for index in range(1, 4)
+        ]
+
+    def test_partial_cache_is_resumed_without_repeating_completed_items(self):
+        questions = self._questions()
+        cached = dict(questions[0], test_taker_response="2")
+        completion = type("Completion", (), {})
+        request_result = type("RequestResult", (), {})
+
+        def result(text):
+            item = completion()
+            item.text = text
+            wrapper = request_result()
+            wrapper.completions = [item]
+            return wrapper
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration"))
+            inference_file = Path(f"{prefix}.test_taker_inference.json")
+            inference_file.write_text(
+                json.dumps(cached),
+                encoding="utf-8",
+            )
+            with patch.object(
+                tool_util,
+                "gen_from_prompt",
+                side_effect=[result("3"), result("4")],
+            ) as generate:
+                answers = tool_util._generate_lm_answers(
+                    questions,
+                    ("model", None, object()),
+                    None,
+                    prefix,
+                )
+
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(len(answers), 3)
+            saved = [
+                json.loads(line)
+                for line in inference_file.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(saved), 3)
+            self.assertEqual(
+                [line["question"] for line in saved],
+                [line["question"] for line in questions],
+            )
+
+    def test_stale_cache_suffix_is_discarded(self):
+        questions = self._questions()
+        valid = dict(questions[0], test_taker_response="2")
+        stale = dict(questions[1], question="different", test_taker_response="3")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            inference_file = Path(temp_dir, "inference.json")
+            inference_file.write_text(
+                f"{json.dumps(valid)}\n{json.dumps(stale)}\n",
+                encoding="utf-8",
+            )
+            loaded = tool_util._load_valid_inference_cache(
+                str(inference_file),
+                questions,
+            )
+            self.assertEqual(loaded, [valid])
+            self.assertEqual(
+                len(inference_file.read_text(encoding="utf-8").splitlines()),
+                1,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

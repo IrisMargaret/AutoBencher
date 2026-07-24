@@ -171,6 +171,44 @@ def summarize_over_history(history_json_dict, gold_key="python_answer", verbose=
     # print(str_summary)
     return str_summary
 
+MATH_PLAN_SIZE = 5
+
+
+def _write_json_atomic(data, output_file):
+    temporary_output = f"{output_file}.tmp"
+    with open(temporary_output, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(temporary_output, output_file)
+
+
+def _normalize_math_plan(extracted_json):
+    if (
+        not isinstance(extracted_json, list)
+        or len(extracted_json) != 1
+        or not isinstance(extracted_json[0], list)
+    ):
+        raise ValueError("Expected one JSON array for the math plan")
+    plan = extracted_json[0]
+    if len(plan) < MATH_PLAN_SIZE:
+        raise ValueError(
+            f"Expected at least {MATH_PLAN_SIZE} math-plan items, got {len(plan)}"
+        )
+    required_keys = {"category", "subcategory_description"}
+    if any(
+        not isinstance(item, dict) or not required_keys.issubset(item)
+        for item in plan
+    ):
+        raise ValueError(
+            "Each plan item must contain category and subcategory_description"
+        )
+    if len(plan) > MATH_PLAN_SIZE:
+        print(
+            f"Model returned {len(plan)} math-plan items; "
+            f"using the requested first {MATH_PLAN_SIZE}."
+        )
+    return [plan[:MATH_PLAN_SIZE]]
+
+
 def _generate_cat_with_aim(aim, agent_lm, agent_tokenizer, agent_client, history, iters, outfile_prefix='att1'):
     context = """ Your goal is to come up with comprehensive categories of math questions, and then efficiently find the subcategories within that achieve close to AIM accuracy, for each category of math questions. 
 In each iteration, you should come up with a plan towards generating questions, and write the plan in a json file. 
@@ -216,16 +254,43 @@ It's helpful to first come up with a plan for this iteration, and then write the
     else:
         context += "\n".join(history) + "\nPlease start with iteration {}. Remember your goal is to find the subcategory with accuracy {} for each category.".format(iters, aim)
     context = DEFAULT_JSON_MESSAGE + context
-    # extract the json file from the message
-    request_result = gen_from_prompt(model=agent_lm, tokenizer=agent_tokenizer, prompt=[context],
-                                     echo_prompt=False, temperature=0.0, max_tokens=2000,
-                                     process_func=None, service=agent_client,
-                                     terminate_by_linebreak='no', )
-    response = request_result.completions[0].text
-
-    extracted_json = extract_json_v2(response, f"{outfile_prefix}.question_plan_with_aim.json")
-
-    return extracted_json
+    output_file = f"{outfile_prefix}.question_plan_with_aim.json"
+    last_error = None
+    for attempt in range(1, 4):
+        retry_instruction = ""
+        if attempt > 1:
+            retry_instruction = (
+                "\nYour previous response could not be parsed. Return only one "
+                "complete JSON array in a ```json code block. Do not include "
+                "analysis, comments, placeholders, or text outside the block."
+            )
+        request_result = gen_from_prompt(
+            model=agent_lm,
+            tokenizer=agent_tokenizer,
+            prompt=[context + retry_instruction],
+            echo_prompt=False,
+            temperature=0.0,
+            max_tokens=4096,
+            process_func=None,
+            service=agent_client,
+            terminate_by_linebreak='no',
+        )
+        response = request_result.completions[0].text
+        try:
+            extracted_json = extract_json_v2(response, None)
+            extracted_json = _normalize_math_plan(extracted_json)
+            _write_json_atomic(extracted_json, output_file)
+            return extracted_json
+        except (ValueError, IndexError, TypeError) as exc:
+            last_error = exc
+            print(f"Math plan generation attempt {attempt}/3 failed: {exc}")
+            with open(
+                f"{outfile_prefix}.question_plan_with_aim.attempt{attempt}.txt",
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(response)
+    raise RuntimeError("Failed to generate a valid math plan after 3 attempts") from last_error
 
 
 
@@ -268,17 +333,33 @@ Do not write any explanation before or after the JSON block.
     last_error = None
     valid_json = False
     for attempt in range(1, 4):
-        request_result = gen_from_prompt(model=agent_lm, tokenizer=agent_tokenizer, prompt=[context],
+        retry_instruction = ""
+        if attempt > 1:
+            retry_instruction = (
+                "\nYour previous response could not be parsed. Return only one "
+                "complete JSON array in a ```json code block. Do not include "
+                "analysis, comments, placeholders, or text outside the block."
+            )
+        request_result = gen_from_prompt(model=agent_lm, tokenizer=agent_tokenizer, prompt=[context + retry_instruction],
                                          echo_prompt=False, temperature=0.0, max_tokens=8192,
                                          process_func=None, service=agent_client,
                                          terminate_by_linebreak='no', )
         response = request_result.completions[0].text
         try:
-            extracted_json = extract_json_v2(
-                response, f"{outfile_prefix}.questions.json"
-            )
-            if not isinstance(extracted_json[0], list) or not extracted_json[0]:
+            extracted_json = extract_json_v2(response, None)
+            questions = extracted_json[0]
+            if not isinstance(questions, list) or not questions:
                 raise ValueError("Expected a non-empty list of math questions")
+            required_keys = {"id", "question", "answer"}
+            if any(
+                not isinstance(item, dict) or not required_keys.issubset(item)
+                for item in questions
+            ):
+                raise ValueError(
+                    "Each generated question must contain id, question, and answer"
+                )
+            output_file = f"{outfile_prefix}.questions.json"
+            _write_json_atomic(extracted_json, output_file)
             valid_json = True
             break
         except (ValueError, IndexError, TypeError) as exc:
@@ -302,10 +383,13 @@ def _ask_question_v3(agent_info, history, iters, outfile_prefix, aim_acc=None):
 
     else:
         print('FOUND THE PLAN FILE', plan_outfile)
-        with open(plan_outfile, 'r') as f:
+        with open(plan_outfile, 'r', encoding="utf-8") as f:
             plan_json = json.load(f)
-    if len(plan_json) == 1: #remove the outer bracket.
-        plan_json = plan_json[0]
+        normalized_plan = _normalize_math_plan(plan_json)
+        if normalized_plan != plan_json:
+            _write_json_atomic(normalized_plan, plan_outfile)
+        plan_json = normalized_plan
+    plan_json = plan_json[0]
 
     question_json_full = []
     for idx, plan_line in enumerate(plan_json):
@@ -363,6 +447,12 @@ def test_and_eval(question_json, outfile_prefix, test_taker_info, agent_info, to
                                              test_taker_info,
                                              agent_info,
                                              outfile_prefix = outfile_prefix)
+    if len(question_json_copy2) != len(test_taker_output):
+        raise RuntimeError(
+            "Inference cache is incomplete after generation: "
+            f"{len(test_taker_output)}/{len(question_json_copy2)} records. "
+            "Rerun the same command to resume."
+        )
     if gold_ans_key == 'python_answer':
         question_json_copy2 = solve_with_python(question_json, outfile_prefix, agent_info)
 
