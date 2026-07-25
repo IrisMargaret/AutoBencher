@@ -104,6 +104,36 @@ Select another model if the API account exposes it:
 python run_scripts.py math --model deepseek-v4-pro --num-iters 1
 ```
 
+The agent and test-taker can use different providers. Ollama model tags (model
+names containing a tag such as `qwen2.5:7b-instruct`) are automatically sent
+to Ollama's native local API:
+
+```powershell
+python run_scripts.py math `
+  --agent_modelname deepseek-v4-pro `
+  --test_taker_modelname qwen2.5:7b-instruct `
+  --exp_mode autobencher `
+  --use_helm no `
+  --num_iters 2 `
+  --outfile_prefix1 math_test/qwen7b_dsagent.0.3. `
+  --acc_target 0.1--0.3
+```
+
+The default Ollama endpoint is `http://localhost:11434`. Before the first
+question, AutoBencher preloads the selected model and keeps it loaded for 30
+minutes. Transient model-runner and HTTP 502 failures are retried up to 10
+times. This mode does not require PyTorch, Transformers, or Accelerate.
+
+These optional `.env` settings customize Ollama behavior:
+
+```dotenv
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_KEEP_ALIVE=30m
+OLLAMA_MAX_RETRIES=10
+OLLAMA_RETRY_DELAY_SECONDS=5
+OLLAMA_REQUEST_TIMEOUT=300
+```
+
 Activation is optional if you call the environment's interpreter directly. On
 Windows, for example:
 
@@ -148,6 +178,23 @@ the failed JSON stage will retry automatically. Inspect the related
 Rerun the same benchmark command. The inference cache is checked against the
 current questions, any invalid suffix is discarded, and generation resumes
 from the first missing record.
+
+### Ollama returns HTTP 502
+
+AutoBencher now preloads Ollama models through `/api/generate`, uses the native
+`/api/chat` endpoint, keeps the model resident, and retries transient failures.
+Rerun the exact same command after updating; generated questions and completed
+inference records are reused.
+
+Confirm that Ollama is running and the requested model is installed:
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/tags
+```
+
+If all retries still fail, free enough RAM/VRAM for the selected model or use a
+smaller Ollama model. The final error now includes Ollama's response detail and
+the endpoint that was used.
 
 ### PowerShell cannot activate `.venv`
 

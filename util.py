@@ -2,11 +2,147 @@ import os
 import time
 from collections import namedtuple
 
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
 
 load_dotenv()
+
+
+def _ollama_model_name(model_name):
+    """Return the Ollama model id when the CLI value uses Ollama syntax."""
+    if model_name.startswith("ollama/"):
+        return model_name.removeprefix("ollama/")
+
+    drive, _ = os.path.splitdrive(model_name)
+    if ":" in model_name and not drive:
+        return model_name
+    return None
+
+
+def _ollama_base_url():
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    return base_url
+
+
+class OllamaService:
+    """Small native Ollama client with explicit preload and retry support."""
+
+    def __init__(self, base_url=None, api_key=None):
+        self.base_url = (base_url or _ollama_base_url()).rstrip("/")
+        self.keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+        self.max_retries = int(os.getenv("OLLAMA_MAX_RETRIES", "10"))
+        self.retry_delay = float(os.getenv("OLLAMA_RETRY_DELAY_SECONDS", "5"))
+        self.request_timeout = float(os.getenv("OLLAMA_REQUEST_TIMEOUT", "300"))
+        self.session = requests.Session()
+        if api_key:
+            self.session.headers["Authorization"] = f"Bearer {api_key}"
+        self.loaded_models = set()
+
+
+def _ollama_error_detail(response):
+    try:
+        payload = response.json()
+        return payload.get("error") or response.text
+    except (ValueError, AttributeError):
+        return getattr(response, "text", "")
+
+
+def _request_ollama_json(service, path, payload):
+    last_error = None
+    for attempt in range(1, service.max_retries + 1):
+        response = None
+        try:
+            response = service.session.post(
+                f"{service.base_url}{path}",
+                json=payload,
+                timeout=(5, service.request_timeout),
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("error"):
+                raise RuntimeError(result["error"])
+            return result
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            detail = _ollama_error_detail(exc.response)
+            last_error = f"HTTP {status}: {detail or exc}"
+            if status is not None and 400 <= status < 500 and status not in {408, 429}:
+                raise RuntimeError(
+                    f"Ollama rejected the request for model {payload.get('model')!r}: "
+                    f"{last_error}. Check that the model is installed."
+                ) from exc
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            last_error = str(exc)
+
+        if attempt < service.max_retries:
+            print(
+                f"Ollama request failed ({attempt}/{service.max_retries}): "
+                f"{last_error}; retrying in {service.retry_delay:g}s..."
+            )
+            time.sleep(service.retry_delay)
+
+    raise RuntimeError(
+        f"Ollama request failed after {service.max_retries} attempts: {last_error}. "
+        f"Verify that Ollama is running at {service.base_url} and has enough free memory."
+    )
+
+
+def query_ollama(
+    service,
+    model,
+    prompt_lst,
+    temperature,
+    max_tokens,
+    num_completions,
+    verbose,
+):
+    # Existing callers only consume the first completion. Preserve that
+    # behavior while using Ollama's native endpoint.
+    del num_completions
+
+    if model not in service.loaded_models:
+        print(f"Preloading Ollama model {model}...")
+        _request_ollama_json(
+            service,
+            "/api/generate",
+            {
+                "model": model,
+                "stream": False,
+                "keep_alive": service.keep_alive,
+            },
+        )
+        service.loaded_models.add(model)
+
+    results = []
+    for prompt in prompt_lst:
+        response = _request_ollama_json(
+            service,
+            "/api/chat",
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful AI agent."},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+                "keep_alive": service.keep_alive,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                },
+            },
+        )
+        text = response.get("message", {}).get("content", "").strip()
+        if not text:
+            raise RuntimeError("Ollama returned an empty completion")
+        if verbose:
+            print(text)
+        results.append(text)
+    return results
 
 
 def load_model(modelpath):
@@ -128,8 +264,8 @@ def gen_from_prompt(
             texts = [text.split("\n")[0] for text in texts]
         return _as_request_result(texts)
 
-    if model.startswith(("gpt", "deepseek")):
-        texts = query_openai_compatible(
+    if model.startswith("claude"):
+        texts = query_claude(
             client=service,
             model=model,
             prompt_lst=prompt,
@@ -140,8 +276,22 @@ def gen_from_prompt(
         )
         return _as_request_result(texts)
 
-    if model.startswith("claude"):
-        texts = query_claude(
+    if isinstance(service, OllamaService):
+        texts = query_ollama(
+            service=service,
+            model=model,
+            prompt_lst=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            num_completions=num_completions,
+            verbose=verbose,
+        )
+        return _as_request_result(texts)
+
+    # DeepSeek, OpenAI, and Ollama all expose the OpenAI Chat Completions
+    # interface. A non-HELM service that reaches this point uses that protocol.
+    if not use_helm:
+        texts = query_openai_compatible(
             client=service,
             model=model,
             prompt_lst=prompt,
@@ -263,6 +413,13 @@ def helm_process_args(experiment_model):
 
 
 def process_args_for_models(experiment_model):
+    ollama_model = _ollama_model_name(experiment_model)
+    if ollama_model is not None:
+        model_client = OllamaService(
+            api_key=os.getenv("OLLAMA_API_KEY"),
+        )
+        return ollama_model, None, ollama_model, model_client
+
     if experiment_model.startswith("deepseek"):
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:

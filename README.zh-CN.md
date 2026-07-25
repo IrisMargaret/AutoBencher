@@ -100,6 +100,34 @@ python run_scripts.py math --num-iters 1
 python run_scripts.py math --model deepseek-v4-pro --num-iters 1
 ```
 
+agent 和 test-taker 可以使用不同的模型服务。带 Ollama 标签的模型名（例如
+`qwen2.5:7b-instruct`）会自动通过 Ollama 原生本地 API 调用：
+
+```powershell
+python run_scripts.py math `
+  --agent_modelname deepseek-v4-pro `
+  --test_taker_modelname qwen2.5:7b-instruct `
+  --exp_mode autobencher `
+  --use_helm no `
+  --num_iters 2 `
+  --outfile_prefix1 math_test/qwen7b_dsagent.0.3. `
+  --acc_target 0.1--0.3
+```
+
+Ollama 默认地址为 `http://localhost:11434`。程序会在第一道题之前预热模型，并让模型
+保持加载 30 分钟；模型进程临时异常或 HTTP 502 最多自动重试 10 次。Ollama 模式不需要
+安装 `torch`、`transformers` 或 `accelerate`。
+
+可以在 `.env` 中使用以下可选配置：
+
+```dotenv
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_KEEP_ALIVE=30m
+OLLAMA_MAX_RETRIES=10
+OLLAMA_RETRY_DELAY_SECONDS=5
+OLLAMA_REQUEST_TIMEOUT=300
+```
+
 不激活虚拟环境也可以直接调用其中的解释器。例如 Windows PowerShell：
 
 ```powershell
@@ -137,6 +165,21 @@ python run_scripts.py math --model deepseek-v4-pro --num-iters 1
 
 使用完全相同的命令重新运行。程序会将推理缓存与当前问题逐条核对，丢弃无效的尾部内容，
 并从第一条缺失记录继续生成。
+
+### Ollama 返回 HTTP 502
+
+程序现在会通过 `/api/generate` 预热 Ollama 模型，使用原生 `/api/chat` 接口推理，
+保持模型常驻，并自动重试临时错误。更新代码后，使用完全相同的命令重新运行即可；已经
+生成的问题和完成的推理记录都会复用。
+
+可以通过以下命令确认 Ollama 正在运行，并检查所需模型是否已经安装：
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/tags
+```
+
+如果重试后仍然失败，请释放足够的内存或显存，或者改用更小的 Ollama 模型。最终错误信息
+现在会包含 Ollama 返回的详细内容以及实际使用的服务地址。
 
 ### PowerShell 无法激活 `.venv`
 
