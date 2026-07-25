@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 import math_autobencher
 import tool_util
-from tool_util import extract_json_v2
+from tool_util import (
+    ERROR_TAGS,
+    clean_redundant_files,
+    dump_standard_json,
+    extract_json_v2,
+    manage_hard_pool,
+)
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -72,9 +78,15 @@ class MathPlanRetryTests(unittest.TestCase):
             self.assertEqual(generate.call_count, 2)
             self.assertEqual(result[0][0]["category"], "Arithmetic")
             cache = Path(f"{prefix}.question_plan_with_aim.json")
-            self.assertEqual(json.loads(cache.read_text(encoding="utf-8")), result)
+            self.assertEqual(
+                json.loads(cache.read_text(encoding="utf-8")), result[0]
+            )
             self.assertTrue(
-                Path(f"{prefix}.question_plan_with_aim.attempt1.txt").exists()
+                Path(
+                    temp_dir,
+                    "temp_log",
+                    f"{Path(prefix).name}.question_plan_with_aim.attempt1.txt",
+                ).exists()
             )
 
     def test_oversized_plan_is_limited_to_requested_five_items(self):
@@ -168,6 +180,77 @@ class InferenceResumeTests(unittest.TestCase):
                 len(inference_file.read_text(encoding="utf-8").splitlines()),
                 1,
             )
+
+
+class MathJsonGovernanceTests(unittest.TestCase):
+    def test_standard_inference_drives_stats_and_deduplicated_hard_pool(self):
+        records = [
+            tool_util.canonicalize_math_record(
+                {
+                    "id": index,
+                    "category": "Algebra",
+                    "sub_category": "Linear Equations",
+                    "difficulty": 6,
+                    "question": f"Solve x + {index} = 10.",
+                    "answer": str(10 - index),
+                    "test_taker_response": "0",
+                    "is_correct": index == 1,
+                    "error_tags": (
+                        [] if index == 1 else ["concept_confusion"]
+                    ),
+                },
+                index - 1,
+            )
+            for index in range(1, 4)
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            inference_file = Path(temp_dir, "run.test_taker_inference.json")
+            hard_pool_file = Path(temp_dir, "hard_pool.json")
+            dump_standard_json(records, inference_file)
+            added, total = manage_hard_pool(
+                inference_file, hard_pool_file, source_iter=1
+            )
+            self.assertEqual((added, total), (2, 2))
+            self.assertEqual(
+                manage_hard_pool(
+                    inference_file, hard_pool_file, source_iter=1
+                ),
+                (0, 2),
+            )
+            hard_samples = json.loads(
+                hard_pool_file.read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                all(
+                    set(sample["error_tags"]).issubset(ERROR_TAGS)
+                    for sample in hard_samples
+                )
+            )
+            summary = math_autobencher._build_compare_summary(1, records)
+            self.assertEqual(summary["total_questions"], 3)
+            self.assertEqual(len(summary["category_statistics"]), 1)
+            self.assertIn("\n  {", inference_file.read_text(encoding="utf-8"))
+
+    def test_cleanup_removes_fragments_and_preserves_core_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            iteration_dir = Path(temp_dir, "iter_1")
+            temp_log = iteration_dir / "temp_log"
+            temp_log.mkdir(parents=True)
+            core = iteration_dir / "run.1.test_taker_inference.json"
+            dump_standard_json([{"id": 1}], core)
+            (iteration_dir / "run.1.subcat0.questions.json").write_text(
+                "[]", encoding="utf-8"
+            )
+            (temp_log / "run.attempt1.txt").write_text(
+                "invalid response", encoding="utf-8"
+            )
+            (iteration_dir / "broken.json").write_text("", encoding="utf-8")
+
+            removed = clean_redundant_files(iteration_dir)
+
+            self.assertEqual(len(removed), 3)
+            self.assertTrue(core.exists())
+            self.assertEqual(list(temp_log.iterdir()), [])
 
 
 if __name__ == "__main__":

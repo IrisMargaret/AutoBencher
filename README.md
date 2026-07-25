@@ -143,22 +143,93 @@ Windows, for example:
 
 ## Output, cache, and resuming
 
-- Math results are written under `math_v5/`.
+- Math results are written under `math_v5/` using one directory per iteration.
 - Wiki results are written under `KI/`.
 - Multilingual results are written under `multilingual/`.
 - Completed stages are cached. Rerun the same command to resume an interrupted
   benchmark without repeating completed work.
-- Partially written inference caches are validated record by record. A rerun
-  continues at the first missing question instead of treating the partial file
-  as complete.
+- Before the first test-taker request, the math branch writes the complete
+  question set to its inference file. Each completed batch is saved atomically,
+  so the same inference file is sufficient to resume an interrupted run.
 - Full runs generate hundreds of questions and may take a long time or consume
   substantial API tokens.
 
-Model output is not always perfectly formatted. JSON-producing math stages
-retry invalid output up to three times and only save a cache after validation.
-Rejected responses are kept as `*.attemptN.txt` for diagnosis.
-Math plans are limited to the five requested subcategories so an oversized
-model response cannot unexpectedly multiply the benchmark size.
+### Math hierarchical benchmark
+
+The math branch uses nine fixed top-level categories:
+
+```text
+Arithmetic
+Algebra
+Geometry & Trigonometry
+Probability & Statistics
+Word Problems
+Number Theory
+Calculus
+Linear Algebra
+Composite Comprehensive
+```
+
+Every question also has an independently measured `sub_category`. The first
+two iterations collect a broad baseline. Starting with iteration three,
+hard-sample-directed generation is enabled when either of these conditions is
+true:
+
+- both previous global accuracies are at least `0.7`;
+- fixed-taxonomy `sub_category` coverage is below `60%`.
+
+Wrong answers are tagged only with this fixed vocabulary:
+
+```text
+calculation_error
+formula_memory_error
+condition_missing
+multi-step_logic_error
+concept_confusion
+```
+
+### Math output layout
+
+For the default launcher prefix, the structure is:
+
+```text
+math_v5/
+├── meta_summary.json
+├── hard_pool.json
+├── iter_1/
+│   ├── temp_log/
+│   ├── <prefix>.1.question_plan_with_aim.json
+│   ├── <prefix>.1.test_taker_inference.json
+│   └── <prefix>.1.compare_answers.json
+├── iter_2/
+└── iter_N/
+```
+
+All persistent math JSON uses UTF-8, English keys and values, and two-space
+indentation. The three iteration files are retained permanently:
+
+- `question_plan_with_aim.json` records the nine-category Meta Agent plan.
+- `test_taker_inference.json` is the only question-level source and contains
+  questions, gold answers, responses, correctness, error tags, and unique keys.
+- `compare_answers.json` contains global accuracy plus independent statistics
+  for every `(category, sub_category)` pair.
+
+`hard_pool.json` incrementally deduplicates wrong answers by `unique_key`.
+`meta_summary.json` records run configuration, all observed subcategories, and
+the iteration file index.
+
+Question fragments, `all_questions.json`, retry text, temporary judgement
+files, empty JSON, and invalid JSON are removed at the end of each completed
+iteration. The `temp_log/` directory remains but is emptied.
+
+Legacy flat math caches and JSONL inference files are detected and migrated to
+the iteration layout. Wiki and multilingual output formats are unchanged.
+
+Model output is not always perfectly formatted. Math JSON parsing accepts
+fenced JSON, raw JSON surrounded by explanation text, `<json>` blocks, smart
+quotes, unquoted English keys, and trailing commas. Invalid generations retry
+up to three times. Retry responses exist only under `temp_log/` while the
+iteration is running and are removed after success.
 
 ## Troubleshooting
 
@@ -170,8 +241,8 @@ exactly `DEEPSEEK_API_KEY`. Then rerun `python smoke_test.py`.
 ### `Model response did not contain a JSON block`
 
 Rerun the same benchmark command. Existing completed files will be reused, and
-the failed JSON stage will retry automatically. Inspect the related
-`*.attemptN.txt` file if all retries fail.
+the failed JSON stage will retry automatically. During a failed active run,
+inspect `iter_N/temp_log/`; successful iterations clear this directory.
 
 ### Gold-answer and inference counts differ
 

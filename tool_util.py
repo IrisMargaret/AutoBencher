@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import re
 import requests
 import os, argparse, ast, json, tqdm
@@ -42,6 +43,573 @@ Reply "TERMINATE" in the end when everything is done.
 DEFAULT_DESCRIPTION = "A helpful and general-purpose AI assistant that has strong language skills, Python skills, and Linux command line skills."
 
 
+# 【新增】数学双层分类、错误标签和固定细分题型全集，所有持久化值均为英文。
+MATH_CATEGORIES = (
+    "Arithmetic",
+    "Algebra",
+    "Geometry & Trigonometry",
+    "Probability & Statistics",
+    "Word Problems",
+    "Number Theory",
+    "Calculus",
+    "Linear Algebra",
+    "Composite Comprehensive",
+)
+
+ERROR_TAGS = (
+    "calculation_error",
+    "formula_memory_error",
+    "condition_missing",
+    "multi-step_logic_error",
+    "concept_confusion",
+)
+
+SUB_CATEGORY_TAXONOMY = {
+    "Arithmetic": (
+        "Integer Operations",
+        "Fraction and Decimal Operations",
+        "Ratio and Percentage",
+    ),
+    "Algebra": (
+        "Linear Equations",
+        "Systems of Equations",
+        "Polynomials and Inequalities",
+    ),
+    "Geometry & Trigonometry": (
+        "Plane Geometry",
+        "Solid Geometry",
+        "Trigonometric Reasoning",
+    ),
+    "Probability & Statistics": (
+        "Basic Probability",
+        "Combinatorics",
+        "Descriptive Statistics",
+    ),
+    "Word Problems": (
+        "Rate and Distance",
+        "Work and Mixture",
+        "Financial Applications",
+    ),
+    "Number Theory": (
+        "Divisibility and Factors",
+        "Prime Factorization",
+        "Modular Arithmetic",
+    ),
+    "Calculus": (
+        "Limits and Continuity",
+        "Differentiation",
+        "Integration",
+    ),
+    "Linear Algebra": (
+        "Matrix Operations",
+        "Linear Systems",
+        "Vectors and Vector Spaces",
+    ),
+    "Composite Comprehensive": (
+        "Cross-Domain Multi-Step Problems",
+        "Proof and Mathematical Reasoning",
+        "Constraint Synthesis",
+    ),
+}
+
+ALL_SUB_CATEGORIES = tuple(
+    sub_category
+    for category in MATH_CATEGORIES
+    for sub_category in SUB_CATEGORY_TAXONOMY[category]
+)
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "correct"}
+
+
+def _as_int(value, default):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _contains_cjk(value):
+    return bool(re.search(r"[\u3400-\u9fff]", str(value)))
+
+
+def _english_only(value, fallback="", preserve_newlines=False):
+    cleaned = re.sub(r"[\u3400-\u9fff]+", " ", str(value or ""))
+    if preserve_newlines:
+        cleaned = "\n".join(
+            re.sub(r"[ \t]+", " ", line).strip()
+            for line in cleaned.splitlines()
+        ).strip()
+    else:
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or fallback
+
+
+# 【新增】统一 UTF-8、2 空格、可读 JSON 输出，并使用原子替换避免残缺缓存。
+def dump_standard_json(data, output_file):
+    output_file = os.fspath(output_file)
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+    temporary_output = f"{output_file}.tmp"
+    with open(temporary_output, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(temporary_output, output_file)
+
+
+def read_json_records(path):
+    """Read a standard JSON array/object or migrate a legacy JSONL cache."""
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read().strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        records = []
+        for line in raw.splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+    if isinstance(data, list):
+        if len(data) == 1 and isinstance(data[0], list):
+            return data[0]
+        return data
+    return [data] if isinstance(data, dict) else []
+
+
+def normalize_math_category(category, sub_category="", question=""):
+    text = f"{category} {sub_category} {question}".lower()
+    category_aliases = (
+        ("Composite Comprehensive", ("composite", "cross-domain", "comprehensive")),
+        ("Linear Algebra", ("linear algebra", "matrix", "vector space", "eigen")),
+        ("Calculus", ("calculus", "derivative", "integral", "limit", "continuity")),
+        ("Number Theory", ("number theory", "prime", "divisib", "modular", "congruence")),
+        ("Probability & Statistics", ("probability", "statistics", "random", "variance", "mean")),
+        ("Geometry & Trigonometry", ("geometry", "trigonometry", "triangle", "circle", "volume")),
+        ("Word Problems", ("word problem", "rate", "mixture", "distance", "interest", "work")),
+        ("Algebra", ("algebra", "equation", "polynomial", "inequality", "variable")),
+        ("Arithmetic", ("arithmetic", "fraction", "decimal", "addition", "subtraction")),
+    )
+    for normalized, aliases in category_aliases:
+        if any(alias in text for alias in aliases):
+            return normalized
+    return "Arithmetic"
+
+
+def normalize_sub_category(sub_category, category, question=""):
+    value = re.sub(r"\s+", " ", str(sub_category or "")).strip()
+    category_lookup = {
+        item.lower(): item for item in SUB_CATEGORY_TAXONOMY[category]
+    }
+    if value.lower() in category_lookup:
+        return category_lookup[value.lower()]
+    all_lookup = {item.lower(): item for item in ALL_SUB_CATEGORIES}
+    if value.lower() in all_lookup:
+        value = ""
+    if value and not _contains_cjk(value):
+        return value
+
+    text = f"{value} {question}".lower()
+    keyword_map = (
+        ("Solid Geometry", ("volume", "surface area", "sphere", "cylinder", "cone")),
+        ("Trigonometric Reasoning", ("sine", "cosine", "tangent", "trigon")),
+        ("Basic Probability", ("probability", "random", "dice", "coin")),
+        ("Combinatorics", ("combination", "permutation", "arrangement")),
+        ("Matrix Operations", ("matrix", "determinant")),
+        ("Linear Systems", ("linear system", "simultaneous equation")),
+        ("Differentiation", ("derivative", "differentiat")),
+        ("Integration", ("integral", "integrat")),
+        ("Limits and Continuity", ("limit", "continuity")),
+        ("Modular Arithmetic", ("modular", "congruence", "remainder")),
+        ("Prime Factorization", ("prime factor", "prime number")),
+        ("Rate and Distance", ("speed", "distance", "travel", "rate")),
+        ("Work and Mixture", ("mixture", "work together", "combined work")),
+        ("Financial Applications", ("interest", "profit", "discount", "investment")),
+        ("Linear Equations", ("linear equation", "solve for")),
+        ("Fraction and Decimal Operations", ("fraction", "decimal")),
+        ("Ratio and Percentage", ("ratio", "percent", "percentage")),
+    )
+    for normalized, keywords in keyword_map:
+        if any(keyword in text for keyword in keywords):
+            return normalized
+    return SUB_CATEGORY_TAXONOMY[category][0]
+
+
+def build_unique_key(category, sub_category, question):
+    normalized = "|".join(
+        re.sub(r"\s+", " ", str(value)).strip().lower()
+        for value in (category, sub_category, question)
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def classify_error_tags(record):
+    """Assign one or more tags from the fixed English error-tag enumeration."""
+    category = normalize_math_category(
+        record.get("category"),
+        record.get("sub_category", record.get("subcat", "")),
+        record.get("question", ""),
+    )
+    text = " ".join(
+        str(record.get(key, ""))
+        for key in (
+            "question",
+            "reasons",
+            "error_reason",
+            "gold_answer",
+            "test_taker_response",
+            "test_taker_answer",
+        )
+    ).lower()
+    tags = []
+    if category == "Arithmetic" or any(
+        token in text for token in ("calculation", "arithmetic", "computed", "numeric")
+    ):
+        tags.append("calculation_error")
+    if category in {"Geometry & Trigonometry", "Calculus", "Linear Algebra"} or any(
+        token in text for token in ("formula", "identity", "theorem")
+    ):
+        tags.append("formula_memory_error")
+    if any(
+        token in text
+        for token in ("condition", "constraint", "domain", "unit", "assumption", "missing")
+    ):
+        tags.append("condition_missing")
+    if category in {"Word Problems", "Composite Comprehensive"} or len(
+        re.findall(r"\w+", str(record.get("question", "")))
+    ) >= 35:
+        tags.append("multi-step_logic_error")
+    if not tags or any(
+        token in text for token in ("concept", "confus", "misunderstood", "incorrect method")
+    ):
+        tags.append("concept_confusion")
+    return [tag for tag in ERROR_TAGS if tag in tags]
+
+
+def canonicalize_math_record(record, index=0):
+    """Convert new or legacy question/inference data to the required schema."""
+    question = _english_only(
+        record.get("question", ""), "Legacy non-English question"
+    )
+    category = normalize_math_category(
+        record.get("category", ""),
+        record.get("sub_category", record.get("subcat", "")),
+        question,
+    )
+    sub_category = normalize_sub_category(
+        record.get(
+            "sub_category",
+            record.get("subcat", record.get("subcategory_description", "")),
+        ),
+        category,
+        question,
+    )
+    gold_answer = _english_only(
+        record.get("gold_answer", record.get("answer", "")),
+        "N/A",
+    )
+    response = _english_only(
+        record.get("test_taker_response", record.get("test_taker_answer", ""))
+    )
+    prompt = _english_only(
+        record.get("prompt", ""), preserve_newlines=True
+    ) or (
+        "Output just with the final answer to the question.\n"
+        f"Question:{question}\nAnswer:"
+    )
+    unique_key = build_unique_key(category, sub_category, question)
+    existing_tags = record.get("error_tags")
+    error_tags = (
+        [tag for tag in existing_tags if tag in ERROR_TAGS]
+        if isinstance(existing_tags, list)
+        else []
+    )
+    return {
+        "id": _as_int(record.get("id"), index + 1),
+        "category": category,
+        "sub_category": sub_category,
+        "difficulty": _as_int(record.get("difficulty"), 5),
+        "question": question,
+        "gold_answer": gold_answer,
+        "test_taker_response": response,
+        "prompt": prompt,
+        "is_correct": _as_bool(record.get("is_correct")),
+        "error_tags": error_tags,
+        "unique_key": unique_key,
+    }
+
+
+def load_math_inference(inference_file):
+    return [
+        canonicalize_math_record(record, index)
+        for index, record in enumerate(read_json_records(inference_file))
+        if isinstance(record, dict) and record.get("question")
+    ]
+
+
+# 【新增】数学分支专用标准推理缓存；Wiki/Multilingual 继续使用原 JSONL 逻辑。
+def generate_math_inference(
+    question_inputs,
+    test_model_info,
+    outfile,
+    bsz=1,
+    temperature=0.01,
+    max_length=50,
+):
+    if len(question_inputs) == 1 and isinstance(question_inputs[0], list):
+        question_inputs = question_inputs[0]
+    canonical_records = [
+        canonicalize_math_record(record, index)
+        for index, record in enumerate(question_inputs)
+    ]
+    existing_records = load_math_inference(outfile)
+    existing_by_key = {record["unique_key"]: record for record in existing_records}
+    for record in canonical_records:
+        existing = existing_by_key.get(record["unique_key"])
+        if existing:
+            record["test_taker_response"] = existing["test_taker_response"]
+            record["is_correct"] = existing["is_correct"]
+            record["error_tags"] = existing["error_tags"]
+
+    # Persist the full question set before the first request so this file alone
+    # is sufficient to resume an interrupted inference run.
+    dump_standard_json(canonical_records, outfile)
+    if len(test_model_info) == 3:
+        model_choice, tokenizer_choice, client_choice = test_model_info
+        auth = None
+        use_helm = False
+    elif len(test_model_info) == 4:
+        model_choice, tokenizer_choice, client_choice, auth = test_model_info
+        use_helm = True
+    else:
+        raise ValueError("Unexpected test model configuration")
+
+    pending = [
+        index
+        for index, record in enumerate(canonical_records)
+        if not record["test_taker_response"]
+    ]
+    if not pending:
+        print(f"FOUND completed inference cache {outfile}")
+        return canonical_records
+    print(
+        f"writing to {outfile} "
+        f"(resuming with {len(pending)}/{len(canonical_records)} unanswered records)"
+    )
+    for offset in tqdm.tqdm(range(0, len(pending), bsz)):
+        batch_indices = pending[offset:offset + bsz]
+        prompts = [canonical_records[index]["prompt"] for index in batch_indices]
+        request_result = gen_from_prompt(
+            model=model_choice,
+            tokenizer=tokenizer_choice,
+            prompt=prompts,
+            echo_prompt=False,
+            temperature=temperature,
+            max_tokens=max_length,
+            service=client_choice,
+            terminate_by_linebreak="no",
+            use_helm=use_helm,
+            auth=auth,
+            verbose=False,
+        )
+        for index, completion in zip(batch_indices, request_result.completions):
+            canonical_records[index]["test_taker_response"] = _english_only(
+                completion.text, "NON_ENGLISH_RESPONSE"
+            )
+        dump_standard_json(canonical_records, outfile)
+    return canonical_records
+
+
+# 【新增】从唯一推理数据源提取错题，按 unique_key 增量去重。
+def manage_hard_pool(inference_file, hard_pool_file, source_iter):
+    inference_records = load_math_inference(inference_file)
+    existing_raw = read_json_records(hard_pool_file)
+    if len(existing_raw) == 1 and isinstance(existing_raw[0].get("groups"), dict):
+        existing_raw = [
+            sample
+            for group in existing_raw[0]["groups"].values()
+            if isinstance(group, list)
+            for sample in group
+        ]
+    existing = {}
+    for index, sample in enumerate(existing_raw):
+        if not isinstance(sample, dict) or not sample.get("question"):
+            continue
+        canonical = canonicalize_math_record(sample, index)
+        hard_sample = {
+            "source_iter": _as_int(sample.get("source_iter"), source_iter),
+            "category": canonical["category"],
+            "sub_category": canonical["sub_category"],
+            "question": canonical["question"],
+            "gold_answer": canonical["gold_answer"],
+            "test_taker_response": canonical["test_taker_response"],
+            "error_tags": canonical["error_tags"] or classify_error_tags(sample),
+            "difficulty": canonical["difficulty"],
+            "unique_key": canonical["unique_key"],
+        }
+        existing[hard_sample["unique_key"]] = hard_sample
+
+    before = len(existing)
+    for record in inference_records:
+        if record["is_correct"] or not record["test_taker_response"]:
+            continue
+        sample = {
+            "source_iter": int(source_iter),
+            "category": record["category"],
+            "sub_category": record["sub_category"],
+            "question": record["question"],
+            "gold_answer": record["gold_answer"],
+            "test_taker_response": record["test_taker_response"],
+            "error_tags": record["error_tags"] or classify_error_tags(record),
+            "difficulty": record["difficulty"],
+            "unique_key": record["unique_key"],
+        }
+        existing.setdefault(sample["unique_key"], sample)
+    samples = list(existing.values())
+    dump_standard_json(samples, hard_pool_file)
+    return len(existing) - before, len(samples)
+
+
+# 【新增】统一维护全局实验配置、细分题型集合和轮次文件索引。
+def update_meta_summary(
+    meta_summary_file,
+    run_config,
+    sub_categories,
+    iteration_entry,
+    topic_salience_data=None,
+):
+    existing = read_json_records(meta_summary_file)
+    meta = existing[0] if existing and isinstance(existing[0], dict) else {}
+    indexes = [
+        item
+        for item in meta.get("iteration_index", [])
+        if isinstance(item, dict)
+        and item.get("iter_num") != iteration_entry.get("iter_num")
+    ]
+    indexes.append(iteration_entry)
+    indexes.sort(key=lambda item: item["iter_num"])
+    all_sub_categories = sorted(
+        {
+            str(item)
+            for item in meta.get("all_sub_categories", [])
+            if not _contains_cjk(item)
+        }
+        | {
+            str(item)
+            for item in sub_categories
+            if not _contains_cjk(item)
+        }
+    )
+    payload = {
+        "run_config": run_config,
+        "all_sub_categories": all_sub_categories,
+        "topic_salience_data": topic_salience_data or {},
+        "iteration_index": indexes,
+    }
+    dump_standard_json(payload, meta_summary_file)
+    return payload
+
+
+# 【新增】清理数学迭代冗余分片、重试文本和损坏 JSON，保留目录本身。
+def clean_redundant_files(iteration_dir):
+    if not os.path.isdir(iteration_dir):
+        return []
+    redundant_patterns = (
+        "**/*all_questions.json",
+        "**/*subcat*.questions.json",
+        "**/*subcat*questions_final.json",
+        "**/*.attempt*.txt",
+        "**/*.compare_answers.jsonl",
+        "**/temp_log/**/*",
+    )
+    removed = []
+    import glob as glob_module
+
+    for pattern in redundant_patterns:
+        for path in glob_module.glob(
+            os.path.join(iteration_dir, pattern), recursive=True
+        ):
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append(path)
+    for path in glob_module.glob(
+        os.path.join(iteration_dir, "**", "*.json"), recursive=True
+    ):
+        if not os.path.isfile(path):
+            continue
+        try:
+            if os.path.getsize(path) == 0:
+                raise ValueError("empty JSON")
+            with open(path, "r", encoding="utf-8") as f:
+                json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            os.remove(path)
+            removed.append(path)
+    return removed
+
+
+class HardSamplePool:
+    """Read-only prompt and metric view over the canonical hard_pool.json."""
+
+    def __init__(self, pool_path):
+        self.pool_path = os.fspath(pool_path)
+        self.samples = [
+            sample
+            for sample in read_json_records(self.pool_path)
+            if isinstance(sample, dict) and sample.get("question")
+        ]
+
+    @property
+    def total_count(self):
+        return len(self.samples)
+
+    @staticmethod
+    def accuracy(records):
+        records = [record for record in records if isinstance(record, dict)]
+        if not records:
+            return 0.0
+        return sum(_as_bool(record.get("is_correct")) for record in records) / len(records)
+
+    @staticmethod
+    def coverage(records):
+        taxonomy_lookup = {item.lower(): item for item in ALL_SUB_CATEGORIES}
+        covered = {
+            taxonomy_lookup[str(record.get("sub_category", "")).strip().lower()]
+            for record in records
+            if isinstance(record, dict)
+            and str(record.get("sub_category", "")).strip().lower() in taxonomy_lookup
+        }
+        missing = [item for item in ALL_SUB_CATEGORIES if item not in covered]
+        return len(covered) / len(ALL_SUB_CATEGORIES), sorted(covered), missing
+
+    def get_history_context(self, max_samples=None):
+        samples = self.samples if max_samples is None else self.samples[-max_samples:]
+        grouped = defaultdict(list)
+        for sample in samples:
+            grouped[sample.get("sub_category", "Unknown")].append(sample)
+        lines = ["Historical hard samples grouped by sub_category:"]
+        for sub_category in sorted(grouped):
+            lines.append(f"\n[{sub_category}]")
+            for sample in grouped[sub_category]:
+                tags = ",".join(sample.get("error_tags", [])) or "concept_confusion"
+                lines.append(
+                    f"- question: {str(sample.get('question', ''))[:300]} | "
+                    f"gold: {str(sample.get('gold_answer', ''))[:120]} | "
+                    f"wrong: {str(sample.get('test_taker_response', ''))[:120]} | "
+                    f"error_tags: {tags}"
+                )
+        return "\n".join(lines)
+
+
 def extract_code(text):
     """Return (language, code) pairs from Markdown fenced code blocks."""
     blocks = re.findall(
@@ -65,8 +633,58 @@ def execute_code(code, lang="python", timeout=120):
 
 
 
+# 【新增】提取带引号感知的平衡 JSON 片段，容忍 JSON 前后解释文本。
+def _balanced_json_fragments(text):
+    fragments = []
+    for start in (match.start() for match in re.finditer(r"[\[{]", text)):
+        stack = []
+        quote_char = None
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote_char:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote_char:
+                    quote_char = None
+                continue
+            if char in {'"', "'"}:
+                quote_char = char
+            elif char in "[{":
+                stack.append(char)
+            elif char in "]}":
+                if not stack:
+                    break
+                opener = stack.pop()
+                if (opener, char) not in {("[", "]"), ("{", "}")}:
+                    break
+                if not stack:
+                    fragments.append(text[start:index + 1])
+                    break
+    return fragments
+
+
+# 【新增】仅修复常见格式噪声，不改变 JSON 字段与值的语义。
+def _repair_json_candidate(candidate):
+    repaired = candidate.strip().lstrip("\ufeff")
+    repaired = re.sub(r"^\s*json\s*", "", repaired, flags=re.IGNORECASE)
+    repaired = repaired.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    repaired = re.sub(
+        r"([,{]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)",
+        r'\1"\2"\3',
+        repaired,
+    )
+    return repaired
+
+
+# 【修改】增强 fenced/raw/balanced JSON 多路径容错，解决夹带解释文本的响应。
 def extract_json_v2(json_text, outfilename):
-    response = json_text.replace("TERMINATE", "").strip()
+    if not isinstance(json_text, str):
+        raise TypeError("Model response must be text")
+    response = json_text.replace("TERMINATE", "").strip().lstrip("\ufeff")
     fenced_blocks = extract_code(response)
     candidates = [
         code for language, code in fenced_blocks if language.lower() == "json"
@@ -76,12 +694,18 @@ def extract_json_v2(json_text, outfilename):
         for language, code in fenced_blocks
         if language.lower() != "json" and code.startswith(("[", "{"))
     )
-    if response.startswith(("[", "{")):
-        candidates.append(response)
+    candidates.extend(
+        match.group(1).strip()
+        for match in re.finditer(
+            r"<json[^>]*>(.*?)</json>", response, flags=re.DOTALL | re.IGNORECASE
+        )
+    )
 
-    # Some models add a short explanation even when asked for JSON only. Find
-    # the first decodable array/object instead of failing the entire benchmark.
+    # Prefer explicit fenced/<json> blocks. Only scan the surrounding prose
+    # when the model did not provide an explicit structured block.
     if not candidates:
+        if response.startswith(("[", "{")):
+            candidates.append(response)
         decoder = json.JSONDecoder()
         for match in re.finditer(r"[\[{]", response):
             try:
@@ -90,6 +714,9 @@ def extract_json_v2(json_text, outfilename):
                 continue
             candidates.append(response[match.start():match.start() + end])
             break
+        balanced_fragments = _balanced_json_fragments(response)
+        if balanced_fragments:
+            candidates.append(balanced_fragments[0])
 
     # Keep the original order while avoiding duplicate parsing of fenced JSON.
     candidates = list(dict.fromkeys(candidate.strip() for candidate in candidates))
@@ -99,14 +726,22 @@ def extract_json_v2(json_text, outfilename):
     parsed_blocks = []
     errors = []
     for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError as json_exc:
+        parsed = None
+        parse_errors = []
+        for candidate_variant in (candidate, _repair_json_candidate(candidate)):
             try:
-                parsed = ast.literal_eval(candidate)
+                parsed = json.loads(candidate_variant)
+                break
+            except json.JSONDecodeError as json_exc:
+                parse_errors.append(str(json_exc))
+            try:
+                parsed = ast.literal_eval(candidate_variant)
+                break
             except (ValueError, SyntaxError) as ast_exc:
-                errors.append(f"{json_exc}; {ast_exc}")
-                continue
+                parse_errors.append(str(ast_exc))
+        if parsed is None:
+            errors.append("; ".join(parse_errors))
+            continue
         if parsed not in (None, [], {}):
             parsed_blocks.append(parsed)
 
@@ -114,10 +749,7 @@ def extract_json_v2(json_text, outfilename):
         detail = errors[-1] if errors else "the JSON value was empty"
         raise ValueError(f"Model returned no usable JSON: {detail}")
     if outfilename is not None:
-        temporary_outfile = f"{outfilename}.tmp"
-        with open(temporary_outfile, "w", encoding="utf-8") as f:
-            json.dump(parsed_blocks, f, ensure_ascii=False)
-        os.replace(temporary_outfile, outfilename)
+        dump_standard_json(parsed_blocks, outfilename)
     return parsed_blocks
 
 def _questions_match(expected, cached):

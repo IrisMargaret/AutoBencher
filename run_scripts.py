@@ -5,6 +5,36 @@ import subprocess
 import sys
 
 
+# 【新增】统一数学数据飞轮日志格式；不增加或修改任何 CLI 参数。
+def log_math_iteration_metrics(
+    iteration,
+    global_accuracy,
+    subcategory_coverage,
+    hard_sample_count,
+    directed_generation=False,
+    triggers=None,
+    weakest_sub_categories=None,
+):
+    trigger_text = ",".join(triggers or []) or "baseline"
+    print(
+        "[MathFlywheel] "
+        f"iteration={iteration} "
+        f"global_accuracy={global_accuracy:.3f} "
+        f"subcategory_coverage={subcategory_coverage:.1%} "
+        f"hard_samples={hard_sample_count} "
+        f"directed_generation={'on' if directed_generation else 'off'} "
+        f"trigger={trigger_text}"
+    )
+    if weakest_sub_categories:
+        print("[MathFlywheel] top_10_weakest_sub_categories:")
+        for item in weakest_sub_categories[:10]:
+            print(
+                "  "
+                f"{item['category']} / {item['sub_category']}: "
+                f"accuracy={item['accuracy']:.3f}"
+            )
+
+
 def _append_option(command, name, value):
     if value is not None:
         command.extend([name, str(value)])
@@ -103,6 +133,12 @@ def main():
     parser.add_argument("--theme")
     parser.add_argument("--top-p", "--top_p", dest="top_p", type=float)
     args = parser.parse_args()
+    # 【新增】仅提示可观测指标；逐轮数值由 math_autobencher 回传打印。
+    if args.mode == "math":
+        print(
+            "[MathFlywheel] enabled; metrics: global_accuracy, "
+            "subcategory_coverage, hard_samples"
+        )
     model = args.model or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     command = build_command(
         args.mode,
