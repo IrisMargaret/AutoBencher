@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 
-# 【新增】统一数学数据飞轮日志格式；不增加或修改任何 CLI 参数。
+# [MODIFIED] Emit stable iteration metrics for eval and flywheel runs.
 def log_math_iteration_metrics(
     iteration,
     global_accuracy,
@@ -40,6 +40,20 @@ def _append_option(command, name, value):
         command.extend([name, str(value)])
 
 
+# [ADDED] Parse explicit Boolean CLI values consistently.
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        "Expected one of: true, false, yes, no, 1, 0, on, off"
+    )
+
+
 def build_command(
     mode,
     model,
@@ -57,6 +71,16 @@ def build_command(
     pairwise=None,
     theme=None,
     top_p=None,
+    execution_mode="eval",
+    export_interval=1,
+    max_cycle=1,
+    finetune_gpu="0",
+    finetune_epoch=3,
+    finetune_batch=8,
+    lora_rank=8,
+    new_local_model_suffix="finetuned",
+    disk_warning_threshold=10,
+    clean_cycle_cache=True,
 ):
     agent_modelname = agent_modelname or model
     test_taker_modelname = test_taker_modelname or model
@@ -99,8 +123,21 @@ def build_command(
         return [
             sys.executable, "multilingual_autobencher.py", *common,
         ]
+    # [ADDED] Flywheel options are isolated to the math module.
+    math_options = [
+        "--mode", execution_mode,
+        "--export_interval", str(export_interval),
+        "--max_cycle", str(max_cycle),
+        "--finetune_gpu", str(finetune_gpu),
+        "--finetune_epoch", str(finetune_epoch),
+        "--finetune_batch", str(finetune_batch),
+        "--lora_rank", str(lora_rank),
+        "--new_local_model_suffix", str(new_local_model_suffix),
+        "--disk_warning_threshold", str(disk_warning_threshold),
+        "--clean_cycle_cache", str(bool(clean_cycle_cache)).lower(),
+    ]
     return [
-        sys.executable, "math_autobencher.py", *common,
+        sys.executable, "math_autobencher.py", *common, *math_options,
     ]
 
 
@@ -132,12 +169,94 @@ def main():
     parser.add_argument("--pairwise")
     parser.add_argument("--theme")
     parser.add_argument("--top-p", "--top_p", dest="top_p", type=float)
+    # [ADDED] Built-in math data-flywheel controls.
+    parser.add_argument(
+        "--mode",
+        dest="execution_mode",
+        choices=["eval", "data_flywheel"],
+        default="eval",
+    )
+    parser.add_argument(
+        "--export-interval",
+        "--export_interval",
+        dest="export_interval",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--max-cycle",
+        "--max_cycle",
+        dest="max_cycle",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--finetune-gpu",
+        "--finetune_gpu",
+        dest="finetune_gpu",
+        default="0",
+    )
+    parser.add_argument(
+        "--finetune-epoch",
+        "--finetune_epoch",
+        dest="finetune_epoch",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--finetune-batch",
+        "--finetune_batch",
+        dest="finetune_batch",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--lora-rank",
+        "--lora_rank",
+        dest="lora_rank",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--new-local-model-suffix",
+        "--new_local_model_suffix",
+        dest="new_local_model_suffix",
+        default="finetuned",
+    )
+    parser.add_argument(
+        "--disk-warning-threshold",
+        "--disk_warning_threshold",
+        dest="disk_warning_threshold",
+        type=int,
+        default=10,
+    )
+    parser.add_argument(
+        "--clean-cycle-cache",
+        "--clean_cycle_cache",
+        dest="clean_cycle_cache",
+        type=parse_bool,
+        default=True,
+    )
     args = parser.parse_args()
-    # 【新增】仅提示可观测指标；逐轮数值由 math_autobencher 回传打印。
+    if args.mode != "math" and args.execution_mode != "eval":
+        parser.error("--mode data_flywheel is supported only for math")
+    for name in (
+        "num_iters",
+        "export_interval",
+        "max_cycle",
+        "finetune_epoch",
+        "finetune_batch",
+        "lora_rank",
+    ):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name} must be at least 1")
+    if args.disk_warning_threshold < 0:
+        parser.error("--disk_warning_threshold cannot be negative")
+    # [MODIFIED] Announce the selected math execution mode and core metrics.
     if args.mode == "math":
         print(
-            "[MathFlywheel] enabled; metrics: global_accuracy, "
-            "subcategory_coverage, hard_samples"
+            f"[MathFlywheel] mode={args.execution_mode}; metrics: "
+            "global_accuracy, subcategory_coverage, hard_samples"
         )
     model = args.model or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     command = build_command(
@@ -156,6 +275,16 @@ def main():
         pairwise=args.pairwise,
         theme=args.theme,
         top_p=args.top_p,
+        execution_mode=args.execution_mode,
+        export_interval=args.export_interval,
+        max_cycle=args.max_cycle,
+        finetune_gpu=args.finetune_gpu,
+        finetune_epoch=args.finetune_epoch,
+        finetune_batch=args.finetune_batch,
+        lora_rank=args.lora_rank,
+        new_local_model_suffix=args.new_local_model_suffix,
+        disk_warning_threshold=args.disk_warning_threshold,
+        clean_cycle_cache=args.clean_cycle_cache,
     )
     print("Running:", subprocess.list2cmdline(command))
     subprocess.run(command, check=True)

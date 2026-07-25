@@ -1,4 +1,5 @@
 import glob
+import gc
 import random
 
 import requests
@@ -19,9 +20,12 @@ from tool_util import (
     SUB_CATEGORY_TAXONOMY,
     canonicalize_math_record,
     classify_error_tags,
+    check_disk_space,
     clean_redundant_files,
+    call_local_finetune,
     dump_standard_json,
     execute_code,
+    export_training_dataset,
     extract_code,
     extract_json_v2,
     generate_math_inference,
@@ -231,7 +235,7 @@ def summarize_over_history(history_json_dict, gold_key="python_answer", verbose=
     return str_summary
 
 
-# 【新增】基于既有判分缓存计算飞轮触发条件，不改变原始结果结构。
+# [ADDED] Compute directed-generation triggers from existing result caches.
 def _get_math_flywheel_state(history_json_dict):
     all_records = [
         record
@@ -258,11 +262,11 @@ MATH_PLAN_SIZE = len(MATH_CATEGORIES)
 
 
 def _write_json_atomic(data, output_file):
-    # 【修改】所有数学 JSON 统一由标准导出函数写入。
+    # [MODIFIED] Route every math JSON write through the standard writer.
     dump_standard_json(data, output_file)
 
 
-# 【新增】重试原文只进入 temp_log，迭代成功后由清理函数移除。
+# [ADDED] Keep raw retry output in the disposable iteration log.
 def _write_attempt_log(outfile_prefix, stage, attempt, response):
     iteration_dir = os.path.dirname(os.path.abspath(outfile_prefix))
     temp_log_dir = os.path.join(iteration_dir, "temp_log")
@@ -271,7 +275,7 @@ def _write_attempt_log(outfile_prefix, stage, attempt, response):
         f"{os.path.basename(outfile_prefix)}.{stage}.attempt{attempt}.txt"
     )
     with open(os.path.join(temp_log_dir, filename), "w", encoding="utf-8") as f:
-        f.write(response)
+        f.write(re.sub(r"[\u3400-\u9fff]+", " ", str(response)))
 
 
 def _normalize_math_plan(extracted_json):
@@ -348,7 +352,7 @@ def _generate_cat_with_aim(
     coverage_summary="",
     hard_pool_file=None,
 ):
-    # 【修改】九大一级类 + 固定英文 sub_category 双层规划约束。
+    # [MODIFIED] Enforce the fixed two-level, nine-category taxonomy.
     taxonomy_json = json.dumps(
         SUB_CATEGORY_TAXONOMY, ensure_ascii=True, indent=2
     )
@@ -388,13 +392,13 @@ The full response must contain 9 objects and cover every top-level category
 exactly once. You do not need to solve or generate questions in this step.
 """
     context = context.replace("AIM", str(aim))
-    # 【新增】每轮均加载全局困难样本池；第 3 轮起满足触发条件时注入错题上下文。
+    # [ADDED] Load the global pool and inject eligible weakness evidence.
     hard_pool_file = hard_pool_file or os.path.join(
         os.path.dirname(os.path.abspath(outfile_prefix)), "hard_pool.json"
     )
     hard_pool = HardSamplePool(hard_pool_file)
     if enable_hard_sample_guidance:
-        hard_sample_context = hard_pool.get_history_context(max_samples=None)
+        hard_sample_context = hard_pool.get_history_context(max_samples=100)
         context += f"""
 
 # Hard-sample-directed generation rules (mandatory)
@@ -414,7 +418,7 @@ below as direct evidence of the test taker's real weaknesses.
 Current coverage:
 {coverage_summary}
 
-Complete historical hard-sample context:
+Train-eligible historical hard-sample context:
 {hard_sample_context}
 """
     else:
@@ -467,8 +471,15 @@ Complete historical hard-sample context:
 
 
 
-def _generate_question_from_description(description_json, agent_lm, agent_tokenizer, agent_client, outfile_prefix='att1',
-                                        questions_old=None):
+def _generate_question_from_description(
+    description_json,
+    agent_lm,
+    agent_tokenizer,
+    agent_client,
+    outfile_prefix='att1',
+    questions_old=None,
+    hard_sample_context="",
+):
     context = """Your goal is to come up with math questions that match the description. 
 In each iteration, you receive a sub_category that describes the exact type of question to ask.
 Return exactly 50 math questions matching that sub_category as one JSON array.
@@ -498,6 +509,17 @@ Do not use placeholders or ellipses.
         + f"\nSub_category: {sub_category}"
         + "\nUse English text only."
     )
+    if hard_sample_context:
+        context += f"""
+
+Use the train-eligible wrong-answer examples below as weakness evidence.
+Generate variants in the same category and sub_category with accuracy expected
+between 0.1 and 0.4. Preserve the mathematical trap and reasoning depth, but
+change wording, values, and surface form. Never copy a question verbatim.
+
+Train-eligible examples:
+{hard_sample_context}
+"""
     if questions_old:
         old_q_string = ''
         for q in questions_old:
@@ -572,7 +594,7 @@ def _ask_question_v3(
     agent_lm, agent_tokenizer, agent_client = agent_info
     plan_outfile = f"{outfile_prefix}.question_plan_with_aim.json"
     if not os.path.exists(plan_outfile):
-        # 【修改】仅在触发轮次向原规划函数传入困难样本与覆盖率约束。
+        # [MODIFIED] Pass hard-pool evidence only in directed-generation rounds.
         plan_json = _generate_cat_with_aim(
             aim_acc,
             agent_lm,
@@ -596,24 +618,35 @@ def _ask_question_v3(
         plan_json = normalized_plan
     plan_json = plan_json[0]
 
-    # 【修改】题目分片只在内存中存在，唯一逐题持久源由 inference 文件承担。
+    # [MODIFIED] Keep question fragments in memory; inference is canonical.
     question_json_full = []
+    hard_pool = HardSamplePool(hard_pool_file) if hard_pool_file else None
     for idx, plan_line in enumerate(plan_json):
         outfile_prefix2 = outfile_prefix + '.subcat{}'.format(idx)
+        variant_context = (
+            hard_pool.get_variant_context(
+                plan_line["category"],
+                plan_line["sub_category"],
+            )
+            if enable_hard_sample_guidance and hard_pool
+            else ""
+        )
         question_json = _generate_question_from_description(
             plan_line,
             agent_lm,
             agent_tokenizer,
             agent_client,
             outfile_prefix2,
+            hard_sample_context=variant_context,
         )
         if len(question_json) == 1:
             question_json = question_json[0]
 
         while len(question_json) < 50:
             question_json_new = _generate_question_from_description(plan_line, agent_lm, agent_tokenizer,
-                                                                    agent_client, outfile_prefix2,
-                                                                    questions_old=question_json)
+                                                                     agent_client, outfile_prefix2,
+                                                                    questions_old=question_json,
+                                                                    hard_sample_context=variant_context)
             question_json_new = question_json_new[0]
             question_json.extend(question_json_new)
         question_json_full.extend(question_json[:50])
@@ -656,7 +689,7 @@ def _lowest_sub_categories(compare_summary, limit=10):
     )[:limit]
 
 
-# 【修改】保留原判分调用，但只持久化标准 inference 明细和 compare 统计对象。
+# [MODIFIED] Persist only canonical inference details and comparison statistics.
 def test_and_eval(
     question_json,
     outfile_prefix,
@@ -752,22 +785,31 @@ def test_and_eval(
     return standardized_records
 
 
-# 【新增】保持原 outfile_prefix1 入参，内部映射到标准 iter_N 目录。
-def _build_iteration_paths(outfile_prefix1, iter_number):
+# [MODIFIED] Map the original prefix to eval or cycle-aware output layers.
+def _build_iteration_paths(outfile_prefix1, iter_number, cycle_number=None):
     raw_prefix = os.fspath(outfile_prefix1)
     output_root = os.path.abspath(os.path.dirname(raw_prefix) or ".")
     raw_base_name = os.path.basename(raw_prefix)
     base_name = raw_base_name.rstrip(".") or "math"
-    iteration_dir = os.path.join(output_root, f"iter_{iter_number}")
-    os.makedirs(os.path.join(iteration_dir, "temp_log"), exist_ok=True)
-    iteration_prefix = os.path.join(
-        iteration_dir, f"{base_name}.{iter_number}"
+    cycle_dir = (
+        os.path.join(output_root, f"cycle_{cycle_number}")
+        if cycle_number is not None
+        else output_root
     )
+    iteration_dir = os.path.join(cycle_dir, f"iter_{iter_number}")
+    os.makedirs(os.path.join(iteration_dir, "temp_log"), exist_ok=True)
+    filename_suffix = (
+        f"cycle{cycle_number}.iter{iter_number}"
+        if cycle_number is not None
+        else str(iter_number)
+    )
+    iteration_prefix = os.path.join(iteration_dir, f"{base_name}.{filename_suffix}")
     legacy_prefix = os.path.join(
         output_root, f"{raw_base_name}{iter_number}"
     )
     return {
         "output_root": output_root,
+        "cycle_dir": cycle_dir,
         "iteration_dir": iteration_dir,
         "temp_log_dir": os.path.join(iteration_dir, "temp_log"),
         "iteration_prefix": iteration_prefix,
@@ -906,216 +948,643 @@ def _performance_context(history_json_dict):
     )
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        prog='ProgramName',
-        description='What the program does',
-        epilog='Text at the bottom of help')
-
-    # parser.add_argument('--model', default='gpt-3.5-turbo')  # option that takes a value
-    parser.add_argument('--test_taker_modelname', default='gpt-3.5-turbo')  # option that takes a value
-    parser.add_argument('--test_taker_modelname2', default=None)  # option that takes a value
-    parser.add_argument('--agent_modelname', default='gpt-4-turbo-preview')  # option that takes a value
-    parser.add_argument('--tool_modelname', default=None)  # option that takes a value
-    parser.add_argument('--temperature', type=float, default=0.001)  # option that takes a value
-    parser.add_argument('--pairwise', type=str, default='no')  # option that takes a value
-    parser.add_argument('--exp_mode', type=str, default='ki_wiki')  # option that takes a value
-    parser.add_argument('--theme', type=str, default='history')  # option that takes a value
-    parser.add_argument('--use_helm', type=str, default='yes')  # option that takes a value
-    parser.add_argument('--top_p', type=float, default=0.9)  # option that takes a value
-    parser.add_argument('--acc_target', type=str, default="0.3--0.5")  # option that takes a value
-    parser.add_argument('--num_iters', type=int, default=8)
-
-    parser.add_argument('--outfile_prefix1', type=str, default='att1')  # option that takes a value
-
-    args2 = parser.parse_args()
-    args = copy.deepcopy(args2)
-
-    if args.use_helm == 'yes':
-        test_taker_info = helm_process_args(args.test_taker_modelname)
-        print('loaded helm models')
-    else:
-        # load the test taker model.
-        test_taker_lm, test_taker_tokenizer, modelpath_name, test_taker_client = process_args_for_models(
-            args.test_taker_modelname)
-        test_taker_info = (test_taker_lm, test_taker_tokenizer, test_taker_client)
-
-        if args.test_taker_modelname2 is not None:
-            test_taker_lm2, test_taker_tokenizer2, modelpath_name2, test_taker_client2 = process_args_for_models(
-                args.test_taker_modelname2)
-            test_taker_info2 = (test_taker_lm2, test_taker_tokenizer2, test_taker_client2)
+# [ADDED] Parse Boolean values accepted by the direct math entry point.
+def _parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("Expected a Boolean value")
 
 
-    agent_lm, agent_tokenizer, agent_name, agent_client = process_args_for_models(args.agent_modelname)
+def _utc_timestamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+
+def _output_root(outfile_prefix):
+    return os.path.abspath(os.path.dirname(os.fspath(outfile_prefix)) or ".")
+
+
+def _load_test_taker_info(model_name, use_helm):
+    if use_helm == "yes":
+        print("[Model] loaded HELM test taker")
+        return helm_process_args(model_name)
+    # [ADDED] A tagged local identifier can use an OpenAI-compatible vLLM
+    # endpoint when VLLM_BASE_URL is configured; otherwise util.py uses Ollama.
+    drive, _ = os.path.splitdrive(str(model_name))
+    if ":" in str(model_name) and not drive and os.getenv("VLLM_BASE_URL"):
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=os.getenv("VLLM_API_KEY", "EMPTY"),
+            base_url=os.environ["VLLM_BASE_URL"].rstrip("/"),
+        )
+        print(
+            f"[Model] local_backend=vllm model={model_name} "
+            f"base_url={os.environ['VLLM_BASE_URL']}"
+        )
+        return model_name, None, client
+    model, tokenizer, _, client = process_args_for_models(model_name)
+    return model, tokenizer, client
+
+
+def _load_agent_and_evaluator(args):
+    agent_lm, agent_tokenizer, agent_name, agent_client = (
+        process_args_for_models(args.agent_modelname)
+    )
+    agent_info = (agent_lm, agent_tokenizer, agent_client)
     if args.tool_modelname is None:
-        tool_lm, tool_tokenizer, tool_name, tool_client = agent_lm, agent_tokenizer, agent_name, agent_client
-    else:
-        tool_lm, tool_tokenizer, tool_name, tool_client = process_args_for_models(args.tool_modelname)
+        return agent_info, agent_info
+    tool_lm, tool_tokenizer, _, tool_client = process_args_for_models(
+        args.tool_modelname
+    )
+    return agent_info, (tool_lm, tool_tokenizer, tool_client)
 
-    evaluator_info = (tool_lm, tool_tokenizer, tool_client)
-    agent_info = (agent_lm, agent_tokenizer, agent_client) # agent model
 
-
-    if args.exp_mode == 'autobencher':
-        history_dict = []
-        for iters in range(args.num_iters):
-            iter_number = iters + 1
-            paths = _build_iteration_paths(args.outfile_prefix1, iter_number)
-            args.outfile_prefix = paths["iteration_prefix"]
-            migrated_records = _records_from_legacy_cache(paths, iter_number)
-            (
-                should_direct_generation,
-                flywheel_triggers,
-                prior_coverage,
-                covered_sub_categories,
-                missing_sub_categories,
-            ) = _get_math_flywheel_state(history_dict)
-            # 【修改】前两轮强制采集基线，第 3 轮起执行双条件触发。
-            should_direct_generation = (
-                iters >= 2 and should_direct_generation
-            )
-            coverage_summary = (
-                f"taxonomy_coverage={prior_coverage:.1%}\n"
-                f"covered_sub_categories={covered_sub_categories}\n"
-                f"missing_sub_categories={missing_sub_categories}\n"
-                "lowest_accuracy_sub_categories:\n"
-                f"{_performance_context(history_dict)}"
-            )
-            cached_compare = read_json_records(paths["compare_file"])
-            has_standard_compare = (
-                len(cached_compare) == 1
-                and isinstance(cached_compare[0], dict)
-                and "category_statistics" in cached_compare[0]
-                and cached_compare[0].get("total_questions")
-                == len(migrated_records)
-            )
-
-            if (
-                migrated_records
-                and all(
-                    record["test_taker_response"]
-                    for record in migrated_records
+# [ADDED] Release local GPU allocations before starting QLoRA.
+def _release_model_info(model_info):
+    if not model_info:
+        return
+    model = model_info[0] if len(model_info) > 0 else None
+    service = model_info[2] if len(model_info) > 2 else None
+    if service is not None and hasattr(service, "loaded_models"):
+        for model_name in list(service.loaded_models):
+            try:
+                service.session.post(
+                    f"{service.base_url}/api/generate",
+                    json={
+                        "model": model_name,
+                        "keep_alive": 0,
+                        "stream": False,
+                    },
+                    timeout=30,
                 )
-                and has_standard_compare
-                and os.path.exists(paths["inference_file"])
-            ):
-                print("FOUND completed iteration cache", paths["compare_file"])
-                json_dict = load_math_inference(paths["inference_file"])
-                compare_summary = _build_compare_summary(iter_number, json_dict)
-                dump_standard_json(compare_summary, paths["compare_file"])
-            else:
-                if migrated_records:
-                    json_category = migrated_records
-                else:
-                    summarized_content = summarize_over_history(
-                        history_dict, gold_key='gold_answer', verbose=False
-                    )
-                    history = [
-                        summarized_content,
-                        _performance_context(history_dict),
-                    ]
-                    json_category, _ = _ask_question_v3(
-                        agent_info,
-                        history,
-                        iter_number,
-                        outfile_prefix=args.outfile_prefix,
-                        aim_acc=args.acc_target,
-                        enable_hard_sample_guidance=should_direct_generation,
-                        coverage_summary=coverage_summary,
-                        hard_pool_file=paths["hard_pool_file"],
-                    )
-                json_dict = test_and_eval(
-                    copy.deepcopy(json_category),
-                    args.outfile_prefix,
+            except requests.RequestException as exc:
+                print(f"[Model] Ollama unload warning: {exc}")
+        service.loaded_models.clear()
+    if model is not None and hasattr(model, "cpu"):
+        try:
+            model.cpu()
+        except (RuntimeError, AttributeError):
+            pass
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def _safe_model_component(model_name):
+    base_name = os.path.basename(os.path.normpath(str(model_name))) or "model"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", base_name).strip("._") or "model"
+
+
+def _cycle_record_file(args):
+    return os.path.join(_output_root(args.outfile_prefix1), "cycle_record.json")
+
+
+def _load_cycle_record(path):
+    records = read_json_records(path)
+    if records and isinstance(records[0], dict):
+        return records[0]
+    return {}
+
+
+def _save_cycle_record(path, record):
+    record["updated_at"] = _utc_timestamp()
+    dump_standard_json(record, path)
+
+
+def _failure_type(stage, exc):
+    detail = str(exc).lower()
+    if "out of memory" in detail or "cuda oom" in detail:
+        return "finetune_oom"
+    if "disk" in detail or "free space" in detail:
+        return "disk_space"
+    if "timeout" in detail or "timed out" in detail:
+        return "api_timeout"
+    if "model" in stage:
+        return "model_loading"
+    if "json" in detail:
+        return "json_parsing"
+    return "runtime_error"
+
+
+def _sanitize_error(exc):
+    message = re.sub(r"[\u3400-\u9fff]+", " ", str(exc))
+    return re.sub(r"\s+", " ", message).strip()[:4000]
+
+
+# [ADDED] Run one adaptive iteration and update all global governance files.
+def _run_math_iteration(
+    args,
+    current_test_taker_model,
+    test_taker_info,
+    agent_info,
+    evaluator_info,
+    history_dict,
+    cycle_number,
+    iter_number,
+):
+    cycle_layer = cycle_number if args.mode == "data_flywheel" else None
+    paths = _build_iteration_paths(
+        args.outfile_prefix1,
+        iter_number,
+        cycle_number=cycle_layer,
+    )
+    args.outfile_prefix = paths["iteration_prefix"]
+    migrated_records = (
+        _records_from_legacy_cache(paths, iter_number)
+        if args.mode == "eval"
+        else load_math_inference(paths["inference_file"])
+    )
+    (
+        triggered,
+        flywheel_triggers,
+        prior_coverage,
+        covered_sub_categories,
+        missing_sub_categories,
+    ) = _get_math_flywheel_state(history_dict)
+    hard_pool = HardSamplePool(paths["hard_pool_file"])
+    has_train_eligible = any(
+        sample.get("sample_grade") == "train_eligible"
+        for sample in hard_pool.samples
+    )
+    should_direct_generation = (
+        (iter_number >= 3 and triggered)
+        or (args.mode == "data_flywheel" and has_train_eligible)
+    )
+    if has_train_eligible and "train_eligible_hard_pool" not in flywheel_triggers:
+        flywheel_triggers.append("train_eligible_hard_pool")
+    coverage_summary = (
+        f"taxonomy_coverage={prior_coverage:.1%}\n"
+        f"covered_sub_categories={covered_sub_categories}\n"
+        f"missing_sub_categories={missing_sub_categories}\n"
+        "lowest_accuracy_sub_categories:\n"
+        f"{_performance_context(history_dict)}"
+    )
+    cached_compare = read_json_records(paths["compare_file"])
+    has_standard_compare = (
+        len(cached_compare) == 1
+        and isinstance(cached_compare[0], dict)
+        and "category_statistics" in cached_compare[0]
+        and cached_compare[0].get("total_questions") == len(migrated_records)
+    )
+    if (
+        migrated_records
+        and all(record["test_taker_response"] for record in migrated_records)
+        and has_standard_compare
+        and os.path.exists(paths["inference_file"])
+    ):
+        print(f"[Cache] completed iteration: {paths['compare_file']}")
+        json_dict = load_math_inference(paths["inference_file"])
+        compare_summary = _build_compare_summary(iter_number, json_dict)
+        dump_standard_json(compare_summary, paths["compare_file"])
+    else:
+        if migrated_records:
+            json_category = migrated_records
+        else:
+            summarized_content = summarize_over_history(
+                history_dict,
+                gold_key="gold_answer",
+                verbose=False,
+            )
+            history = [
+                summarized_content,
+                _performance_context(history_dict),
+            ]
+            json_category, _ = _ask_question_v3(
+                agent_info,
+                history,
+                iter_number,
+                outfile_prefix=args.outfile_prefix,
+                aim_acc=args.acc_target,
+                enable_hard_sample_guidance=should_direct_generation,
+                coverage_summary=coverage_summary,
+                hard_pool_file=paths["hard_pool_file"],
+            )
+        json_dict = test_and_eval(
+            copy.deepcopy(json_category),
+            args.outfile_prefix,
+            test_taker_info,
+            agent_info,
+            evaluator_info,
+            gold_ans_key="answer",
+            iter_number=iter_number,
+            temp_log_dir=paths["temp_log_dir"],
+        )
+        compare_summary = _build_compare_summary(iter_number, json_dict)
+        dump_standard_json(compare_summary, paths["compare_file"])
+
+    history_dict.append(json_dict)
+    new_hard_count, hard_total = manage_hard_pool(
+        paths["inference_file"],
+        paths["hard_pool_file"],
+        iter_number,
+        source_cycle=cycle_number,
+    )
+    global_iter_number = (cycle_number - 1) * args.num_iters + iter_number
+    run_config = {
+        "mode": args.mode,
+        "agent_model": args.agent_modelname,
+        "test_taker_model": current_test_taker_model,
+        "tool_model": args.tool_modelname or args.agent_modelname,
+        "target_accuracy_range": args.acc_target,
+        "iterations_per_cycle": args.num_iters,
+        "max_cycle": args.max_cycle if args.mode == "data_flywheel" else 1,
+        "output_root": paths["output_root"].replace("\\", "/"),
+    }
+    update_meta_summary(
+        paths["meta_summary_file"],
+        run_config,
+        [record["sub_category"] for record in json_dict],
+        {
+            "cycle_num": cycle_number,
+            "iter_num": iter_number,
+            "global_iter_num": global_iter_number,
+            "plan_file_path": _relative_json_path(
+                paths["plan_file"], paths["output_root"]
+            ),
+            "infer_file_path": _relative_json_path(
+                paths["inference_file"], paths["output_root"]
+            ),
+            "stat_file_path": _relative_json_path(
+                paths["compare_file"], paths["output_root"]
+            ),
+            "new_hard_sample_count": new_hard_count,
+        },
+    )
+    if args.clean_cycle_cache:
+        removed = clean_redundant_files(paths["iteration_dir"])
+        if args.mode == "eval":
+            removed.extend(_clean_legacy_redundant_files(paths))
+        if removed:
+            print(f"[MathFlywheel] removed_redundant_files={len(removed)}")
+
+    cumulative_records = [
+        record
+        for iteration_records in history_dict
+        for record in iteration_records
+    ]
+    current_coverage, _, _ = HardSamplePool.coverage(cumulative_records)
+    log_math_iteration_metrics(
+        global_iter_number,
+        compare_summary["global_accuracy"],
+        current_coverage,
+        hard_total,
+        should_direct_generation,
+        flywheel_triggers,
+        _lowest_sub_categories(compare_summary),
+    )
+    print(
+        get_summary_of_results(
+            json_dict,
+            gold_key="gold_answer",
+            verbose=False,
+        )
+    )
+    return {
+        "paths": paths,
+        "global_iter_number": global_iter_number,
+        "global_accuracy": compare_summary["global_accuracy"],
+        "hard_pool_total": hard_total,
+    }
+
+
+# [ADDED] Execute eval or the complete evaluation-training flywheel.
+def _run_autobencher(args, agent_info, evaluator_info):
+    output_root = _output_root(args.outfile_prefix1)
+    os.makedirs(output_root, exist_ok=True)
+    cycle_record_path = _cycle_record_file(args)
+    run_config = {
+        "mode": args.mode,
+        "agent_model": args.agent_modelname,
+        "initial_test_taker_model": args.test_taker_modelname,
+        "num_iters": args.num_iters,
+        "max_cycle": args.max_cycle if args.mode == "data_flywheel" else 1,
+        "export_interval": args.export_interval,
+        "finetune_gpu": args.finetune_gpu,
+        "finetune_epoch": args.finetune_epoch,
+        "finetune_batch": args.finetune_batch,
+        "lora_rank": args.lora_rank,
+    }
+    cycle_record = _load_cycle_record(cycle_record_path)
+    if cycle_record.get("run_config") != run_config:
+        cycle_record = {
+            "schema_version": 1,
+            "status": "running",
+            "created_at": _utc_timestamp(),
+            "run_config": run_config,
+            "active_test_taker_model": args.test_taker_modelname,
+            "cycles": [],
+        }
+    else:
+        cycle_record["status"] = "running"
+    _save_cycle_record(cycle_record_path, cycle_record)
+
+    current_test_taker_model = cycle_record.get(
+        "active_test_taker_model",
+        args.test_taker_modelname,
+    )
+    cycle_limit = args.max_cycle if args.mode == "data_flywheel" else 1
+    cycles_by_number = {
+        item.get("cycle"): item
+        for item in cycle_record.get("cycles", [])
+        if isinstance(item, dict)
+    }
+    for cycle_number in range(1, cycle_limit + 1):
+        prior_cycle = cycles_by_number.get(cycle_number)
+        if prior_cycle and prior_cycle.get("status") in {
+            "completed",
+            "completed_without_training",
+        }:
+            current_test_taker_model = prior_cycle.get(
+                "next_test_taker_model",
+                current_test_taker_model,
+            )
+            print(f"[Cycle] resume_skip={cycle_number} status={prior_cycle['status']}")
+            continue
+
+        cycle_entry = {
+            "cycle": cycle_number,
+            "status": "running",
+            "started_at": _utc_timestamp(),
+            "test_taker_model": current_test_taker_model,
+            "iterations_completed": 0,
+            "training_export": None,
+            "finetune_output": None,
+            "finetune_status": "not_started",
+            "next_test_taker_model": current_test_taker_model,
+        }
+        cycle_record["cycles"] = [
+            item
+            for item in cycle_record.get("cycles", [])
+            if item.get("cycle") != cycle_number
+        ]
+        cycle_record["cycles"].append(cycle_entry)
+        cycle_record["cycles"].sort(key=lambda item: item["cycle"])
+        _save_cycle_record(cycle_record_path, cycle_record)
+        test_taker_info = None
+        stage = "test_taker_model_loading"
+        try:
+            test_taker_info = _load_test_taker_info(
+                current_test_taker_model,
+                args.use_helm,
+            )
+            history_dict = []
+            stage = "evaluation"
+            last_iteration = None
+            for iter_number in range(1, args.num_iters + 1):
+                last_iteration = _run_math_iteration(
+                    args,
+                    current_test_taker_model,
                     test_taker_info,
                     agent_info,
                     evaluator_info,
-                    gold_ans_key='answer',
-                    iter_number=iter_number,
-                    temp_log_dir=paths["temp_log_dir"],
+                    history_dict,
+                    cycle_number,
+                    iter_number,
                 )
-                compare_summary = _build_compare_summary(iter_number, json_dict)
-                dump_standard_json(compare_summary, paths["compare_file"])
+                cycle_entry["iterations_completed"] = iter_number
+                cycle_entry["last_global_accuracy"] = last_iteration[
+                    "global_accuracy"
+                ]
+                _save_cycle_record(cycle_record_path, cycle_record)
 
-            history_dict.append(json_dict)
-            # 【新增】固定顺序：统计 → hard_pool → meta_summary → 清理。
-            new_hard_count, hard_total = manage_hard_pool(
-                paths["inference_file"],
-                paths["hard_pool_file"],
-                iter_number,
+            if args.mode == "eval":
+                cycle_entry["status"] = "completed"
+                cycle_entry["finetune_status"] = "disabled"
+                cycle_entry["completed_at"] = _utc_timestamp()
+                cycle_record["active_test_taker_model"] = current_test_taker_model
+                _save_cycle_record(cycle_record_path, cycle_record)
+                continue
+
+            completed_before = (cycle_number - 1) * args.num_iters
+            completed_now = cycle_number * args.num_iters
+            crossed_export_boundary = (
+                completed_now // args.export_interval
+                > completed_before // args.export_interval
             )
-            run_config = {
-                "agent_model": args.agent_modelname,
-                "test_taker_model": args.test_taker_modelname,
-                "tool_model": args.tool_modelname or args.agent_modelname,
-                "target_accuracy_range": args.acc_target,
-                "max_iterations": args.num_iters,
-                "output_root": paths["output_root"].replace("\\", "/"),
-            }
-            update_meta_summary(
-                paths["meta_summary_file"],
-                run_config,
-                [record["sub_category"] for record in json_dict],
-                {
-                    "iter_num": iter_number,
-                    "plan_file_path": _relative_json_path(
-                        paths["plan_file"], paths["output_root"]
-                    ),
-                    "infer_file_path": _relative_json_path(
-                        paths["inference_file"], paths["output_root"]
-                    ),
-                    "stat_file_path": _relative_json_path(
-                        paths["compare_file"], paths["output_root"]
-                    ),
-                    "new_hard_sample_count": new_hard_count,
-                },
+            if not crossed_export_boundary:
+                cycle_entry["status"] = "completed_without_training"
+                cycle_entry["finetune_status"] = "waiting_for_export_interval"
+                cycle_entry["completed_at"] = _utc_timestamp()
+                _save_cycle_record(cycle_record_path, cycle_record)
+                continue
+
+            stage = "disk_check"
+            disk_status = check_disk_space(
+                output_root,
+                args.disk_warning_threshold,
             )
-            removed = clean_redundant_files(paths["iteration_dir"])
-            removed.extend(_clean_legacy_redundant_files(paths))
-            if removed:
-                print(
-                    f"[MathFlywheel] removed_redundant_files={len(removed)}"
+            cycle_entry["disk_check"] = disk_status
+            if not disk_status["ok"]:
+                raise RuntimeError(
+                    f"Insufficient free disk space: {disk_status['free_gb']:.3f} GB"
                 )
 
-            cumulative_records = [
-                record
-                for iteration_records in history_dict
-                for record in iteration_records
-            ]
-            current_coverage, _, _ = HardSamplePool.coverage(
-                cumulative_records
+            stage = "training_export"
+            export_path = os.path.join(
+                output_root,
+                "training_export",
+                f"cycle_{cycle_number}_train.jsonl",
             )
-            weakest = _lowest_sub_categories(compare_summary)
-            log_math_iteration_metrics(
-                iter_number,
-                compare_summary["global_accuracy"],
-                current_coverage,
-                hard_total,
-                should_direct_generation,
-                flywheel_triggers,
-                weakest,
+            exported_count = export_training_dataset(
+                os.path.join(output_root, "hard_pool.json"),
+                export_path,
             )
+            cycle_entry["training_export"] = _relative_json_path(
+                export_path,
+                output_root,
+            )
+            cycle_entry["training_sample_count"] = exported_count
+            _save_cycle_record(cycle_record_path, cycle_record)
+            if exported_count == 0:
+                cycle_entry["status"] = "completed_without_training"
+                cycle_entry["finetune_status"] = "no_train_eligible_samples"
+                cycle_entry["completed_at"] = _utc_timestamp()
+                _save_cycle_record(cycle_record_path, cycle_record)
+                continue
+
+            stage = "finetune"
+            _release_model_info(test_taker_info)
+            test_taker_info = None
+            model_dir_name = (
+                f"{_safe_model_component(current_test_taker_model)}_"
+                f"{_safe_model_component(args.new_local_model_suffix)}_"
+                f"cycle_{cycle_number}"
+            )
+            finetune_output = os.path.join(
+                output_root,
+                "models",
+                model_dir_name,
+            )
+            cycle_entry["finetune_output"] = _relative_json_path(
+                finetune_output,
+                output_root,
+            )
+            cycle_entry["finetune_status"] = "running"
+            _save_cycle_record(cycle_record_path, cycle_record)
+            result = call_local_finetune(
+                current_test_taker_model,
+                export_path,
+                args.finetune_gpu,
+                args.finetune_epoch,
+                args.finetune_batch,
+                args.lora_rank,
+                finetune_output,
+            )
+            if not result["success"]:
+                raise RuntimeError(
+                    result.get("error")
+                    or f"Fine-tuning exited with code {result['returncode']}"
+                )
+            current_test_taker_model = os.path.abspath(finetune_output)
+            cycle_entry["status"] = "completed"
+            cycle_entry["finetune_status"] = "completed"
+            cycle_entry["next_test_taker_model"] = current_test_taker_model.replace(
+                "\\",
+                "/",
+            )
+            cycle_entry["completed_at"] = _utc_timestamp()
+            cycle_record["active_test_taker_model"] = current_test_taker_model
+            _save_cycle_record(cycle_record_path, cycle_record)
+        except (Exception, KeyboardInterrupt) as exc:
+            cycle_entry["status"] = "failed"
+            cycle_entry["failed_stage"] = stage
+            cycle_entry["failure_type"] = _failure_type(stage, exc)
+            cycle_entry["error"] = _sanitize_error(exc)
+            cycle_entry["completed_at"] = _utc_timestamp()
+            cycle_record["status"] = "failed"
+            cycle_record["active_test_taker_model"] = current_test_taker_model
+            _save_cycle_record(cycle_record_path, cycle_record)
             print(
-                get_summary_of_results(
-                    json_dict, gold_key="gold_answer", verbose=False
-                )
+                f"[Cycle] failed cycle={cycle_number} stage={stage} "
+                f"type={cycle_entry['failure_type']} error={cycle_entry['error']}"
             )
+            return 1
+        finally:
+            _release_model_info(test_taker_info)
+
+    cycle_record["status"] = "completed"
+    cycle_record["active_test_taker_model"] = current_test_taker_model
+    _save_cycle_record(cycle_record_path, cycle_record)
+    return 0
 
 
-    elif args.exp_mode == 'python_solve':
-        datafile = args.outfile_prefix1
-        full_lst = []
-        try:
-            with open(datafile, 'r') as f:
-                for line in f:
-                    line = json.loads(line)
-                    line['test_taker_response'] = "PLACEHOLDER"
-                    full_lst.append(line)
-        except:
-            with open(datafile, 'r') as f:
-                line_lst = json.load(f)
-                for line in line_lst:
-                    line['test_taker_response'] = "PLACEHOLDER"
-                    full_lst.append(line)
-        solve_with_python(full_lst, args.outfile_prefix1, agent_info)
+def _run_python_solve(args, agent_info):
+    datafile = args.outfile_prefix1
+    full_list = []
+    try:
+        with open(datafile, "r", encoding="utf-8") as handle:
+            for line in handle:
+                record = json.loads(line)
+                record["test_taker_response"] = "PLACEHOLDER"
+                full_list.append(record)
+    except (json.JSONDecodeError, TypeError):
+        with open(datafile, "r", encoding="utf-8") as handle:
+            for record in json.load(handle):
+                record["test_taker_response"] = "PLACEHOLDER"
+                full_list.append(record)
+    solve_with_python(full_list, args.outfile_prefix1, agent_info)
+    return 0
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(
+        prog="math_autobencher.py",
+        description="Run adaptive math evaluation or the local LoRA data flywheel.",
+    )
+    parser.add_argument("--test_taker_modelname", default="gpt-3.5-turbo")
+    parser.add_argument("--test_taker_modelname2", default=None)
+    parser.add_argument("--agent_modelname", default="gpt-4-turbo-preview")
+    parser.add_argument("--tool_modelname", default=None)
+    parser.add_argument("--temperature", type=float, default=0.001)
+    parser.add_argument("--pairwise", type=str, default="no")
+    parser.add_argument("--exp_mode", type=str, default="autobencher")
+    parser.add_argument("--theme", type=str, default="history")
+    parser.add_argument("--use_helm", type=str, default="no")
+    parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--acc_target", type=str, default="0.1--0.3")
+    parser.add_argument("--num_iters", type=int, default=8)
+    parser.add_argument("--outfile_prefix1", type=str, default="att1")
+    # [ADDED] Flywheel and built-in QLoRA parameters.
+    parser.add_argument(
+        "--mode",
+        choices=["eval", "data_flywheel"],
+        default="eval",
+    )
+    parser.add_argument("--export_interval", type=int, default=1)
+    parser.add_argument("--max_cycle", type=int, default=1)
+    parser.add_argument("--finetune_gpu", type=str, default="0")
+    parser.add_argument("--finetune_epoch", type=int, default=3)
+    parser.add_argument("--finetune_batch", type=int, default=8)
+    parser.add_argument("--lora_rank", type=int, default=8)
+    parser.add_argument(
+        "--new_local_model_suffix",
+        type=str,
+        default="finetuned",
+    )
+    parser.add_argument("--disk_warning_threshold", type=int, default=10)
+    parser.add_argument(
+        "--clean_cycle_cache",
+        type=_parse_bool,
+        default=True,
+    )
+    return parser
+
+
+def main():
+    parser = _build_parser()
+    args = parser.parse_args()
+    for name in (
+        "num_iters",
+        "export_interval",
+        "max_cycle",
+        "finetune_epoch",
+        "finetune_batch",
+        "lora_rank",
+    ):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name} must be at least 1")
+    if args.disk_warning_threshold < 0:
+        parser.error("--disk_warning_threshold cannot be negative")
+    if args.mode == "data_flywheel" and args.use_helm == "yes":
+        parser.error("data_flywheel requires a local non-HELM test taker")
+
+    output_root = _output_root(args.outfile_prefix1)
+    os.makedirs(output_root, exist_ok=True)
+    cycle_record_path = _cycle_record_file(args)
+    try:
+        agent_info, evaluator_info = _load_agent_and_evaluator(args)
+    except Exception as exc:
+        failure_record = {
+            "schema_version": 1,
+            "status": "failed",
+            "created_at": _utc_timestamp(),
+            "updated_at": _utc_timestamp(),
+            "active_test_taker_model": args.test_taker_modelname,
+            "failure_type": _failure_type("agent_model_loading", exc),
+            "failed_stage": "agent_model_loading",
+            "error": _sanitize_error(exc),
+            "cycles": [],
+        }
+        dump_standard_json(failure_record, cycle_record_path)
+        print(f"[Startup] model loading failed: {failure_record['error']}")
+        return 1
+
+    if args.exp_mode == "autobencher":
+        return _run_autobencher(args, agent_info, evaluator_info)
+    if args.exp_mode == "python_solve":
+        return _run_python_solve(args, agent_info)
+    parser.error(f"Unsupported --exp_mode: {args.exp_mode}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

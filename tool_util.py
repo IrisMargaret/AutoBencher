@@ -3,8 +3,10 @@ import hashlib
 import re
 import requests
 import os, argparse, ast, json, tqdm
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import quote
 from time import sleep
 from collections import defaultdict
@@ -43,7 +45,7 @@ Reply "TERMINATE" in the end when everything is done.
 DEFAULT_DESCRIPTION = "A helpful and general-purpose AI assistant that has strong language skills, Python skills, and Linux command line skills."
 
 
-# 【新增】数学双层分类、错误标签和固定细分题型全集，所有持久化值均为英文。
+# [ADDED] Fixed English math taxonomy and error-tag vocabulary.
 MATH_CATEGORIES = (
     "Arithmetic",
     "Algebra",
@@ -62,6 +64,18 @@ ERROR_TAGS = (
     "condition_missing",
     "multi-step_logic_error",
     "concept_confusion",
+)
+
+SAMPLE_GRADES = (
+    "train_eligible",
+    "hard_unsuitable",
+    "easy_sample",
+)
+
+ACCURACY_BUCKETS = (
+    "below_0.1",
+    "0.1-0.4",
+    "above_0.4",
 )
 
 SUB_CATEGORY_TAXONOMY = {
@@ -148,7 +162,7 @@ def _english_only(value, fallback="", preserve_newlines=False):
     return cleaned or fallback
 
 
-# 【新增】统一 UTF-8、2 空格、可读 JSON 输出，并使用原子替换避免残缺缓存。
+# [ADDED] Write readable UTF-8 JSON atomically with two-space indentation.
 def dump_standard_json(data, output_file):
     output_file = os.fspath(output_file)
     os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
@@ -356,7 +370,7 @@ def load_math_inference(inference_file):
     ]
 
 
-# 【新增】数学分支专用标准推理缓存；Wiki/Multilingual 继续使用原 JSONL 逻辑。
+# [ADDED] Standard math inference cache; Wiki and Multilingual stay unchanged.
 def generate_math_inference(
     question_inputs,
     test_model_info,
@@ -429,11 +443,37 @@ def generate_math_inference(
     return canonical_records
 
 
-# 【新增】从唯一推理数据源提取错题，按 unique_key 增量去重。
-def manage_hard_pool(inference_file, hard_pool_file, source_iter):
+# [ADDED] Grade wrong answers using their measured sub-category accuracy.
+def _sample_grade_for_accuracy(accuracy):
+    if accuracy < 0.1:
+        return "hard_unsuitable", "below_0.1"
+    if accuracy <= 0.4:
+        return "train_eligible", "0.1-0.4"
+    return "easy_sample", "above_0.4"
+
+
+# [MODIFIED] Deduplicate, grade, and retain wrong answers in the global pool.
+def manage_hard_pool(
+    inference_file,
+    hard_pool_file,
+    source_iter,
+    source_cycle=1,
+):
     inference_records = load_math_inference(inference_file)
+    grouped = defaultdict(list)
+    for record in inference_records:
+        grouped[(record["category"], record["sub_category"])].append(record)
+    accuracy_by_group = {
+        key: sum(_as_bool(item.get("is_correct")) for item in records) / len(records)
+        for key, records in grouped.items()
+        if records
+    }
     existing_raw = read_json_records(hard_pool_file)
-    if len(existing_raw) == 1 and isinstance(existing_raw[0].get("groups"), dict):
+    if (
+        len(existing_raw) == 1
+        and isinstance(existing_raw[0], dict)
+        and isinstance(existing_raw[0].get("groups"), dict)
+    ):
         existing_raw = [
             sample
             for group in existing_raw[0]["groups"].values()
@@ -445,8 +485,23 @@ def manage_hard_pool(inference_file, hard_pool_file, source_iter):
         if not isinstance(sample, dict) or not sample.get("question"):
             continue
         canonical = canonicalize_math_record(sample, index)
+        grade = sample.get("sample_grade", "hard_unsuitable")
+        if grade not in SAMPLE_GRADES:
+            grade = "hard_unsuitable"
+        bucket = sample.get("accuracy_bucket", "below_0.1")
+        if bucket not in ACCURACY_BUCKETS:
+            bucket = "below_0.1"
         hard_sample = {
             "source_iter": _as_int(sample.get("source_iter"), source_iter),
+            "source_cycle": _as_int(sample.get("source_cycle"), source_cycle),
+            "last_seen_iter": _as_int(
+                sample.get("last_seen_iter", sample.get("source_iter")),
+                source_iter,
+            ),
+            "last_seen_cycle": _as_int(
+                sample.get("last_seen_cycle", sample.get("source_cycle")),
+                source_cycle,
+            ),
             "category": canonical["category"],
             "sub_category": canonical["sub_category"],
             "question": canonical["question"],
@@ -455,6 +510,12 @@ def manage_hard_pool(inference_file, hard_pool_file, source_iter):
             "error_tags": canonical["error_tags"] or classify_error_tags(sample),
             "difficulty": canonical["difficulty"],
             "unique_key": canonical["unique_key"],
+            "sample_grade": grade,
+            "accuracy_bucket": bucket,
+            "sub_category_accuracy": float(
+                sample.get("sub_category_accuracy", 0.0)
+            ),
+            "occurrences": max(1, _as_int(sample.get("occurrences"), 1)),
         }
         existing[hard_sample["unique_key"]] = hard_sample
 
@@ -462,8 +523,16 @@ def manage_hard_pool(inference_file, hard_pool_file, source_iter):
     for record in inference_records:
         if record["is_correct"] or not record["test_taker_response"]:
             continue
+        group_key = (record["category"], record["sub_category"])
+        sub_category_accuracy = accuracy_by_group.get(group_key, 0.0)
+        sample_grade, accuracy_bucket = _sample_grade_for_accuracy(
+            sub_category_accuracy
+        )
         sample = {
             "source_iter": int(source_iter),
+            "source_cycle": int(source_cycle),
+            "last_seen_iter": int(source_iter),
+            "last_seen_cycle": int(source_cycle),
             "category": record["category"],
             "sub_category": record["sub_category"],
             "question": record["question"],
@@ -472,14 +541,166 @@ def manage_hard_pool(inference_file, hard_pool_file, source_iter):
             "error_tags": record["error_tags"] or classify_error_tags(record),
             "difficulty": record["difficulty"],
             "unique_key": record["unique_key"],
+            "sample_grade": sample_grade,
+            "accuracy_bucket": accuracy_bucket,
+            "sub_category_accuracy": sub_category_accuracy,
+            "occurrences": 1,
         }
-        existing.setdefault(sample["unique_key"], sample)
-    samples = list(existing.values())
+        previous = existing.get(sample["unique_key"])
+        if previous:
+            previous.update(
+                {
+                    "last_seen_iter": int(source_iter),
+                    "last_seen_cycle": int(source_cycle),
+                    "test_taker_response": sample["test_taker_response"],
+                    "error_tags": sample["error_tags"],
+                    "sample_grade": sample_grade,
+                    "accuracy_bucket": accuracy_bucket,
+                    "sub_category_accuracy": sub_category_accuracy,
+                    "occurrences": previous.get("occurrences", 1) + 1,
+                }
+            )
+        else:
+            existing[sample["unique_key"]] = sample
+    samples = sorted(
+        existing.values(),
+        key=lambda item: (
+            item["source_cycle"],
+            item["source_iter"],
+            item["unique_key"],
+        ),
+    )
     dump_standard_json(samples, hard_pool_file)
     return len(existing) - before, len(samples)
 
 
-# 【新增】统一维护全局实验配置、细分题型集合和轮次文件索引。
+# [ADDED] Export eligible hard samples as Alpaca JSONL.
+def export_training_dataset(hard_pool_file, output_file):
+    records = [
+        record
+        for record in read_json_records(hard_pool_file)
+        if isinstance(record, dict)
+        and record.get("sample_grade") == "train_eligible"
+        and record.get("question")
+        and record.get("gold_answer")
+    ]
+    deduplicated = {
+        record.get("unique_key")
+        or build_unique_key(
+            record.get("category", ""),
+            record.get("sub_category", ""),
+            record["question"],
+        ): record
+        for record in records
+    }
+    output_file = os.path.abspath(os.fspath(output_file))
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    temporary_output = f"{output_file}.tmp"
+    with open(temporary_output, "w", encoding="utf-8", newline="\n") as handle:
+        for key in sorted(deduplicated):
+            record = deduplicated[key]
+            alpaca_record = {
+                "instruction": "Solve the math problem. Return only the final answer.",
+                "input": _english_only(record["question"]),
+                "output": _english_only(record["gold_answer"]),
+            }
+            handle.write(json.dumps(alpaca_record, ensure_ascii=False))
+            handle.write("\n")
+    os.replace(temporary_output, output_file)
+    return len(deduplicated)
+
+
+# [ADDED] Report free disk space before exporting or training.
+def check_disk_space(path, warning_threshold_gb=10):
+    target = Path(path).resolve()
+    existing_target = target
+    while not existing_target.exists() and existing_target != existing_target.parent:
+        existing_target = existing_target.parent
+    usage = shutil.disk_usage(existing_target)
+    free_gb = usage.free / (1024 ** 3)
+    status = {
+        "ok": free_gb >= float(warning_threshold_gb),
+        "path": target.as_posix(),
+        "free_gb": round(free_gb, 3),
+        "warning_threshold_gb": int(warning_threshold_gb),
+    }
+    level = "INFO" if status["ok"] else "WARNING"
+    print(
+        f"[DiskCheck] level={level} free_gb={status['free_gb']:.3f} "
+        f"threshold_gb={status['warning_threshold_gb']} path={status['path']}"
+    )
+    return status
+
+
+# [ADDED] Invoke the repository-local fine-tuning entry point.
+def call_local_finetune(
+    original_model,
+    dataset_path,
+    gpu,
+    epoch,
+    batch,
+    lora_rank,
+    output_path,
+):
+    script_path = Path(__file__).resolve().with_name("train_llm.py")
+    if not script_path.is_file():
+        return {
+            "success": False,
+            "returncode": 2,
+            "error": f"Built-in fine-tuning script not found: {script_path}",
+        }
+    command = [
+        sys.executable,
+        os.fspath(script_path),
+        "--model_name_or_path",
+        os.fspath(original_model),
+        "--dataset_path",
+        os.fspath(dataset_path),
+        "--gpu",
+        str(gpu),
+        "--epoch",
+        str(epoch),
+        "--batch",
+        str(batch),
+        "--lora_rank",
+        str(lora_rank),
+        "--output_path",
+        os.fspath(output_path),
+    ]
+    print("[FineTune] command=" + subprocess.list2cmdline(command))
+    environment = os.environ.copy()
+    environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+    except OSError as exc:
+        return {
+            "success": False,
+            "returncode": 2,
+            "error": str(exc),
+        }
+    if result.stdout:
+        print(result.stdout.rstrip())
+    if result.stderr:
+        print(result.stderr.rstrip(), file=sys.stderr)
+    error_output = "\n".join(
+        part.strip()
+        for part in (result.stdout, result.stderr)
+        if part and part.strip()
+    )
+    return {
+        "success": result.returncode == 0,
+        "returncode": result.returncode,
+        "error": "" if result.returncode == 0 else error_output[-4000:],
+    }
+
+
+# [MODIFIED] Maintain global configuration and cycle-aware iteration indexes.
 def update_meta_summary(
     meta_summary_file,
     run_config,
@@ -493,10 +714,22 @@ def update_meta_summary(
         item
         for item in meta.get("iteration_index", [])
         if isinstance(item, dict)
-        and item.get("iter_num") != iteration_entry.get("iter_num")
+        and (
+            item.get("cycle_num", 1),
+            item.get("iter_num"),
+        )
+        != (
+            iteration_entry.get("cycle_num", 1),
+            iteration_entry.get("iter_num"),
+        )
     ]
     indexes.append(iteration_entry)
-    indexes.sort(key=lambda item: item["iter_num"])
+    indexes.sort(
+        key=lambda item: (
+            item.get("cycle_num", 1),
+            item.get("iter_num", 0),
+        )
+    )
     all_sub_categories = sorted(
         {
             str(item)
@@ -519,7 +752,7 @@ def update_meta_summary(
     return payload
 
 
-# 【新增】清理数学迭代冗余分片、重试文本和损坏 JSON，保留目录本身。
+# [ADDED] Remove redundant fragments, attempts, and invalid JSON files.
 def clean_redundant_files(iteration_dir):
     if not os.path.isdir(iteration_dir):
         return []
@@ -592,7 +825,13 @@ class HardSamplePool:
         return len(covered) / len(ALL_SUB_CATEGORIES), sorted(covered), missing
 
     def get_history_context(self, max_samples=None):
-        samples = self.samples if max_samples is None else self.samples[-max_samples:]
+        eligible = [
+            sample
+            for sample in self.samples
+            if sample.get("sample_grade") == "train_eligible"
+        ]
+        samples = eligible or self.samples
+        samples = samples if max_samples is None else samples[-max_samples:]
         grouped = defaultdict(list)
         for sample in samples:
             grouped[sample.get("sub_category", "Unknown")].append(sample)
@@ -607,6 +846,31 @@ class HardSamplePool:
                     f"wrong: {str(sample.get('test_taker_response', ''))[:120]} | "
                     f"error_tags: {tags}"
                 )
+        return "\n".join(lines)
+
+    def get_variant_context(self, category, sub_category, max_samples=12):
+        samples = [
+            sample
+            for sample in self.samples
+            if sample.get("sample_grade") == "train_eligible"
+            and sample.get("category") == category
+            and sample.get("sub_category") == sub_category
+        ]
+        if not samples:
+            samples = [
+                sample
+                for sample in self.samples
+                if sample.get("sample_grade") == "train_eligible"
+                and sample.get("category") == category
+            ]
+        lines = []
+        for sample in samples[-max_samples:]:
+            lines.append(
+                f"- question: {str(sample.get('question', ''))[:300]} | "
+                f"gold: {str(sample.get('gold_answer', ''))[:120]} | "
+                f"wrong: {str(sample.get('test_taker_response', ''))[:120]} | "
+                f"error_tags: {','.join(sample.get('error_tags', []))}"
+            )
         return "\n".join(lines)
 
 
@@ -633,7 +897,7 @@ def execute_code(code, lang="python", timeout=120):
 
 
 
-# 【新增】提取带引号感知的平衡 JSON 片段，容忍 JSON 前后解释文本。
+# [ADDED] Extract quote-aware balanced JSON from surrounding prose.
 def _balanced_json_fragments(text):
     fragments = []
     for start in (match.start() for match in re.finditer(r"[\[{]", text)):
@@ -666,7 +930,7 @@ def _balanced_json_fragments(text):
     return fragments
 
 
-# 【新增】仅修复常见格式噪声，不改变 JSON 字段与值的语义。
+# [ADDED] Repair common formatting noise without changing field semantics.
 def _repair_json_candidate(candidate):
     repaired = candidate.strip().lstrip("\ufeff")
     repaired = re.sub(r"^\s*json\s*", "", repaired, flags=re.IGNORECASE)
@@ -680,7 +944,7 @@ def _repair_json_candidate(candidate):
     return repaired
 
 
-# 【修改】增强 fenced/raw/balanced JSON 多路径容错，解决夹带解释文本的响应。
+# [MODIFIED] Parse fenced, raw, tagged, and balanced JSON model output.
 def extract_json_v2(json_text, outfilename):
     if not isinstance(json_text, str):
         raise TypeError("Model response must be text")
