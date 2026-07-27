@@ -1,0 +1,11 @@
+extends: math_flywheel.yaml
+
+experiment:
+  name: qwen7b_local_math_flywheel
+
+paths:
+  output_root: math_flywheel
+
+models:
+  test_taker:
+    model_path: qwen2.5:7b-instruct

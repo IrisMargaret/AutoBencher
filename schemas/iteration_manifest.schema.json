@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "iteration_manifest.schema.json",
+  "title": "Iteration Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_at",
+    "git_commit",
+    "config_hash",
+    "cycle_id",
+    "iteration_id",
+    "iteration_uid"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "git_commit": {
+      "type": "string"
+    },
+    "config_hash": {
+      "type": "string"
+    },
+    "cycle_id": {
+      "type": "integer"
+    },
+    "iteration_id": {
+      "type": "integer"
+    },
+    "iteration_uid": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

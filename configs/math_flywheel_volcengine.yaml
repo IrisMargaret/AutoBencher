@@ -1,0 +1,18 @@
+extends: math_flywheel.yaml
+
+experiment:
+  name: qwen7b_volcengine_math_flywheel
+
+models:
+  test_taker:
+    model_path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+
+paths:
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  outfile_prefix: qwen7b_dsagent
+  cache_dir: /vepfs-mlp2/queue010/20262202597/.cache
+  model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
+  log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
+
+logging:
+  progress_enabled: false

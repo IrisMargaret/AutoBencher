@@ -1,0 +1,258 @@
+schema_version: "1.0"
+
+experiment:
+  name: qwen7b_deepseek_math_flywheel
+  seed: 42
+  mode: data_flywheel
+  exp_mode: autobencher
+  num_iterations: 5
+  max_cycles: 3
+  questions_per_iteration: 450
+  export_interval: 1
+  clean_cycle_cache: false
+  resume: true
+
+models:
+  evaluator:
+    model_name: deepseek-v4-pro
+    use_privileged_tools: true
+    temperature: 0.2
+    max_tokens: 4096
+  test_taker:
+    model_path: qwen2.5:7b-instruct
+    use_external_tools: false
+    temperature: 0.0
+    max_new_tokens: 1024
+
+paths:
+  output_root: math_flywheel
+  outfile_prefix: qwen7b_dsagent
+  cache_dir: null
+  model_output_dir: null
+  log_dir: null
+
+coverage:
+  default_min_quota: 20
+  enforce_min_quota: true
+  repair_rounds: 2
+  raw_coverage_enabled: true
+  effective_coverage_enabled: true
+  balance_metrics:
+    - normalized_entropy
+    - js_divergence
+    - coefficient_of_variation
+    - max_min_count_ratio
+
+taxonomy:
+  Arithmetic:
+    Integer Operations:
+      min_quota: 20
+      base_weight: 1.0
+    Fraction and Decimal Operations:
+      min_quota: 20
+      base_weight: 1.0
+    Ratio and Percentage:
+      min_quota: 20
+      base_weight: 1.0
+  Algebra:
+    Linear Equations:
+      min_quota: 20
+      base_weight: 1.0
+    Systems of Equations:
+      min_quota: 20
+      base_weight: 1.0
+    Polynomials and Inequalities:
+      min_quota: 20
+      base_weight: 1.0
+  Geometry & Trigonometry:
+    Plane Geometry:
+      min_quota: 20
+      base_weight: 1.0
+    Solid Geometry:
+      min_quota: 20
+      base_weight: 1.0
+    Trigonometric Reasoning:
+      min_quota: 20
+      base_weight: 1.0
+  Probability & Statistics:
+    Basic Probability:
+      min_quota: 20
+      base_weight: 1.0
+    Combinatorics:
+      min_quota: 20
+      base_weight: 1.0
+    Descriptive Statistics:
+      min_quota: 20
+      base_weight: 1.0
+  Word Problems:
+    Rate and Distance:
+      min_quota: 20
+      base_weight: 1.0
+    Work and Mixture:
+      min_quota: 20
+      base_weight: 1.0
+    Financial Applications:
+      min_quota: 20
+      base_weight: 1.0
+  Number Theory:
+    Divisibility and Factors:
+      min_quota: 20
+      base_weight: 1.0
+    Prime Factorization:
+      min_quota: 20
+      base_weight: 1.0
+    Modular Arithmetic:
+      min_quota: 20
+      base_weight: 1.0
+  Calculus:
+    Limits and Continuity:
+      min_quota: 20
+      base_weight: 1.0
+    Differentiation:
+      min_quota: 20
+      base_weight: 1.0
+    Integration:
+      min_quota: 20
+      base_weight: 1.0
+  Linear Algebra:
+    Matrix Operations:
+      min_quota: 20
+      base_weight: 1.0
+    Linear Systems:
+      min_quota: 20
+      base_weight: 1.0
+    Vectors and Vector Spaces:
+      min_quota: 20
+      base_weight: 1.0
+  Composite Comprehensive:
+    Cross-Domain Multi-Step Problems:
+      min_quota: 20
+      base_weight: 1.0
+    Proof and Mathematical Reasoning:
+      min_quota: 20
+      base_weight: 1.0
+    Constraint Synthesis:
+      min_quota: 20
+      base_weight: 1.0
+
+generation_mix:
+  warmup_iterations: 2
+  hard_pool_variants: 0.45
+  coverage_deficit: 0.40
+  retention_known: 0.15
+
+generation:
+  max_questions_per_prompt: 50
+
+hard_pool:
+  enabled: true
+  injection_start_iteration: 3
+  max_reference_samples: 40
+  max_prompt_tokens: 12000
+  deduplicate_before_injection: true
+  stratify_by_subcategory: true
+  stratify_by_error_type: true
+  hide_reference_answers: true
+
+adaptive_sampling:
+  enabled: true
+  target_accuracy_low: 0.10
+  target_accuracy_high: 0.30
+  target_accuracy_mid: 0.20
+  beta_prior_alpha: 1.0
+  beta_prior_beta: 1.0
+  boundary_weight: 0.40
+  coverage_weight: 0.25
+  uncertainty_weight: 0.15
+  persistent_error_weight: 0.15
+  retention_weight: 0.05
+  temperature: 0.15
+  min_observations_before_adjustment: 5
+
+test_taker_prompt:
+  require_reasoning_summary: true
+  min_reasoning_steps: 1
+  max_reasoning_steps: 8
+  max_chars_per_step: 120
+  require_json_output: true
+  prohibit_prompt_echo: true
+  prohibit_irrelevant_content: true
+  prohibit_external_tools: true
+  format_repair_attempts: 2
+  stop_sequences:
+    - "\nHuman:"
+    - "\nUser:"
+    - "\nSystem:"
+    - "\nAssistant:"
+    - "<|im_end|>"
+    - "<|endoftext|>"
+
+answer_normalization:
+  absolute_tolerance: 1.0e-6
+  relative_tolerance: 1.0e-5
+  allow_fraction_decimal_equivalence: true
+  normalize_units: true
+  normalize_boolean_text: true
+  symbolic_equivalence: true
+  set_order_sensitive: false
+
+error_attribution:
+  enabled: true
+  confidence_threshold: 0.70
+  allow_multiple_tags: true
+  require_primary_tag: true
+  require_evidence: true
+  low_confidence_tag: unknown_error
+
+dataset:
+  exact_dedup: true
+  text_near_dedup: true
+  template_dedup: true
+  semantic_dedup: true
+  near_duplicate_threshold: 0.90
+  semantic_similarity_threshold: 0.92
+  evaluator_confidence_threshold: 0.80
+  filter_ambiguous_samples: true
+  filter_invalid_answers: true
+  filter_tool_violations: true
+  max_samples_per_template_cluster: 5
+
+training_mix:
+  incorrect_boundary_samples: 0.55
+  correct_retention_samples: 0.25
+  coverage_repair_samples: 0.15
+  format_instruction_samples: 0.05
+
+finetune:
+  enabled: true
+  gpu: "0"
+  epochs: 3
+  batch_size: 8
+  lora_rank: 6
+  new_local_model_suffix: math_lora
+  max_seq_length: 2048
+  learning_rate: 2.0e-4
+  save_step_metrics: true
+  merge_adapter: true
+
+export:
+  save_iteration_json: true
+  save_raw_responses: true
+  save_hard_pool_snapshot: true
+  save_training_dataset: true
+  save_finetune_metrics: true
+  atomic_write: true
+  schema_version: "1.0"
+
+logging:
+  level: INFO
+  console_enabled: true
+  file_enabled: true
+  jsonl_enabled: true
+  progress_enabled: true
+  progress_style: single
+  disable_library_progress: true
+  progress_leave: false
+  progress_dynamic_ncols: true
+  show_stage_summary: true
+  suppress_duplicate_messages: true

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "error_attribution.schema.json",
+  "title": "Error Attribution",
+  "type": "object",
+  "required": [
+    "is_correct",
+    "primary_error_tag",
+    "secondary_error_tags",
+    "evidence",
+    "attribution_confidence",
+    "needs_review",
+    "deterministic_checks"
+  ],
+  "properties": {
+    "is_correct": {
+      "type": "boolean"
+    },
+    "primary_error_tag": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "secondary_error_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "response_span",
+          "reason"
+        ]
+      }
+    },
+    "attribution_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "needs_review": {
+      "type": "boolean"
+    },
+    "deterministic_checks": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

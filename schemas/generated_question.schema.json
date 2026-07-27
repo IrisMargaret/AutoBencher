@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "generated_question.schema.json",
+  "title": "Generated Math Question",
+  "type": "object",
+  "required": [
+    "question_id",
+    "category",
+    "subcategory",
+    "difficulty",
+    "question",
+    "answer_type",
+    "canonical_answer",
+    "display_answer",
+    "unit",
+    "tolerance",
+    "order_sensitive",
+    "generation_source",
+    "reference_hard_sample_ids",
+    "target_error_type",
+    "generation_strategy"
+  ],
+  "properties": {
+    "question_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "enum": [
+        "Arithmetic",
+        "Algebra",
+        "Geometry & Trigonometry",
+        "Probability & Statistics",
+        "Word Problems",
+        "Number Theory",
+        "Calculus",
+        "Linear Algebra",
+        "Composite Comprehensive"
+      ]
+    },
+    "subcategory": {
+      "type": "string",
+      "minLength": 1
+    },
+    "difficulty": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "answer_type": {
+      "enum": [
+        "integer",
+        "decimal",
+        "rational",
+        "percentage",
+        "boolean",
+        "text",
+        "symbolic_expression",
+        "equation",
+        "inequality",
+        "set",
+        "interval",
+        "ordered_tuple",
+        "unordered_collection",
+        "vector",
+        "matrix",
+        "unit_value",
+        "multiple_choice"
+      ]
+    },
+    "canonical_answer": {},
+    "display_answer": {
+      "type": "string"
+    },
+    "unit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tolerance": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "order_sensitive": {
+      "type": "boolean"
+    },
+    "generation_source": {
+      "enum": [
+        "hard_pool_variant",
+        "coverage_deficit",
+        "retention_known"
+      ]
+    },
+    "reference_hard_sample_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "target_error_type": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "generation_strategy": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": true
+}

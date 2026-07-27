@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation_result.schema.json",
+  "title": "Evaluation Result",
+  "type": "object",
+  "required": [
+    "question_id",
+    "status",
+    "is_correct",
+    "deterministic_checks"
+  ],
+  "properties": {
+    "question_id": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "correct",
+        "incorrect",
+        "format_only_error",
+        "parse_failed",
+        "ambiguous",
+        "evaluator_failed",
+        "tool_violation",
+        "irrelevant_output"
+      ]
+    },
+    "is_correct": {
+      "type": "boolean"
+    },
+    "deterministic_checks": {
+      "type": "object"
+    },
+    "evaluator_tool_calls": {
+      "type": "array"
+    }
+  },
+  "additionalProperties": true
+}

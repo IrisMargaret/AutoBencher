@@ -26,3 +26,16 @@ math_v5/
 multilingual/
 smoke_outputs/
 math_test/
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+math_flywheel/
+*.safetensors
+*.bin
+*.log
+.cache/
+*.tmp
+
+AutoBencher.zip

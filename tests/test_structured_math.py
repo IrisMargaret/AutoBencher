@@ -1,0 +1,179 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from autobencher.config import load_resolved_config
+from autobencher.structured import (
+    answers_equivalent,
+    attribute_error,
+    parse_test_taker_output,
+    test_taker_prompt as strict_test_taker_prompt,
+    validate_generated_question,
+)
+
+
+CONFIG_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "configs"
+    / "math_flywheel_smoke_test.yaml"
+)
+
+
+@pytest.fixture
+def config():
+    return load_resolved_config(CONFIG_PATH)[0]
+
+
+def response(answer="8", answer_type="integer"):
+    return json.dumps(
+        {
+            "reasoning_summary": ["Compute the requested value."],
+            "final_answer": answer,
+            "answer_type": answer_type,
+            "confidence": 0.9,
+        }
+    )
+
+
+def test_strict_prompt_explicitly_denies_tools(config):
+    prompt = strict_test_taker_prompt(
+        {"question": "What is 5 + 3?", "answer_type": "integer"},
+        config,
+    )
+    assert "You have no tools" in prompt
+    assert "Return exactly one JSON object" in prompt
+
+
+def test_valid_structured_response_parses(config):
+    parsed = parse_test_taker_output(response(), None, "integer", config)
+    assert parsed["parse_status"] == "success"
+    assert parsed["parsed_response"]["final_answer"] == "8"
+
+
+def test_markdown_json_is_repaired(config):
+    parsed = parse_test_taker_output(
+        f"```json\n{response()}\n```", None, "integer", config
+    )
+    assert parsed["parse_status"] == "success"
+    assert parsed["repair_attempts"] == 1
+
+
+def test_tool_call_is_rejected_before_parsing(config):
+    parsed = parse_test_taker_output(
+        response() + '\n{"tool_calls":[]}', None, "integer", config
+    )
+    assert parsed["parse_status"] == "tool_violation"
+    assert parsed["tool_violation"] is True
+
+
+def test_role_prefixed_output_is_irrelevant(config):
+    parsed = parse_test_taker_output(
+        "Assistant: " + response(), None, "integer", config
+    )
+    assert parsed["parse_status"] == "irrelevant_output"
+
+
+def test_prompt_echo_is_rejected(config):
+    question = "Calculate the exact integer sum of 12345 and 67890."
+    prompt = strict_test_taker_prompt(
+        {"question": question, "answer_type": "integer"},
+        config,
+    )
+    parsed = parse_test_taker_output(
+        question + "\n" + response("80235"),
+        prompt,
+        "integer",
+        config,
+    )
+    assert parsed["parse_status"] == "prompt_echo"
+    assert parsed["contains_prompt_echo"] is True
+
+
+def test_multiple_objects_are_irrelevant(config):
+    parsed = parse_test_taker_output(
+        response() + response(), None, "integer", config
+    )
+    assert parsed["parse_status"] == "irrelevant_output"
+
+
+@pytest.mark.parametrize(
+    ("gold", "predicted", "answer_type"),
+    [
+        ("1/2", "0.5", "rational"),
+        ("25%", "0.25", "percentage"),
+        ("{1, 2, 3}", "{3, 1, 2}", "set"),
+        ("x + x", "2*x", "symbolic_expression"),
+        ("2*x=4", "x=2", "equation"),
+        ("x > 2", "2 < x", "inequality"),
+        ("[1, 3)", "[1,3)", "interval"),
+        ("[[1,2],[3,4]]", "1,2;3,4", "matrix"),
+        ("5 meters", "5 m", "unit_value"),
+    ],
+)
+def test_answer_equivalence_types(config, gold, predicted, answer_type):
+    assert answers_equivalent(
+        gold, predicted, answer_type, config
+    )["equivalent"] is True
+
+
+def test_unit_mismatch_is_not_equivalent(config):
+    result = answers_equivalent("5 m", "5 cm", "unit_value", config)
+    assert result["equivalent"] is False
+    assert result["deterministic_checks"]["unit_consistent"] is False
+
+
+def test_low_confidence_attribution_becomes_unknown(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {"reasoning_summary": ["Guess."]},
+    }
+    equivalent = answers_equivalent("8", "9", "integer", config)
+    result = attribute_error({"question": "What is 5 + 3?"}, parsed, equivalent, config)
+    assert result["primary_error_tag"] == "unknown_error"
+    assert result["needs_review"] is True
+
+
+def test_generated_question_schema_accepts_complete_record():
+    validate_generated_question(
+        {
+            "question_id": "q1",
+            "category": "Arithmetic",
+            "subcategory": "Integer Operations",
+            "difficulty": 1,
+            "question": "What is 5 + 3?",
+            "answer_type": "integer",
+            "canonical_answer": "8",
+            "display_answer": "8",
+            "unit": None,
+            "tolerance": None,
+            "order_sensitive": False,
+            "generation_source": "coverage_deficit",
+            "reference_hard_sample_ids": [],
+            "target_error_type": None,
+            "generation_strategy": "quota_repair",
+        }
+    )
+
+
+def test_generated_question_schema_rejects_unknown_category():
+    with pytest.raises(ValueError, match="validation failed"):
+        validate_generated_question(
+            {
+                "question_id": "q1",
+                "category": "Unknown",
+                "subcategory": "Integer Operations",
+                "difficulty": 1,
+                "question": "What is 5 + 3?",
+                "answer_type": "integer",
+                "canonical_answer": "8",
+                "display_answer": "8",
+                "unit": None,
+                "tolerance": None,
+                "order_sensitive": False,
+                "generation_source": "coverage_deficit",
+                "reference_hard_sample_ids": [],
+                "target_error_type": None,
+                "generation_strategy": "quota_repair",
+            }
+        )

@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import hashlib
 import re
 import requests
@@ -12,6 +13,7 @@ from time import sleep
 from collections import defaultdict
 import numpy as np
 from util import gen_from_prompt
+from autobencher.structured import parse_test_taker_output, test_taker_prompt
 
 
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
@@ -64,6 +66,12 @@ ERROR_TAGS = (
     "condition_missing",
     "multi-step_logic_error",
     "concept_confusion",
+    "format_output_error",
+    "tool_violation",
+    "irrelevant_output",
+    "prompt_echo",
+    "parse_failed",
+    "unknown_error",
 )
 
 SAMPLE_GRADES = (
@@ -347,19 +355,79 @@ def canonicalize_math_record(record, index=0):
         if isinstance(existing_tags, list)
         else []
     )
-    return {
+    canonical = {
         "id": _as_int(record.get("id"), index + 1),
+        "question_id": str(
+            record.get(
+                "question_id",
+                record.get("id", index + 1),
+            )
+        ),
         "category": category,
         "sub_category": sub_category,
         "difficulty": _as_int(record.get("difficulty"), 5),
         "question": question,
         "gold_answer": gold_answer,
+        "answer_type": str(record.get("answer_type", "text")),
+        "canonical_answer": record.get(
+            "canonical_answer",
+            record.get("gold_answer", record.get("answer", "")),
+        ),
+        "display_answer": str(
+            record.get(
+                "display_answer",
+                record.get("gold_answer", record.get("answer", "")),
+            )
+        ),
+        "unit": record.get("unit"),
+        "tolerance": record.get("tolerance"),
+        "order_sensitive": bool(record.get("order_sensitive", False)),
         "test_taker_response": response,
         "prompt": prompt,
         "is_correct": _as_bool(record.get("is_correct")),
         "error_tags": error_tags,
         "unique_key": unique_key,
     }
+    preserved_fields = (
+        "generation_source",
+        "reference_hard_sample_ids",
+        "target_error_type",
+        "generation_strategy",
+        "raw_response",
+        "parsed_response",
+        "parse_status",
+        "repair_attempts",
+        "contains_prompt_echo",
+        "contains_irrelevant_content",
+        "tool_violation",
+        "test_taker_tool_call_count",
+        "evaluation_status",
+        "normalized_gold_answer",
+        "normalized_test_taker_answer",
+        "deterministic_checks",
+        "primary_error_tag",
+        "secondary_error_tags",
+        "evidence",
+        "attribution_confidence",
+        "needs_review",
+        "evaluator_tool_calls",
+        "question_parse_success",
+        "answer_validation_success",
+        "evaluator_confidence",
+        "ambiguous",
+        "format_only_error",
+        "run_id",
+        "cycle_id",
+        "iteration_id",
+        "iteration_uid",
+        "config_hash",
+        "prompt_hash",
+        "cache_status",
+    )
+    for field in preserved_fields:
+        if field in record:
+            canonical[field] = copy.deepcopy(record[field])
+    return canonical
 
 
 def load_math_inference(inference_file):
@@ -378,6 +446,10 @@ def generate_math_inference(
     bsz=1,
     temperature=0.01,
     max_length=50,
+    research_config=None,
+    progress_manager=None,
+    cycle=None,
+    iteration=None,
 ):
     if len(question_inputs) == 1 and isinstance(question_inputs[0], list):
         question_inputs = question_inputs[0]
@@ -390,9 +462,7 @@ def generate_math_inference(
     for record in canonical_records:
         existing = existing_by_key.get(record["unique_key"])
         if existing:
-            record["test_taker_response"] = existing["test_taker_response"]
-            record["is_correct"] = existing["is_correct"]
-            record["error_tags"] = existing["error_tags"]
+            record.update(existing)
 
     # Persist the full question set before the first request so this file alone
     # is sufficient to resume an interrupted inference run.
@@ -419,27 +489,75 @@ def generate_math_inference(
         f"writing to {outfile} "
         f"(resuming with {len(pending)}/{len(canonical_records)} unanswered records)"
     )
-    for offset in tqdm.tqdm(range(0, len(pending), bsz)):
-        batch_indices = pending[offset:offset + bsz]
-        prompts = [canonical_records[index]["prompt"] for index in batch_indices]
-        request_result = gen_from_prompt(
-            model=model_choice,
-            tokenizer=tokenizer_choice,
-            prompt=prompts,
-            echo_prompt=False,
-            temperature=temperature,
-            max_tokens=max_length,
-            service=client_choice,
-            terminate_by_linebreak="no",
-            use_helm=use_helm,
-            auth=auth,
-            verbose=False,
+    if research_config:
+        temperature = float(
+            research_config["models"]["test_taker"]["temperature"]
         )
-        for index, completion in zip(batch_indices, request_result.completions):
-            canonical_records[index]["test_taker_response"] = _english_only(
-                completion.text, "NON_ENGLISH_RESPONSE"
-            )
+        max_length = int(
+            research_config["models"]["test_taker"]["max_new_tokens"]
+        )
+        for record in canonical_records:
+            record["prompt"] = test_taker_prompt(record, research_config)
         dump_standard_json(canonical_records, outfile)
+    progress_context = (
+        progress_manager.stage(
+            "Infer",
+            total=len(pending),
+            cycle=cycle,
+            iteration=iteration,
+        )
+        if progress_manager
+        else contextlib.nullcontext(
+            tqdm.tqdm(
+                total=len(pending),
+                leave=False,
+                dynamic_ncols=True,
+            )
+        )
+    )
+    with progress_context as progress:
+        for offset in range(0, len(pending), bsz):
+            batch_indices = pending[offset:offset + bsz]
+            prompts = [canonical_records[index]["prompt"] for index in batch_indices]
+            request_result = gen_from_prompt(
+                model=model_choice,
+                tokenizer=tokenizer_choice,
+                prompt=prompts,
+                echo_prompt=False,
+                temperature=temperature,
+                max_tokens=max_length,
+                service=client_choice,
+                terminate_by_linebreak="no",
+                use_helm=use_helm,
+                auth=auth,
+                verbose=False,
+            )
+            for index, completion in zip(batch_indices, request_result.completions):
+                record = canonical_records[index]
+                raw_response = str(completion.text or "")
+                if research_config:
+                    parsed = parse_test_taker_output(
+                        raw_response,
+                        record["prompt"],
+                        record["answer_type"],
+                        research_config,
+                    )
+                    record.update(parsed)
+                    record["test_taker_response"] = (
+                        parsed["parsed_response"].get("final_answer", "")
+                        if parsed["parse_status"] == "success"
+                        else parsed["parse_status"].upper()
+                    )
+                    record["test_taker_tool_call_count"] = int(
+                        parsed["tool_violation"]
+                    )
+                else:
+                    record["test_taker_response"] = _english_only(
+                        raw_response,
+                        "NON_ENGLISH_RESPONSE",
+                    )
+                progress.update(1)
+            dump_standard_json(canonical_records, outfile)
     return canonical_records
 
 
@@ -548,6 +666,11 @@ def manage_hard_pool(
         }
         previous = existing.get(sample["unique_key"])
         if previous:
+            # [MODIFIED] A resumed iteration must not inflate occurrence counts.
+            already_seen_in_iteration = (
+                int(previous.get("last_seen_iter", -1)) == int(source_iter)
+                and int(previous.get("last_seen_cycle", -1)) == int(source_cycle)
+            )
             previous.update(
                 {
                     "last_seen_iter": int(source_iter),
@@ -557,7 +680,11 @@ def manage_hard_pool(
                     "sample_grade": sample_grade,
                     "accuracy_bucket": accuracy_bucket,
                     "sub_category_accuracy": sub_category_accuracy,
-                    "occurrences": previous.get("occurrences", 1) + 1,
+                    "occurrences": (
+                        previous.get("occurrences", 1)
+                        if already_seen_in_iteration
+                        else previous.get("occurrences", 1) + 1
+                    ),
                 }
             )
         else:
@@ -641,6 +768,11 @@ def call_local_finetune(
     batch,
     lora_rank,
     output_path,
+    metrics_path=None,
+    run_id=None,
+    config_hash=None,
+    max_seq_length=None,
+    learning_rate=None,
 ):
     script_path = Path(__file__).resolve().with_name("train_llm.py")
     if not script_path.is_file():
@@ -667,16 +799,28 @@ def call_local_finetune(
         "--output_path",
         os.fspath(output_path),
     ]
+    _optional_arguments = (
+        ("--metrics_path", metrics_path),
+        ("--run_id", run_id),
+        ("--config_hash", config_hash),
+        ("--max_seq_length", max_seq_length),
+        ("--learning_rate", learning_rate),
+    )
+    for option, value in _optional_arguments:
+        if value is not None:
+            command.extend([option, str(value)])
     print("[FineTune] command=" + subprocess.list2cmdline(command))
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    environment["PYTHONUNBUFFERED"] = "1"
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             text=True,
-            capture_output=True,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             env=environment,
+            bufsize=1,
         )
     except OSError as exc:
         return {
@@ -684,19 +828,21 @@ def call_local_finetune(
             "returncode": 2,
             "error": str(exc),
         }
-    if result.stdout:
-        print(result.stdout.rstrip())
-    if result.stderr:
-        print(result.stderr.rstrip(), file=sys.stderr)
-    error_output = "\n".join(
-        part.strip()
-        for part in (result.stdout, result.stderr)
-        if part and part.strip()
-    )
+    output_lines = []
+    if process.stdout is not None:
+        for line in process.stdout:
+            cleaned = line.rstrip()
+            if cleaned:
+                print(cleaned)
+                output_lines.append(cleaned)
+                if len(output_lines) > 200:
+                    output_lines.pop(0)
+    returncode = process.wait()
+    error_output = "\n".join(output_lines)
     return {
-        "success": result.returncode == 0,
-        "returncode": result.returncode,
-        "error": "" if result.returncode == 0 else error_output[-4000:],
+        "success": returncode == 0,
+        "returncode": returncode,
+        "error": "" if returncode == 0 else error_output[-4000:],
     }
 
 
@@ -841,10 +987,11 @@ class HardSamplePool:
             for sample in grouped[sub_category]:
                 tags = ",".join(sample.get("error_tags", [])) or "concept_confusion"
                 lines.append(
-                    f"- question: {str(sample.get('question', ''))[:300]} | "
-                    f"gold: {str(sample.get('gold_answer', ''))[:120]} | "
-                    f"wrong: {str(sample.get('test_taker_response', ''))[:120]} | "
-                    f"error_tags: {tags}"
+                    f"- hard_sample_id: {sample.get('unique_key', '')[:16]} | "
+                    f"difficulty: {sample.get('difficulty', 5)} | "
+                    f"structural_pattern: {sub_category} problem | "
+                    f"observed_failure: {tags} | "
+                    "variation_requirements: change values, wording, and structure"
                 )
         return "\n".join(lines)
 
@@ -866,10 +1013,12 @@ class HardSamplePool:
         lines = []
         for sample in samples[-max_samples:]:
             lines.append(
-                f"- question: {str(sample.get('question', ''))[:300]} | "
-                f"gold: {str(sample.get('gold_answer', ''))[:120]} | "
-                f"wrong: {str(sample.get('test_taker_response', ''))[:120]} | "
-                f"error_tags: {','.join(sample.get('error_tags', []))}"
+                f"- hard_sample_id: {sample.get('unique_key', '')[:16]} | "
+                f"subcategory: {sample.get('sub_category', '')} | "
+                f"difficulty: {sample.get('difficulty', 5)} | "
+                f"structural_pattern: {sample.get('sub_category', '')} problem | "
+                "variation_requirements: change all values and wording; "
+                "preserve the reasoning trap; do not copy the source"
             )
         return "\n".join(lines)
 

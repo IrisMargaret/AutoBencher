@@ -40,6 +40,59 @@ def _append_option(command, name, value):
         command.extend([name, str(value)])
 
 
+def _option_present(argv, *names):
+    return any(
+        token == name or token.startswith(name + "=")
+        for token in argv
+        for name in names
+    )
+
+
+def _strip_implicit_config_options(command, argv):
+    """Let YAML remain authoritative for launcher defaults not typed by users."""
+    controlled = {
+        "--agent_modelname": ("--agent_modelname", "--agent-modelname"),
+        "--test_taker_modelname": (
+            "--test_taker_modelname",
+            "--test-taker-modelname",
+        ),
+        "--exp_mode": ("--exp_mode", "--exp-mode"),
+        "--num_iters": ("--num_iters", "--num-iters"),
+        "--outfile_prefix1": ("--outfile_prefix1", "--outfile-prefix1"),
+        "--acc_target": ("--acc_target", "--acc-target"),
+        "--mode": ("--mode",),
+        "--export_interval": ("--export_interval", "--export-interval"),
+        "--max_cycle": ("--max_cycle", "--max-cycle"),
+        "--finetune_gpu": ("--finetune_gpu", "--finetune-gpu"),
+        "--finetune_epoch": ("--finetune_epoch", "--finetune-epoch"),
+        "--finetune_batch": ("--finetune_batch", "--finetune-batch"),
+        "--lora_rank": ("--lora_rank", "--lora-rank"),
+        "--new_local_model_suffix": (
+            "--new_local_model_suffix",
+            "--new-local-model-suffix",
+        ),
+        "--disk_warning_threshold": (
+            "--disk_warning_threshold",
+            "--disk-warning-threshold",
+        ),
+        "--clean_cycle_cache": (
+            "--clean_cycle_cache",
+            "--clean-cycle-cache",
+        ),
+    }
+    stripped = []
+    index = 0
+    while index < len(command):
+        token = command[index]
+        aliases = controlled.get(token)
+        if aliases and not _option_present(argv, *aliases):
+            index += 2
+            continue
+        stripped.append(token)
+        index += 1
+    return stripped
+
+
 # [ADDED] Parse explicit Boolean CLI values consistently.
 def parse_bool(value):
     if isinstance(value, bool):
@@ -81,6 +134,10 @@ def build_command(
     new_local_model_suffix="finetuned",
     disk_warning_threshold=10,
     clean_cycle_cache=True,
+    config=None,
+    run_id=None,
+    resume=None,
+    overrides=None,
 ):
     agent_modelname = agent_modelname or model
     test_taker_modelname = test_taker_modelname or model
@@ -136,6 +193,13 @@ def build_command(
         "--disk_warning_threshold", str(disk_warning_threshold),
         "--clean_cycle_cache", str(bool(clean_cycle_cache)).lower(),
     ]
+    _append_option(math_options, "--config", config)
+    _append_option(math_options, "--run_id", run_id)
+    if resume is not None:
+        _append_option(math_options, "--resume", str(bool(resume)).lower())
+    if overrides:
+        math_options.append("--override")
+        math_options.extend(str(item) for item in overrides)
     return [
         sys.executable, "math_autobencher.py", *common, *math_options,
     ]
@@ -237,6 +301,15 @@ def main():
         type=parse_bool,
         default=True,
     )
+    parser.add_argument("--config")
+    parser.add_argument("--run-id", "--run_id", dest="run_id")
+    parser.add_argument("--resume", type=parse_bool)
+    parser.add_argument(
+        "--override",
+        nargs="*",
+        default=[],
+        metavar="PATH=VALUE",
+    )
     args = parser.parse_args()
     if args.mode != "math" and args.execution_mode != "eval":
         parser.error("--mode data_flywheel is supported only for math")
@@ -285,7 +358,13 @@ def main():
         new_local_model_suffix=args.new_local_model_suffix,
         disk_warning_threshold=args.disk_warning_threshold,
         clean_cycle_cache=args.clean_cycle_cache,
+        config=args.config,
+        run_id=args.run_id,
+        resume=args.resume,
+        overrides=args.override,
     )
+    if args.mode == "math" and args.config:
+        command = _strip_implicit_config_options(command, sys.argv[1:])
     print("Running:", subprocess.list2cmdline(command))
     subprocess.run(command, check=True)
 

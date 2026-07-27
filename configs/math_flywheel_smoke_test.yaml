@@ -1,0 +1,112 @@
+extends: math_flywheel.yaml
+
+experiment:
+  name: math_flywheel_smoke_test
+  mode: eval
+  num_iterations: 1
+  max_cycles: 1
+  questions_per_iteration: 27
+  export_interval: 1
+  clean_cycle_cache: true
+
+coverage:
+  default_min_quota: 1
+  repair_rounds: 1
+
+taxonomy:
+  Arithmetic:
+    Integer Operations:
+      min_quota: 1
+      base_weight: 1.0
+    Fraction and Decimal Operations:
+      min_quota: 1
+      base_weight: 1.0
+    Ratio and Percentage:
+      min_quota: 1
+      base_weight: 1.0
+  Algebra:
+    Linear Equations:
+      min_quota: 1
+      base_weight: 1.0
+    Systems of Equations:
+      min_quota: 1
+      base_weight: 1.0
+    Polynomials and Inequalities:
+      min_quota: 1
+      base_weight: 1.0
+  Geometry & Trigonometry:
+    Plane Geometry:
+      min_quota: 1
+      base_weight: 1.0
+    Solid Geometry:
+      min_quota: 1
+      base_weight: 1.0
+    Trigonometric Reasoning:
+      min_quota: 1
+      base_weight: 1.0
+  Probability & Statistics:
+    Basic Probability:
+      min_quota: 1
+      base_weight: 1.0
+    Combinatorics:
+      min_quota: 1
+      base_weight: 1.0
+    Descriptive Statistics:
+      min_quota: 1
+      base_weight: 1.0
+  Word Problems:
+    Rate and Distance:
+      min_quota: 1
+      base_weight: 1.0
+    Work and Mixture:
+      min_quota: 1
+      base_weight: 1.0
+    Financial Applications:
+      min_quota: 1
+      base_weight: 1.0
+  Number Theory:
+    Divisibility and Factors:
+      min_quota: 1
+      base_weight: 1.0
+    Prime Factorization:
+      min_quota: 1
+      base_weight: 1.0
+    Modular Arithmetic:
+      min_quota: 1
+      base_weight: 1.0
+  Calculus:
+    Limits and Continuity:
+      min_quota: 1
+      base_weight: 1.0
+    Differentiation:
+      min_quota: 1
+      base_weight: 1.0
+    Integration:
+      min_quota: 1
+      base_weight: 1.0
+  Linear Algebra:
+    Matrix Operations:
+      min_quota: 1
+      base_weight: 1.0
+    Linear Systems:
+      min_quota: 1
+      base_weight: 1.0
+    Vectors and Vector Spaces:
+      min_quota: 1
+      base_weight: 1.0
+  Composite Comprehensive:
+    Cross-Domain Multi-Step Problems:
+      min_quota: 1
+      base_weight: 1.0
+    Proof and Mathematical Reasoning:
+      min_quota: 1
+      base_weight: 1.0
+    Constraint Synthesis:
+      min_quota: 1
+      base_weight: 1.0
+
+finetune:
+  enabled: false
+
+logging:
+  progress_enabled: false

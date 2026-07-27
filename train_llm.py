@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -55,6 +56,9 @@ def build_parser():
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--metrics_path")
+    parser.add_argument("--run_id", default="")
+    parser.add_argument("--config_hash", default="")
     return parser
 
 
@@ -235,6 +239,7 @@ def _training_config(args, adapter_output, use_bfloat16):
         "fp16": not use_bfloat16,
         "gradient_checkpointing": True,
         "report_to": "none",
+        "disable_tqdm": False,
         "remove_unused_columns": False,
         "dataloader_pin_memory": True,
         "seed": 42,
@@ -270,6 +275,7 @@ def train_and_merge(args, model_source, records):
         AutoModelForCausalLM,
         AutoTokenizer,
         BitsAndBytesConfig,
+        TrainerCallback,
     )
     from trl import SFTTrainer
 
@@ -357,6 +363,35 @@ def train_and_merge(args, model_source, records):
             "packing": False,
             "peft_config": lora_config,
         }
+        callbacks = []
+        if args.metrics_path:
+            metrics_path = Path(args.metrics_path).expanduser().resolve()
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+
+            class MetricsCallback(TrainerCallback):
+                def on_log(self, training_args, state, control, logs=None, **kwargs):
+                    del training_args, control, kwargs
+                    payload = {
+                        "schema_version": "1.0",
+                        "run_id": args.run_id,
+                        "config_hash": args.config_hash,
+                        "timestamp": time.time(),
+                        "epoch": state.epoch,
+                        "step": state.global_step,
+                        "loss": (logs or {}).get("loss"),
+                        "learning_rate": (logs or {}).get("learning_rate"),
+                        "grad_norm": (logs or {}).get("grad_norm"),
+                        "token_accuracy": (logs or {}).get("mean_token_accuracy"),
+                        "entropy": (logs or {}).get("entropy"),
+                    }
+                    with metrics_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+
+            callbacks.append(MetricsCallback())
+        if callbacks:
+            trainer_values["callbacks"] = callbacks
         trainer = SFTTrainer(
             **_supported_kwargs(SFTTrainer.__init__, trainer_values)
         )
@@ -391,16 +426,31 @@ def train_and_merge(args, model_source, records):
             local_files_only=True,
         )
         merged_model = adapter_model.merge_and_unload()
-        output_path.mkdir(parents=True, exist_ok=True)
-        merged_model.save_pretrained(
-            output_path,
-            safe_serialization=True,
-            max_shard_size="4GB",
-        )
-        tokenizer.save_pretrained(output_path)
-        generation_config = getattr(merged_model, "generation_config", None)
-        if generation_config is not None:
-            generation_config.save_pretrained(output_path)
+        if output_path.exists():
+            raise FileExistsError(
+                "Incomplete fine-tune output already exists; choose a new "
+                f"output path or inspect it before retrying: {output_path}"
+            )
+        # [ADDED] Publish merged weights only after every file is complete.
+        with tempfile.TemporaryDirectory(
+            prefix=f"{output_path.name}.publish.",
+            dir=output_path.parent,
+        ) as publish_directory:
+            publish_path = Path(publish_directory)
+            merged_model.save_pretrained(
+                publish_path,
+                safe_serialization=True,
+                max_shard_size="4GB",
+            )
+            tokenizer.save_pretrained(publish_path)
+            generation_config = getattr(merged_model, "generation_config", None)
+            if generation_config is not None:
+                generation_config.save_pretrained(publish_path)
+            if not _is_complete_model_directory(publish_path):
+                raise RuntimeError(
+                    "Merged model validation failed before atomic publication"
+                )
+            os.replace(publish_path, output_path)
         del adapter_model
         del merged_model
         del base_model
@@ -435,6 +485,8 @@ def main(argv=None):
         parser.error("--learning_rate must be greater than zero")
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
     if _is_complete_model_directory(args.output_path):
         LOGGER.info("stage=resume output_already_complete=%s", args.output_path)
         return 0

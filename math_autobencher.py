@@ -1,6 +1,8 @@
 import glob
 import gc
 import random
+import sys
+from pathlib import Path
 
 import requests
 import copy
@@ -12,6 +14,27 @@ from time import sleep
 from collections import defaultdict
 import numpy as np
 
+from autobencher.config import (
+    ConfigurationError,
+    load_resolved_config,
+    str2bool,
+)
+from autobencher.coverage import coverage_metrics, generation_schedule
+from autobencher.dataset import (
+    build_training_dataset,
+    normalize_question_text,
+    write_alpaca_jsonl,
+)
+from autobencher.experiment import (
+    ResearchRun,
+    atomic_json,
+    utc_now,
+)
+from autobencher.structured import (
+    answers_equivalent,
+    attribute_error,
+    validate_generated_question,
+)
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
 from tool_util import (
     DEFAULT_SYSTEM_MESSAGE,
@@ -479,34 +502,58 @@ def _generate_question_from_description(
     outfile_prefix='att1',
     questions_old=None,
     hard_sample_context="",
+    question_count=50,
 ):
-    context = """Your goal is to come up with math questions that match the description. 
+    question_count = int(question_count)
+    context = f"""Your goal is to generate exactly {question_count} math questions
+that match one assigned category and subcategory.
 In each iteration, you receive a sub_category that describes the exact type of question to ask.
-Return exactly 50 math questions matching that sub_category as one JSON array.
-Each question must contain these keys: id, question, answer, difficulty.
-You do not need to answer the questions. 
-
-Note: do not come up with repetitive questions. If you have asked a question, do not ask it again! 
-Come up with exactly 50 concrete questions, and write them in the following format.
-Do not leave place holders or ellipsis!!!
-It's helpful to first come up with a plan for this iteration, and then write the questions.
-The response must follow this format:
+Return one JSON array. Every object must satisfy the generated-question schema:
 [
-  {"id": 1, "question": "What is 5 + 3?", "answer": "8", "difficulty": 1},
-  {"id": 2, "question": "What is 5 - 3?", "answer": "2", "difficulty": 1}
+  {{
+    "question_id": "q_1",
+    "category": "Arithmetic",
+    "subcategory": "Integer Operations",
+    "difficulty": 1,
+    "question": "What is 5 + 3?",
+    "answer_type": "integer",
+    "canonical_answer": "8",
+    "display_answer": "8",
+    "unit": null,
+    "tolerance": null,
+    "order_sensitive": false,
+    "generation_source": "coverage_deficit",
+    "reference_hard_sample_ids": [],
+    "target_error_type": null,
+    "generation_strategy": "quota_repair"
+  }}
 ]
-Do not use a code block. Do not write any explanation before or after the JSON array.
-Do not use placeholders or ellipses.
+
+Mandatory quality and output rules:
+1. Output only the JSON array. Do not output Markdown, prompts, system text,
+   explanations, role prefixes, placeholders, or ellipses.
+2. Every problem must match the assigned category and subcategory.
+3. Include all necessary conditions and ensure the answer is unique unless the
+   answer schema explicitly represents multiple solutions.
+4. Do not generate subjective or unverifiable questions.
+5. Do not copy historical questions. Variants must change values, wording, or
+   mathematical structure.
+6. Ensure canonical_answer can be independently verified.
+7. Use only English text.
 """
 
     sub_category = description_json.get(
         "sub_category", description_json.get("subcategory_description", "")
     )
     context = (
-        DEFAULT_JSON_MESSAGE
-        + context
+        # [MODIFIED] Do not prepend the legacy TERMINATE instruction because
+        # it conflicts with the strict JSON-only generation contract.
+        context
         + f"\nTop-level category: {description_json['category']}"
         + f"\nSub_category: {sub_category}"
+        + f"\nRequired generation_source: {description_json.get('generation_source', 'coverage_deficit')}"
+        + f"\nRequired generation_strategy: {description_json.get('generation_strategy', 'quota_repair')}"
+        + f"\nTarget difficulty: {description_json.get('difficulty', 5)}"
         + "\nUse English text only."
     )
     if hard_sample_context:
@@ -524,7 +571,7 @@ Train-eligible examples:
         old_q_string = ''
         for q in questions_old:
             old_q_string += str(q) + '\n'
-        remaining = max(1, 50 - len(questions_old))
+        remaining = max(1, question_count - len(questions_old))
         context += (
             f"\nQuestions already generated: {old_q_string}"
             f"\nGenerate exactly {remaining} new, non-repetitive questions."
@@ -550,14 +597,26 @@ Train-eligible examples:
             questions = extracted_json[0]
             if not isinstance(questions, list) or not questions:
                 raise ValueError("Expected a non-empty list of math questions")
-            required_keys = {"id", "question", "answer"}
-            if any(
-                not isinstance(item, dict) or not required_keys.issubset(item)
-                for item in questions
-            ):
-                raise ValueError(
-                    "Each generated question must contain id, question, and answer"
-                )
+            required_keys = {
+                "question",
+                "answer_type",
+                "canonical_answer",
+                "display_answer",
+            }
+            if any(not isinstance(item, dict) for item in questions):
+                raise ValueError("Every generated question must be a JSON object")
+            for item in questions:
+                if "answer" in item and "canonical_answer" not in item:
+                    item["canonical_answer"] = item["answer"]
+                if "canonical_answer" in item and "display_answer" not in item:
+                    item["display_answer"] = str(item["canonical_answer"])
+                if "answer_type" not in item:
+                    item["answer_type"] = "text"
+                if not required_keys.issubset(item):
+                    raise ValueError(
+                        "Each generated question must contain question, answer_type, "
+                        "canonical_answer, and display_answer"
+                    )
             if any(
                 re.search(
                     r"[\u3400-\u9fff]",
@@ -577,8 +636,34 @@ Train-eligible examples:
     if not valid_json:
         raise RuntimeError("Failed to generate math questions after 3 attempts") from last_error
     for line in extracted_json[0]:
-        line['category'] = description_json['category']
-        line['sub_category'] = sub_category
+        line["id"] = line.get("id", line.get("question_id"))
+        line["question_id"] = str(
+            line.get("question_id", line.get("id", ""))
+        )
+        line["category"] = description_json["category"]
+        line["subcategory"] = sub_category
+        line["sub_category"] = sub_category
+        line["answer"] = line["canonical_answer"]
+        line["gold_answer"] = line["canonical_answer"]
+        line["difficulty"] = max(
+            1,
+            min(10, int(line.get("difficulty", description_json.get("difficulty", 5)))),
+        )
+        line["unit"] = line.get("unit")
+        line["tolerance"] = line.get("tolerance")
+        line["order_sensitive"] = bool(line.get("order_sensitive", False))
+        line["generation_source"] = description_json.get(
+            "generation_source",
+            "coverage_deficit",
+        )
+        line["reference_hard_sample_ids"] = list(
+            description_json.get("reference_hard_sample_ids", [])
+        )
+        line["target_error_type"] = description_json.get("target_error_type")
+        line["generation_strategy"] = description_json.get(
+            "generation_strategy",
+            "quota_repair",
+        )
     return extracted_json
 
 def _ask_question_v3(
@@ -590,10 +675,14 @@ def _ask_question_v3(
     enable_hard_sample_guidance=False,
     coverage_summary="",
     hard_pool_file=None,
+    generation_plan=None,
 ):
     agent_lm, agent_tokenizer, agent_client = agent_info
     plan_outfile = f"{outfile_prefix}.question_plan_with_aim.json"
-    if not os.path.exists(plan_outfile):
+    if generation_plan is not None:
+        plan_json = list(generation_plan["allocations"])
+        dump_standard_json(plan_json, plan_outfile)
+    elif not os.path.exists(plan_outfile):
         # [MODIFIED] Pass hard-pool evidence only in directed-generation rounds.
         plan_json = _generate_cat_with_aim(
             aim_acc,
@@ -616,21 +705,36 @@ def _ask_question_v3(
         if normalized_plan[0] != plan_json:
             _write_json_atomic(normalized_plan[0], plan_outfile)
         plan_json = normalized_plan
-    plan_json = plan_json[0]
+    if generation_plan is None:
+        plan_json = plan_json[0]
 
     # [MODIFIED] Keep question fragments in memory; inference is canonical.
     question_json_full = []
+    normalized_question_texts = set()
     hard_pool = HardSamplePool(hard_pool_file) if hard_pool_file else None
     for idx, plan_line in enumerate(plan_json):
         outfile_prefix2 = outfile_prefix + '.subcat{}'.format(idx)
+        is_hard_variant = (
+            plan_line.get("generation_source") == "hard_pool_variant"
+        )
         variant_context = (
             hard_pool.get_variant_context(
                 plan_line["category"],
                 plan_line["sub_category"],
             )
-            if enable_hard_sample_guidance and hard_pool
+            if enable_hard_sample_guidance and is_hard_variant and hard_pool
             else ""
         )
+        if is_hard_variant and hard_pool:
+            references = [
+                sample.get("unique_key", "")[:16]
+                for sample in hard_pool.samples
+                if sample.get("sample_grade") == "train_eligible"
+                and sample.get("category") == plan_line["category"]
+                and sample.get("sub_category") == plan_line["sub_category"]
+            ][:12]
+            plan_line["reference_hard_sample_ids"] = references
+        target_count = int(plan_line.get("question_count", 50))
         question_json = _generate_question_from_description(
             plan_line,
             agent_lm,
@@ -638,23 +742,64 @@ def _ask_question_v3(
             agent_client,
             outfile_prefix2,
             hard_sample_context=variant_context,
+            question_count=target_count,
         )
         if len(question_json) == 1:
             question_json = question_json[0]
+        question_json = [
+            item
+            for item in question_json
+            if normalize_question_text(item.get("question"))
+            and normalize_question_text(item.get("question"))
+            not in normalized_question_texts
+        ]
+        normalized_question_texts.update(
+            normalize_question_text(item.get("question"))
+            for item in question_json
+        )
 
-        while len(question_json) < 50:
+        repair_round = 0
+        while len(question_json) < target_count:
+            repair_round += 1
+            if repair_round > 3:
+                raise RuntimeError(
+                    f"Generation quota repair failed for {plan_line['sub_category']}"
+                )
             question_json_new = _generate_question_from_description(plan_line, agent_lm, agent_tokenizer,
                                                                      agent_client, outfile_prefix2,
                                                                     questions_old=question_json,
-                                                                    hard_sample_context=variant_context)
+                                                                    hard_sample_context=variant_context,
+                                                                    question_count=target_count)
             question_json_new = question_json_new[0]
-            question_json.extend(question_json_new)
-        question_json_full.extend(question_json[:50])
+            unique_new = []
+            for item in question_json_new:
+                signature = normalize_question_text(item.get("question"))
+                if not signature or signature in normalized_question_texts:
+                    continue
+                normalized_question_texts.add(signature)
+                unique_new.append(item)
+            question_json.extend(unique_new)
+        question_json_full.extend(question_json[:target_count])
+    if generation_plan is not None:
+        expected = int(generation_plan["question_budget"])
+        if len(question_json_full) != expected:
+            raise RuntimeError(
+                f"Generated question count mismatch: {len(question_json_full)}/{expected}"
+            )
+        for index, question in enumerate(question_json_full, start=1):
+            question["id"] = index
+            question["question_id"] = (
+                f"c{generation_plan.get('cycle', 0)}_"
+                f"i{generation_plan['global_iteration']}_q{index:05d}"
+            )
+            # [ADDED] Fail before evaluation if a generated record violates the
+            # checked-in, versioned question contract.
+            validate_generated_question(question)
     return question_json_full, plan_json
 
 
 
-def _build_compare_summary(iter_number, inference_records):
+def _build_compare_summary(iter_number, inference_records, research_config=None):
     grouped = defaultdict(list)
     for record in inference_records:
         grouped[(record["category"], record["sub_category"])].append(record)
@@ -672,14 +817,41 @@ def _build_compare_summary(iter_number, inference_records):
         )
     total_questions = len(inference_records)
     total_correct = sum(record["is_correct"] for record in inference_records)
-    return {
+    summary = {
         "iter_number": int(iter_number),
         "total_questions": total_questions,
         "global_accuracy": (
             total_correct / total_questions if total_questions else 0.0
         ),
         "category_statistics": category_statistics,
+        "parse_failed_count": sum(
+            record.get("parse_status") == "parse_failed"
+            for record in inference_records
+        ),
+        "format_error_count": sum(
+            record.get("evaluation_status") == "format_only_error"
+            for record in inference_records
+        ),
+        "tool_violation_count": sum(
+            bool(record.get("tool_violation"))
+            for record in inference_records
+        ),
+        "irrelevant_output_count": sum(
+            bool(record.get("contains_irrelevant_content"))
+            for record in inference_records
+        ),
+        "prompt_echo_count": sum(
+            bool(record.get("contains_prompt_echo"))
+            for record in inference_records
+        ),
+        "test_taker_tool_call_count": sum(
+            int(record.get("test_taker_tool_call_count", 0))
+            for record in inference_records
+        ),
     }
+    if research_config:
+        summary.update(coverage_metrics(inference_records, research_config))
+    return summary
 
 
 def _lowest_sub_categories(compare_summary, limit=10):
@@ -699,6 +871,9 @@ def test_and_eval(
     gold_ans_key='answer',
     iter_number=0,
     temp_log_dir=None,
+    research_config=None,
+    progress_manager=None,
+    cycle_number=None,
 ):
     inference_file = f"{outfile_prefix}.test_taker_inference.json"
     compare_file = f"{outfile_prefix}.compare_answers.json"
@@ -719,6 +894,10 @@ def test_and_eval(
         question_json,
         test_taker_info,
         inference_file,
+        research_config=research_config,
+        progress_manager=progress_manager,
+        cycle=cycle_number,
+        iteration=iter_number,
     )
     if len(question_json) != len(test_taker_output):
         raise RuntimeError(
@@ -769,18 +948,104 @@ def test_and_eval(
         zip(test_taker_output, judgments)
     ):
         standardized = canonicalize_math_record(record, index)
-        standardized["is_correct"] = str(
+        evaluator_is_correct = str(
             judgment.get("is_correct", "")
         ).strip().lower() == "true"
-        standardized["error_tags"] = (
-            []
-            if standardized["is_correct"]
-            else classify_error_tags({**standardized, **judgment})
-        )
+        if research_config:
+            parse_result = {
+                "parse_status": standardized.get("parse_status", "parse_failed"),
+                "parsed_response": standardized.get("parsed_response", {}),
+                "contains_prompt_echo": standardized.get(
+                    "contains_prompt_echo",
+                    False,
+                ),
+                "contains_irrelevant_content": standardized.get(
+                    "contains_irrelevant_content",
+                    False,
+                ),
+                "tool_violation": standardized.get("tool_violation", False),
+            }
+            equivalence = answers_equivalent(
+                standardized.get(
+                    "canonical_answer",
+                    standardized["gold_answer"],
+                ),
+                standardized["test_taker_response"],
+                standardized.get("answer_type", "text"),
+                research_config,
+            )
+            status = parse_result["parse_status"]
+            if status != "success":
+                evaluation_status = status
+                standardized["is_correct"] = False
+            else:
+                standardized["is_correct"] = bool(equivalence["equivalent"])
+                evaluation_status = equivalence["status"]
+                if (
+                    standardized["is_correct"]
+                    and not evaluator_is_correct
+                ):
+                    evaluation_status = "format_only_error"
+                    standardized["format_only_error"] = True
+            attribution = attribute_error(
+                standardized,
+                parse_result,
+                equivalence,
+                research_config,
+            )
+            evaluator_tool_calls = []
+            if standardized.get("answer_type") in {
+                "symbolic_expression",
+                "equation",
+                "inequality",
+            }:
+                evaluator_tool_calls.append(
+                    {
+                        "tool_name": "sympy",
+                        "purpose": "deterministic_symbolic_equivalence",
+                        "privileged_side": "evaluator",
+                    }
+                )
+            standardized.update(
+                {
+                    "evaluation_status": evaluation_status,
+                    "normalized_gold_answer": equivalence["gold_normalized"],
+                    "normalized_test_taker_answer": equivalence[
+                        "predicted_normalized"
+                    ],
+                    "deterministic_checks": equivalence[
+                        "deterministic_checks"
+                    ],
+                    "evaluator_tool_calls": evaluator_tool_calls,
+                    "evaluator_confidence": float(
+                        judgment.get("confidence", 1.0)
+                    ),
+                    "answer_validation_success": bool(
+                        equivalence["gold_normalized"]["success"]
+                    ),
+                    "question_parse_success": True,
+                    **attribution,
+                }
+            )
+            primary = attribution.get("primary_error_tag")
+            standardized["error_tags"] = (
+                [primary] if primary else []
+            ) + list(attribution.get("secondary_error_tags", []))
+        else:
+            standardized["is_correct"] = evaluator_is_correct
+            standardized["error_tags"] = (
+                []
+                if standardized["is_correct"]
+                else classify_error_tags({**standardized, **judgment})
+            )
         standardized_records.append(standardized)
     dump_standard_json(standardized_records, inference_file)
 
-    compare_summary = _build_compare_summary(iter_number, standardized_records)
+    compare_summary = _build_compare_summary(
+        iter_number,
+        standardized_records,
+        research_config,
+    )
     dump_standard_json(compare_summary, compare_file)
     return standardized_records
 
@@ -950,14 +1215,10 @@ def _performance_context(history_json_dict):
 
 # [ADDED] Parse Boolean values accepted by the direct math entry point.
 def _parse_bool(value):
-    if isinstance(value, bool):
-        return value
-    normalized = str(value).strip().lower()
-    if normalized in {"true", "1", "yes", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "off"}:
-        return False
-    raise argparse.ArgumentTypeError("Expected a Boolean value")
+    try:
+        return str2bool(value)
+    except ConfigurationError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _utc_timestamp():
@@ -1081,6 +1342,70 @@ def _sanitize_error(exc):
     return re.sub(r"\s+", " ", message).strip()[:4000]
 
 
+def _save_research_cycle_manifest(args, cycle_entry):
+    research_run = getattr(args, "research_run", None)
+    if research_run is None:
+        return
+    atomic_json(
+        {
+            **research_run.metadata(),
+            "cycle_id": cycle_entry["cycle"],
+            **cycle_entry,
+        },
+        research_run.run_dir
+        / f"cycle_{cycle_entry['cycle']}"
+        / "cycle_manifest.json",
+    )
+
+
+def _load_completed_cycle_history(output_root, cycles):
+    history = []
+    root = Path(output_root)
+    for cycle in sorted(cycles, key=lambda item: int(item.get("cycle", 0))):
+        if cycle.get("status") not in {
+            "completed",
+            "completed_without_training",
+        }:
+            continue
+        cycle_number = int(cycle.get("cycle", 0))
+        for iteration_number in range(
+            1,
+            int(cycle.get("iterations_completed", 0)) + 1,
+        ):
+            iteration_dir = (
+                root / f"cycle_{cycle_number}" / f"iter_{iteration_number}"
+            )
+            candidates = sorted(
+                iteration_dir.glob("*.test_taker_inference.json")
+            )
+            if candidates:
+                records = load_math_inference(candidates[0])
+                if records:
+                    history.append(records)
+    return history
+
+
+def _upsert_history_iteration(
+    history,
+    records,
+    cycle_number,
+    iteration_number,
+):
+    for index, existing in enumerate(history):
+        if not existing:
+            continue
+        first = existing[0]
+        if (
+            int(first.get("cycle_id", first.get("source_cycle", -1)))
+            == int(cycle_number)
+            and int(first.get("iteration_id", first.get("source_iter", -1)))
+            == int(iteration_number)
+        ):
+            history[index] = records
+            return
+    history.append(records)
+
+
 # [ADDED] Run one adaptive iteration and update all global governance files.
 def _run_math_iteration(
     args,
@@ -1092,6 +1417,12 @@ def _run_math_iteration(
     cycle_number,
     iter_number,
 ):
+    started_at = utc_now()
+    research_run = getattr(args, "research_run", None)
+    research_config = (
+        research_run.config if research_run is not None else None
+    )
+    global_iter_number = (cycle_number - 1) * args.num_iters + iter_number
     cycle_layer = cycle_number if args.mode == "data_flywheel" else None
     paths = _build_iteration_paths(
         args.outfile_prefix1,
@@ -1104,6 +1435,18 @@ def _run_math_iteration(
         if args.mode == "eval"
         else load_math_inference(paths["inference_file"])
     )
+    if research_run and migrated_records:
+        cached_hashes = {
+            str(record.get("config_hash"))
+            for record in migrated_records
+            if record.get("config_hash")
+        }
+        if cached_hashes and cached_hashes != {research_run.config_hash}:
+            raise ConfigurationError(
+                "cache.config_hash",
+                "cached iteration was produced by a different resolved config",
+                sorted(cached_hashes),
+            )
     (
         triggered,
         flywheel_triggers,
@@ -1116,10 +1459,47 @@ def _run_math_iteration(
         sample.get("sample_grade") == "train_eligible"
         for sample in hard_pool.samples
     )
-    should_direct_generation = (
-        (iter_number >= 3 and triggered)
-        or (args.mode == "data_flywheel" and has_train_eligible)
-    )
+    generation_plan = None
+    if research_config:
+        prior_records = [
+            record
+            for iteration_records in history_dict
+            for record in iteration_records
+        ]
+        generation_plan = generation_schedule(
+            prior_records,
+            research_config,
+            global_iter_number,
+            sum(
+                sample.get("sample_grade") == "train_eligible"
+                for sample in hard_pool.samples
+            ),
+            hard_pool_records=hard_pool.samples,
+        )
+        generation_plan["cycle"] = cycle_number
+        should_direct_generation = bool(
+            generation_plan["hard_pool_injection_enabled"]
+        )
+        research_run.logger.event(
+            "INFO",
+            "Generate",
+            "generation_plan_created",
+            (
+                f"questions={generation_plan['question_budget']} "
+                f"quota_feasible={str(generation_plan['quota_feasible']).lower()}"
+            ),
+            cycle=cycle_number,
+            iteration=iter_number,
+            metrics={
+                "source_budget": generation_plan["source_budget"],
+                "quota_feasible": generation_plan["quota_feasible"],
+            },
+        )
+    else:
+        should_direct_generation = (
+            (iter_number >= 3 and triggered)
+            or (args.mode == "data_flywheel" and has_train_eligible)
+        )
     if has_train_eligible and "train_eligible_hard_pool" not in flywheel_triggers:
         flywheel_triggers.append("train_eligible_hard_pool")
     coverage_summary = (
@@ -1144,7 +1524,11 @@ def _run_math_iteration(
     ):
         print(f"[Cache] completed iteration: {paths['compare_file']}")
         json_dict = load_math_inference(paths["inference_file"])
-        compare_summary = _build_compare_summary(iter_number, json_dict)
+        compare_summary = _build_compare_summary(
+            iter_number,
+            json_dict,
+            research_config,
+        )
         dump_standard_json(compare_summary, paths["compare_file"])
     else:
         if migrated_records:
@@ -1168,6 +1552,7 @@ def _run_math_iteration(
                 enable_hard_sample_guidance=should_direct_generation,
                 coverage_summary=coverage_summary,
                 hard_pool_file=paths["hard_pool_file"],
+                generation_plan=generation_plan,
             )
         json_dict = test_and_eval(
             copy.deepcopy(json_category),
@@ -1178,18 +1563,50 @@ def _run_math_iteration(
             gold_ans_key="answer",
             iter_number=iter_number,
             temp_log_dir=paths["temp_log_dir"],
+            research_config=research_config,
+            progress_manager=(
+                research_run.progress if research_run else None
+            ),
+            cycle_number=cycle_number,
         )
-        compare_summary = _build_compare_summary(iter_number, json_dict)
+        compare_summary = _build_compare_summary(
+            iter_number,
+            json_dict,
+            research_config,
+        )
         dump_standard_json(compare_summary, paths["compare_file"])
 
-    history_dict.append(json_dict)
+    if research_run:
+        iteration_uid = (
+            f"{research_run.run_id}:cycle_{cycle_number}:iter_{iter_number}"
+        )
+        for record in json_dict:
+            record.update(
+                {
+                    "run_id": research_run.run_id,
+                    "cycle_id": cycle_number,
+                    "iteration_id": iter_number,
+                    "iteration_uid": iteration_uid,
+                    "config_hash": research_run.config_hash,
+                    "prompt_hash": research_run.provenance["config_hash"],
+                    "cache_status": (
+                        "hit" if migrated_records else "generated"
+                    ),
+                }
+            )
+        dump_standard_json(json_dict, paths["inference_file"])
+    _upsert_history_iteration(
+        history_dict,
+        json_dict,
+        cycle_number,
+        iter_number,
+    )
     new_hard_count, hard_total = manage_hard_pool(
         paths["inference_file"],
         paths["hard_pool_file"],
         iter_number,
         source_cycle=cycle_number,
     )
-    global_iter_number = (cycle_number - 1) * args.num_iters + iter_number
     run_config = {
         "mode": args.mode,
         "agent_model": args.agent_modelname,
@@ -1220,6 +1637,147 @@ def _run_math_iteration(
             "new_hard_sample_count": new_hard_count,
         },
     )
+    if research_run:
+        hard_pool_snapshot = read_json_records(paths["hard_pool_file"])
+        coverage_payload = _build_compare_summary(
+            iter_number,
+            json_dict,
+            research_config,
+        )
+        normalized_answers = [
+            {
+                "question_id": record.get("question_id"),
+                "gold": record.get("normalized_gold_answer"),
+                "predicted": record.get("normalized_test_taker_answer"),
+                "status": record.get("evaluation_status"),
+            }
+            for record in json_dict
+        ]
+        evaluation_results = [
+            {
+                "question_id": record.get("question_id"),
+                "status": record.get("evaluation_status"),
+                "is_correct": record.get("is_correct"),
+                "deterministic_checks": record.get(
+                    "deterministic_checks",
+                    {},
+                ),
+                "evaluator_tool_calls": record.get(
+                    "evaluator_tool_calls",
+                    [],
+                ),
+            }
+            for record in json_dict
+        ]
+        error_attributions = [
+            {
+                "question_id": record.get("question_id"),
+                "is_correct": record.get("is_correct"),
+                "primary_error_tag": record.get("primary_error_tag"),
+                "secondary_error_tags": record.get(
+                    "secondary_error_tags",
+                    [],
+                ),
+                "evidence": record.get("evidence", []),
+                "attribution_confidence": record.get(
+                    "attribution_confidence",
+                    1.0,
+                ),
+                "needs_review": record.get("needs_review", False),
+                "deterministic_checks": record.get(
+                    "deterministic_checks",
+                    {},
+                ),
+            }
+            for record in json_dict
+        ]
+        iteration_summary = {
+            "iteration_uid": (
+                f"{research_run.run_id}:cycle_{cycle_number}:iter_{iter_number}"
+            ),
+            "started_at": started_at,
+            "completed_at": utc_now(),
+            "question_count": len(json_dict),
+            "global_accuracy": compare_summary["global_accuracy"],
+            "hard_pool_size_before": (
+                hard_total - new_hard_count
+            ),
+            "hard_pool_size_after": hard_total,
+            "hard_pool_injection_enabled": bool(
+                generation_plan
+                and generation_plan["hard_pool_injection_enabled"]
+            ),
+            "hard_pool_reference_count": (
+                generation_plan["hard_pool_reference_count"]
+                if generation_plan
+                else 0
+            ),
+            "directed_generation_question_count": (
+                generation_plan["directed_generation_question_count"]
+                if generation_plan
+                else 0
+            ),
+            "coverage_repair_question_count": (
+                generation_plan["coverage_repair_question_count"]
+                if generation_plan
+                else 0
+            ),
+            "retention_question_count": (
+                generation_plan["retention_question_count"]
+                if generation_plan
+                else 0
+            ),
+            "cache_status": "hit" if migrated_records else "generated",
+        }
+        research_run.export_iteration(
+            cycle_number,
+            iter_number,
+            {
+                "generation_plan": generation_plan or {},
+                "generated_questions": [
+                    {
+                        key: value
+                        for key, value in record.items()
+                        if key not in {
+                            "raw_response",
+                            "parsed_response",
+                            "test_taker_response",
+                        }
+                    }
+                    for record in json_dict
+                ],
+                "test_taker_outputs": [
+                    {
+                        "question_id": record.get("question_id"),
+                        "raw_response": record.get("raw_response"),
+                        "parsed_response": record.get("parsed_response"),
+                        "parse_status": record.get("parse_status"),
+                        "tool_violation": record.get("tool_violation", False),
+                    }
+                    for record in json_dict
+                ],
+                "normalized_answers": normalized_answers,
+                "evaluation_results": evaluation_results,
+                "error_attributions": error_attributions,
+                "coverage_metrics": coverage_payload,
+                "adaptive_sampler_state": (
+                    generation_plan["adaptive_sampler_state"]
+                    if generation_plan
+                    else []
+                ),
+                "hard_pool_snapshot": hard_pool_snapshot,
+                "iteration_summary": iteration_summary,
+            },
+        )
+        research_run.logger.event(
+            "INFO",
+            "Evaluate",
+            "stage_completed",
+            f"accuracy={compare_summary['global_accuracy']:.4f}",
+            cycle=cycle_number,
+            iteration=iter_number,
+            metrics=compare_summary,
+        )
     if args.clean_cycle_cache:
         removed = clean_redundant_files(paths["iteration_dir"])
         if args.mode == "eval":
@@ -1273,6 +1831,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
         "finetune_epoch": args.finetune_epoch,
         "finetune_batch": args.finetune_batch,
         "lora_rank": args.lora_rank,
+        "config_hash": (
+            args.research_run.config_hash
+            if getattr(args, "research_run", None)
+            else None
+        ),
     }
     cycle_record = _load_cycle_record(cycle_record_path)
     if cycle_record.get("run_config") != run_config:
@@ -1298,6 +1861,10 @@ def _run_autobencher(args, agent_info, evaluator_info):
         for item in cycle_record.get("cycles", [])
         if isinstance(item, dict)
     }
+    run_history = _load_completed_cycle_history(
+        output_root,
+        list(cycles_by_number.values()),
+    )
     for cycle_number in range(1, cycle_limit + 1):
         prior_cycle = cycles_by_number.get(cycle_number)
         if prior_cycle and prior_cycle.get("status") in {
@@ -1322,6 +1889,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "finetune_status": "not_started",
             "next_test_taker_model": current_test_taker_model,
         }
+        if getattr(args, "research_run", None):
+            _save_research_cycle_manifest(args, cycle_entry)
         cycle_record["cycles"] = [
             item
             for item in cycle_record.get("cycles", [])
@@ -1337,7 +1906,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 current_test_taker_model,
                 args.use_helm,
             )
-            history_dict = []
+            history_dict = run_history
             stage = "evaluation"
             last_iteration = None
             for iter_number in range(1, args.num_iters + 1):
@@ -1363,6 +1932,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 cycle_entry["completed_at"] = _utc_timestamp()
                 cycle_record["active_test_taker_model"] = current_test_taker_model
                 _save_cycle_record(cycle_record_path, cycle_record)
+                _save_research_cycle_manifest(args, cycle_entry)
                 continue
 
             completed_before = (cycle_number - 1) * args.num_iters
@@ -1376,6 +1946,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 cycle_entry["finetune_status"] = "waiting_for_export_interval"
                 cycle_entry["completed_at"] = _utc_timestamp()
                 _save_cycle_record(cycle_record_path, cycle_record)
+                _save_research_cycle_manifest(args, cycle_entry)
                 continue
 
             stage = "disk_check"
@@ -1390,15 +1961,102 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 )
 
             stage = "training_export"
-            export_path = os.path.join(
-                output_root,
-                "training_export",
-                f"cycle_{cycle_number}_train.jsonl",
-            )
-            exported_count = export_training_dataset(
-                os.path.join(output_root, "hard_pool.json"),
-                export_path,
-            )
+            if getattr(args, "research_run", None):
+                training_dir = (
+                    args.research_run.run_dir
+                    / f"cycle_{cycle_number}"
+                    / "training"
+                )
+                training_dir.mkdir(parents=True, exist_ok=True)
+                candidates = [
+                    record
+                    for iteration_records in history_dict
+                    for record in iteration_records
+                ]
+                selected, dataset_manifest, rejected = build_training_dataset(
+                    candidates,
+                    args.research_run.config,
+                    seed=int(args.research_run.config["experiment"]["seed"])
+                    + cycle_number,
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "data": candidates,
+                    },
+                    training_dir / "dataset_candidates.json",
+                )
+                export_path = str(training_dir / "dataset_selected.jsonl")
+                exported_count = write_alpaca_jsonl(selected, export_path)
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        **dataset_manifest,
+                    },
+                    training_dir / "dataset_manifest.json",
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "rejected": rejected,
+                        "rejection_reasons": dataset_manifest[
+                            "rejection_reasons"
+                        ],
+                    },
+                    training_dir / "dedup_report.json",
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "template_cluster_count": dataset_manifest[
+                            "template_cluster_count"
+                        ],
+                        "selected_mix_counts": dataset_manifest[
+                            "selected_mix_counts"
+                        ],
+                    },
+                    training_dir / "diversity_report.json",
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "base_model": current_test_taker_model,
+                        "gpu": args.finetune_gpu,
+                        "epochs": args.finetune_epoch,
+                        "batch_size": args.finetune_batch,
+                        "lora_rank": args.lora_rank,
+                        "max_seq_length": args.research_run.config[
+                            "finetune"
+                        ]["max_seq_length"],
+                        "learning_rate": args.research_run.config[
+                            "finetune"
+                        ]["learning_rate"],
+                    },
+                    training_dir / "finetune_config.json",
+                )
+                args.research_run.logger.event(
+                    "INFO",
+                    "BuildDataset",
+                    "stage_completed",
+                    f"selected={exported_count} rejected={len(rejected)}",
+                    cycle=cycle_number,
+                    metrics=dataset_manifest,
+                )
+            else:
+                export_path = os.path.join(
+                    output_root,
+                    "training_export",
+                    f"cycle_{cycle_number}_train.jsonl",
+                )
+                exported_count = export_training_dataset(
+                    os.path.join(output_root, "hard_pool.json"),
+                    export_path,
+                )
             cycle_entry["training_export"] = _relative_json_path(
                 export_path,
                 output_root,
@@ -1410,6 +2068,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 cycle_entry["finetune_status"] = "no_train_eligible_samples"
                 cycle_entry["completed_at"] = _utc_timestamp()
                 _save_cycle_record(cycle_record_path, cycle_record)
+                _save_research_cycle_manifest(args, cycle_entry)
                 continue
 
             stage = "finetune"
@@ -1439,6 +2098,31 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 args.finetune_batch,
                 args.lora_rank,
                 finetune_output,
+                metrics_path=(
+                    str(training_dir / "finetune_metrics.jsonl")
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                run_id=(
+                    args.research_run.run_id
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                config_hash=(
+                    args.research_run.config_hash
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                max_seq_length=(
+                    args.research_run.config["finetune"]["max_seq_length"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                learning_rate=(
+                    args.research_run.config["finetune"]["learning_rate"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
             )
             if not result["success"]:
                 raise RuntimeError(
@@ -1446,6 +2130,36 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     or f"Fine-tuning exited with code {result['returncode']}"
                 )
             current_test_taker_model = os.path.abspath(finetune_output)
+            if getattr(args, "research_run", None):
+                training_dir = (
+                    args.research_run.run_dir
+                    / f"cycle_{cycle_number}"
+                    / "training"
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "status": "completed",
+                        "returncode": result["returncode"],
+                        "base_model": cycle_entry["test_taker_model"],
+                        "dataset_path": str(export_path).replace("\\", "/"),
+                        "output_path": current_test_taker_model.replace("\\", "/"),
+                    },
+                    training_dir / "finetune_summary.json",
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "status": "completed",
+                        "merged_model_path": current_test_taker_model.replace(
+                            "\\",
+                            "/",
+                        ),
+                    },
+                    training_dir / "checkpoint_manifest.json",
+                )
             cycle_entry["status"] = "completed"
             cycle_entry["finetune_status"] = "completed"
             cycle_entry["next_test_taker_model"] = current_test_taker_model.replace(
@@ -1455,6 +2169,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
             cycle_entry["completed_at"] = _utc_timestamp()
             cycle_record["active_test_taker_model"] = current_test_taker_model
             _save_cycle_record(cycle_record_path, cycle_record)
+            _save_research_cycle_manifest(args, cycle_entry)
         except (Exception, KeyboardInterrupt) as exc:
             cycle_entry["status"] = "failed"
             cycle_entry["failed_stage"] = stage
@@ -1464,6 +2179,31 @@ def _run_autobencher(args, agent_info, evaluator_info):
             cycle_record["status"] = "failed"
             cycle_record["active_test_taker_model"] = current_test_taker_model
             _save_cycle_record(cycle_record_path, cycle_record)
+            if getattr(args, "research_run", None):
+                failure_payload = {
+                    "status": "failed",
+                    "cycle_id": cycle_number,
+                    "stage": stage,
+                    "failure_type": cycle_entry["failure_type"],
+                    "error": cycle_entry["error"],
+                    "base_model": current_test_taker_model,
+                    "completed_at": cycle_entry["completed_at"],
+                }
+                _save_research_cycle_manifest(args, cycle_entry)
+                args.research_run.save_cycle_artifact(
+                    cycle_number,
+                    "training" if stage in {"training_export", "finetune"} else "failure",
+                    "finetune_summary" if stage == "finetune" else "failure_summary",
+                    failure_payload,
+                )
+                args.research_run.finalize(
+                    "failed",
+                    {
+                        "cycle": cycle_number,
+                        "stage": stage,
+                        "failure_type": cycle_entry["failure_type"],
+                    },
+                )
             print(
                 f"[Cycle] failed cycle={cycle_number} stage={stage} "
                 f"type={cycle_entry['failure_type']} error={cycle_entry['error']}"
@@ -1475,6 +2215,39 @@ def _run_autobencher(args, agent_info, evaluator_info):
     cycle_record["status"] = "completed"
     cycle_record["active_test_taker_model"] = current_test_taker_model
     _save_cycle_record(cycle_record_path, cycle_record)
+    if getattr(args, "research_run", None):
+        all_iteration_summaries = []
+        for path in args.research_run.run_dir.glob(
+            "cycle_*/iter_*/iteration_summary.json"
+        ):
+            records = read_json_records(path)
+            if records:
+                all_iteration_summaries.append(records[0].get("data", {}))
+        atomic_json(
+            {
+                **args.research_run.metadata(),
+                "status": "completed",
+                "cycle_count": cycle_limit,
+                "iteration_count": len(all_iteration_summaries),
+                "total_questions": sum(
+                    int(item.get("question_count", 0))
+                    for item in all_iteration_summaries
+                ),
+                "hard_pool_size": len(
+                    read_json_records(os.path.join(output_root, "hard_pool.json"))
+                ),
+                "active_test_taker_model": current_test_taker_model,
+            },
+            args.research_run.run_dir / "experiment_summary.json",
+        )
+        args.research_run.finalize(
+            "completed",
+            {
+                "cycle_count": cycle_limit,
+                "iteration_count": len(all_iteration_summaries),
+                "active_test_taker_model": current_test_taker_model,
+            },
+        )
     return 0
 
 
@@ -1514,6 +2287,21 @@ def _build_parser():
     parser.add_argument("--acc_target", type=str, default="0.1--0.3")
     parser.add_argument("--num_iters", type=int, default=8)
     parser.add_argument("--outfile_prefix1", type=str, default="att1")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="YAML configuration profile; existing CLI options override it.",
+    )
+    parser.add_argument("--run_id", type=str, default=None)
+    parser.add_argument("--resume", type=_parse_bool, default=None)
+    parser.add_argument(
+        "--override",
+        nargs="*",
+        default=[],
+        metavar="PATH=VALUE",
+        help="Temporary dotted-path YAML overrides.",
+    )
     # [ADDED] Flywheel and built-in QLoRA parameters.
     parser.add_argument(
         "--mode",
@@ -1540,9 +2328,157 @@ def _build_parser():
     return parser
 
 
+def _cli_option_present(*names):
+    return any(
+        token == name or token.startswith(name + "=")
+        for token in sys.argv[1:]
+        for name in names
+    )
+
+
+def _set_nested(mapping, path, value):
+    cursor = mapping
+    parts = path.split(".")
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    cursor[parts[-1]] = value
+
+
+def _configuration_cli_overrides(args, config_explicit):
+    definitions = (
+        (("agent_modelname",), "agent_modelname", "models.evaluator.model_name"),
+        (
+            ("test_taker_modelname",),
+            "test_taker_modelname",
+            "models.test_taker.model_path",
+        ),
+        (("exp_mode",), "exp_mode", "experiment.exp_mode"),
+        (("num_iters",), "num_iters", "experiment.num_iterations"),
+        (("mode",), "mode", "experiment.mode"),
+        (("export_interval",), "export_interval", "experiment.export_interval"),
+        (("max_cycle",), "max_cycle", "experiment.max_cycles"),
+        (
+            ("clean_cycle_cache",),
+            "clean_cycle_cache",
+            "experiment.clean_cycle_cache",
+        ),
+        (("finetune_gpu",), "finetune_gpu", "finetune.gpu"),
+        (("finetune_epoch",), "finetune_epoch", "finetune.epochs"),
+        (("finetune_batch",), "finetune_batch", "finetune.batch_size"),
+        (("lora_rank",), "lora_rank", "finetune.lora_rank"),
+        (
+            ("new_local_model_suffix",),
+            "new_local_model_suffix",
+            "finetune.new_local_model_suffix",
+        ),
+    )
+    overlay = {}
+    for option_names, attribute, path in definitions:
+        explicit = any(
+            _cli_option_present(
+                f"--{name}",
+                f"--{name.replace('_', '-')}",
+            )
+            for name in option_names
+        )
+        if explicit or not config_explicit:
+            _set_nested(overlay, path, getattr(args, attribute))
+    if _cli_option_present("--acc_target", "--acc-target") or not config_explicit:
+        pieces = [
+            piece
+            for piece in re.split(r"\s*(?:--|,)\s*", args.acc_target)
+            if piece
+        ]
+        if len(pieces) != 2:
+            raise ConfigurationError(
+                "acc_target",
+                "expected low,high or low--high",
+                args.acc_target,
+            )
+        low, high = map(float, pieces)
+        _set_nested(
+            overlay,
+            "adaptive_sampling.target_accuracy_low",
+            low,
+        )
+        _set_nested(
+            overlay,
+            "adaptive_sampling.target_accuracy_high",
+            high,
+        )
+        _set_nested(
+            overlay,
+            "adaptive_sampling.target_accuracy_mid",
+            (low + high) / 2,
+        )
+    if _cli_option_present("--outfile_prefix1", "--outfile-prefix1") or not config_explicit:
+        raw_prefix = os.path.abspath(args.outfile_prefix1)
+        _set_nested(
+            overlay,
+            "paths.output_root",
+            os.path.dirname(raw_prefix) or os.getcwd(),
+        )
+        _set_nested(
+            overlay,
+            "paths.outfile_prefix",
+            os.path.basename(raw_prefix).rstrip(".") or "math",
+        )
+    if args.resume is not None:
+        _set_nested(overlay, "experiment.resume", args.resume)
+    return overlay
+
+
+def _apply_resolved_configuration(args, config, config_explicit):
+    args.agent_modelname = str(config["models"]["evaluator"]["model_name"])
+    args.test_taker_modelname = str(config["models"]["test_taker"]["model_path"])
+    args.exp_mode = str(config["experiment"]["exp_mode"])
+    args.num_iters = int(config["experiment"]["num_iterations"])
+    args.mode = str(config["experiment"]["mode"])
+    args.export_interval = int(config["experiment"]["export_interval"])
+    args.max_cycle = int(config["experiment"]["max_cycles"])
+    args.clean_cycle_cache = bool(config["experiment"]["clean_cycle_cache"])
+    args.finetune_gpu = str(config["finetune"]["gpu"])
+    args.finetune_epoch = int(config["finetune"]["epochs"])
+    args.finetune_batch = int(config["finetune"]["batch_size"])
+    args.lora_rank = int(config["finetune"]["lora_rank"])
+    args.new_local_model_suffix = str(
+        config["finetune"]["new_local_model_suffix"]
+    )
+    args.acc_target = (
+        f"{config['adaptive_sampling']['target_accuracy_low']},"
+        f"{config['adaptive_sampling']['target_accuracy_high']}"
+    )
+    if config_explicit and not _cli_option_present(
+        "--outfile_prefix1",
+        "--outfile-prefix1",
+    ):
+        output_root = Path(str(config["paths"]["output_root"])).expanduser()
+        prefix = str(config["paths"]["outfile_prefix"]).rstrip(".")
+        args.outfile_prefix1 = str(output_root / f"{prefix}.")
+
+
 def main():
     parser = _build_parser()
     args = parser.parse_args()
+    config_explicit = args.config is not None
+    config_path = args.config or str(
+        Path(__file__).resolve().parent / "configs" / "math_flywheel.yaml"
+    )
+    try:
+        cli_overrides = _configuration_cli_overrides(args, config_explicit)
+        resolved_config, provenance = load_resolved_config(
+            config_path,
+            cli_overrides=cli_overrides,
+            temporary_overrides=args.override,
+            validate_paths=True,
+        )
+        _apply_resolved_configuration(
+            args,
+            resolved_config,
+            config_explicit,
+        )
+    except ConfigurationError as exc:
+        parser.error(str(exc))
     for name in (
         "num_iters",
         "export_interval",
@@ -1560,6 +2496,41 @@ def main():
 
     output_root = _output_root(args.outfile_prefix1)
     os.makedirs(output_root, exist_ok=True)
+    resume_enabled = bool(resolved_config["experiment"]["resume"])
+    run_id = args.run_id or (
+        f"{resolved_config['experiment']['name']}-"
+        f"{provenance['config_hash'][:8]}"
+    )
+    if not resume_enabled and args.run_id is None:
+        run_id += "-" + time.strftime("%Y%m%dT%H%M%S", time.localtime())
+    research_run = ResearchRun(
+        resolved_config,
+        provenance,
+        run_id,
+        project_root=Path(__file__).resolve().parent,
+        legacy_output_root=(None if config_explicit else output_root),
+    )
+    if config_explicit and not _cli_option_present(
+        "--outfile_prefix1",
+        "--outfile-prefix1",
+    ):
+        prefix = str(resolved_config["paths"]["outfile_prefix"]).rstrip(".")
+        args.outfile_prefix1 = str(research_run.run_dir / f"{prefix}.")
+        output_root = _output_root(args.outfile_prefix1)
+        os.makedirs(output_root, exist_ok=True)
+    args.research_run = research_run
+    serializable_args = {
+        key: value
+        for key, value in vars(args).items()
+        if key != "research_run"
+    }
+    research_run.initialize(serializable_args)
+    research_run.logger.event(
+        "INFO",
+        "Startup",
+        "run_initialized",
+        f"config_hash={research_run.config_hash}",
+    )
     cycle_record_path = _cycle_record_file(args)
     try:
         agent_info, evaluator_info = _load_agent_and_evaluator(args)
@@ -1576,6 +2547,13 @@ def main():
             "cycles": [],
         }
         dump_standard_json(failure_record, cycle_record_path)
+        research_run.finalize(
+            "failed",
+            {
+                "stage": "agent_model_loading",
+                "failure_type": failure_record["failure_type"],
+            },
+        )
         print(f"[Startup] model loading failed: {failure_record['error']}")
         return 1
 
