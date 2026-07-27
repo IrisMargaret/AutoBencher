@@ -633,9 +633,12 @@ Balance metrics include normalized Shannon entropy, Jensen-Shannon divergence
 from uniform, count coefficient of variation, and max/min nonzero count ratio.
 
 The scheduler uses largest-remainder allocation, so integer allocations always
-sum exactly to `questions_per_iteration`. If the total budget cannot satisfy all
-minimum quotas, `quota_feasible=false` and unsatisfied subcategories are
-recorded rather than silently overstating effective coverage.
+sum exactly to `questions_per_iteration`. Minimum quotas are cumulative across
+iterations; one iteration is not required to cover every subcategory. The
+generation plan reports `multi_iteration_progress`, `scheduled_this_iteration`,
+or `complete`, and records remaining subcategories without treating incomplete
+single-iteration coverage as a runtime error. The compatibility field
+`quota_feasible` means that the current integer budget was allocated correctly.
 
 Per `(subcategory, difficulty)` accuracy is estimated with a Beta-Binomial
 posterior. Boundary proximity, coverage deficit, uncertainty, persistent error,
@@ -664,7 +667,9 @@ separate from mathematical correctness.
 Supported answer types include integer, decimal, rational, percentage, Boolean,
 symbolic expression, equation, inequality, set, interval, tuple, collection,
 vector, matrix, unit value, multiple choice, and text. Numeric tolerance and
-unit rules come from YAML.
+unit rules come from YAML. Common model aliases are canonicalized before Schema
+validation, including `fraction` to `rational`, `percent` to `percentage`, and
+`bool` to `boolean`.
 
 Error attribution follows output validity, answer equivalence, then
 mathematical evidence. Fixed tags are:
@@ -742,7 +747,10 @@ and replaying one iteration does not increment hard-pool occurrences.
 
 Each stage owns at most one dynamic progress bar. Nested bars raise an error.
 Non-TTY profiles disable the bar, and Transformers/Datasets advisory bars are
-disabled during evaluation. The trainer keeps its single Trainer progress bar.
+disabled during evaluation. In an interactive terminal, Generate, Infer, and
+Evaluate each reuse one in-place bar and close it before the next stage starts.
+The trainer keeps its single Trainer progress bar. Redirected `nohup` output is
+non-TTY, so it uses stage log messages instead of emitting repeated pseudo-bars.
 
 Human-readable and machine-readable logs are:
 

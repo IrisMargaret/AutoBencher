@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,43 @@ def test_progress_manager_disables_library_progress(config):
     ProgressManager(config)
     assert os.environ["HF_DATASETS_DISABLE_PROGRESS_BARS"] == "1"
     assert os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] == "1"
+
+
+def test_progress_manager_creates_one_dynamic_bar_per_stage(
+    config,
+    monkeypatch,
+):
+    config["logging"]["progress_enabled"] = True
+    created = []
+
+    class FakeStderr:
+        @staticmethod
+        def isatty():
+            return True
+
+    class FakeProgress:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.updated = 0
+            self.closed = False
+            created.append(self)
+
+        def update(self, amount=1):
+            self.updated += amount
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(sys, "stderr", FakeStderr())
+    monkeypatch.setattr("tqdm.auto.tqdm", FakeProgress)
+    manager = ProgressManager(config)
+    with manager.stage("Generate", 3, cycle=1, iteration=1) as progress:
+        progress.update(3)
+    assert len(created) == 1
+    assert created[0].updated == 3
+    assert created[0].closed is True
+    assert created[0].kwargs["position"] == 0
+    assert created[0].kwargs["leave"] is False
 
 
 def test_hard_pool_resume_is_idempotent(tmp_path):

@@ -252,6 +252,12 @@ class ProgressManager:
                     dynamic_ncols=bool(
                         self.config["logging"]["progress_dynamic_ncols"]
                     ),
+                    position=0,
+                    mininterval=0.2,
+                    bar_format=(
+                        "{desc}: {percentage:6.2f}%|{bar}| "
+                        "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+                    ),
                 )
             yield progress or _NullProgress()
         finally:

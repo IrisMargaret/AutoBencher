@@ -11,6 +11,22 @@ import util
 
 
 class OllamaRoutingTests(unittest.TestCase):
+    def test_transformers_five_uses_dtype_keyword(self):
+        module = Mock(__version__="5.14.1")
+        marker = object()
+        self.assertEqual(
+            util._transformers_dtype_kwargs(module, marker),
+            {"dtype": marker},
+        )
+
+    def test_transformers_four_uses_legacy_dtype_keyword(self):
+        module = Mock(__version__="4.49.0")
+        marker = object()
+        self.assertEqual(
+            util._transformers_dtype_kwargs(module, marker),
+            {"torch_dtype": marker},
+        )
+
     def test_ollama_tag_uses_native_local_endpoint(self):
         with patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://localhost:11434"}, clear=False):
             model, tokenizer, name, client = util.process_args_for_models(

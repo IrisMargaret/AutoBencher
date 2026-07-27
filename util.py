@@ -10,6 +10,16 @@ from openai import OpenAI
 load_dotenv()
 
 
+def _transformers_dtype_kwargs(transformers_module, dtype):
+    """Use the non-deprecated dtype keyword on Transformers 5+."""
+    version_text = str(getattr(transformers_module, "__version__", "0"))
+    try:
+        major_version = int(version_text.split(".", 1)[0])
+    except ValueError:
+        major_version = 0
+    return {"dtype": dtype} if major_version >= 5 else {"torch_dtype": dtype}
+
+
 def _ollama_model_name(model_name):
     """Return the Ollama model id when the CLI value uses Ollama syntax."""
     if model_name.startswith("ollama/"):
@@ -164,7 +174,9 @@ def load_model(modelpath):
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     model = transformers.AutoModelForCausalLM.from_pretrained(
-        modelpath, torch_dtype=torch.float16, low_cpu_mem_usage=True
+        modelpath,
+        low_cpu_mem_usage=True,
+        **_transformers_dtype_kwargs(transformers, torch.float16),
     ).cuda()
     return model, tokenizer
 
@@ -199,7 +211,12 @@ def load_via_deepspeed(model_name):
         "train_micro_batch_size_per_gpu": 1,
         "wall_clock_breakdown": False,
     }
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).eval()
+    import transformers
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        **_transformers_dtype_kwargs(transformers, torch.bfloat16),
+    ).eval()
     engine = deepspeed.initialize(model=model, config_params=ds_config)[0]
     engine.module.eval()
     return engine.module

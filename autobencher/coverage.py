@@ -359,6 +359,10 @@ def generation_schedule(
                 )
                 remaining_count -= chunk_count
     required_minimum = sum(item["min_quota"] for item in priorities)
+    remaining_minimum_before = sum(
+        max(0, item["min_quota"] - item["current_count"])
+        for item in priorities
+    )
     unsatisfied = [
         item["subcategory"]
         for item in priorities
@@ -371,11 +375,26 @@ def generation_schedule(
         raise RuntimeError("hard pool injection occurred during warmup")
     if injection_enabled and source_budget["hard_pool_variant"] <= 0:
         raise RuntimeError("directed generation budget must be positive after injection")
+    if remaining_minimum_before == 0:
+        cumulative_quota_status = "complete"
+    elif budget >= remaining_minimum_before:
+        cumulative_quota_status = "scheduled_this_iteration"
+    else:
+        cumulative_quota_status = "multi_iteration_progress"
     return {
         "global_iteration": global_iteration,
         "question_budget": budget,
-        "quota_feasible": budget >= required_minimum,
+        # Compatibility field: the current integer allocation is valid. Full
+        # taxonomy quotas are intentionally cumulative across iterations.
+        "quota_feasible": True,
+        "cumulative_quota_status": cumulative_quota_status,
+        "cumulative_quota_completion_possible_this_iteration": (
+            budget >= remaining_minimum_before
+        ),
         "minimum_questions_for_full_quota": required_minimum,
+        "remaining_questions_for_full_quota_before_iteration": (
+            remaining_minimum_before
+        ),
         "unsatisfied_subcategories": unsatisfied,
         "hard_pool_injection_enabled": injection_enabled,
         "hard_pool_reference_count": min(

@@ -15,4 +15,4 @@ paths:
   log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
 
 logging:
-  progress_enabled: false
+  progress_enabled: true

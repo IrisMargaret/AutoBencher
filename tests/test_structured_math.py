@@ -7,6 +7,7 @@ from autobencher.config import load_resolved_config
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
+    normalize_answer_type,
     parse_test_taker_output,
     test_taker_prompt as strict_test_taker_prompt,
     validate_generated_question,
@@ -49,6 +50,18 @@ def test_valid_structured_response_parses(config):
     parsed = parse_test_taker_output(response(), None, "integer", config)
     assert parsed["parse_status"] == "success"
     assert parsed["parsed_response"]["final_answer"] == "8"
+
+
+def test_fraction_alias_normalizes_to_rational(config):
+    assert normalize_answer_type("fraction") == "rational"
+    parsed = parse_test_taker_output(
+        response("1/2", "fraction"),
+        None,
+        "rational",
+        config,
+    )
+    assert parsed["parse_status"] == "success"
+    assert parsed["parsed_response"]["answer_type"] == "rational"
 
 
 def test_markdown_json_is_repaired(config):

@@ -85,6 +85,20 @@ def test_schedule_allocations_conserve_exact_budget(config):
     assert schedule["quota_feasible"] is True
 
 
+def test_large_cumulative_quota_is_progress_not_single_iteration_failure():
+    config = load_resolved_config(
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "math_flywheel.yaml",
+        temporary_overrides=["experiment.questions_per_iteration=27"],
+    )[0]
+    schedule = generation_schedule([], config, global_iteration=1, hard_pool_size=0)
+    assert schedule["quota_feasible"] is True
+    assert schedule["cumulative_quota_status"] == "multi_iteration_progress"
+    assert schedule["cumulative_quota_completion_possible_this_iteration"] is False
+    assert sum(item["question_count"] for item in schedule["allocations"]) == 27
+
+
 def test_balanced_coverage_is_complete_and_high_entropy(config):
     records = [
         {"sub_category": subcategory}

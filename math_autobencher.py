@@ -2,6 +2,7 @@ import glob
 import gc
 import random
 import sys
+import contextlib
 from pathlib import Path
 
 import requests
@@ -33,6 +34,7 @@ from autobencher.experiment import (
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
+    normalize_answer_type,
     validate_generated_question,
 )
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
@@ -643,6 +645,10 @@ Train-eligible examples:
         line["category"] = description_json["category"]
         line["subcategory"] = sub_category
         line["sub_category"] = sub_category
+        raw_answer_type = str(line.get("answer_type", "text"))
+        line["answer_type"] = normalize_answer_type(raw_answer_type)
+        if line["answer_type"] != raw_answer_type:
+            line["raw_answer_type"] = raw_answer_type
         line["answer"] = line["canonical_answer"]
         line["gold_answer"] = line["canonical_answer"]
         line["difficulty"] = max(
@@ -676,6 +682,8 @@ def _ask_question_v3(
     coverage_summary="",
     hard_pool_file=None,
     generation_plan=None,
+    progress_manager=None,
+    cycle_number=None,
 ):
     agent_lm, agent_tokenizer, agent_client = agent_info
     plan_outfile = f"{outfile_prefix}.question_plan_with_aim.json"
@@ -712,74 +720,98 @@ def _ask_question_v3(
     question_json_full = []
     normalized_question_texts = set()
     hard_pool = HardSamplePool(hard_pool_file) if hard_pool_file else None
-    for idx, plan_line in enumerate(plan_json):
-        outfile_prefix2 = outfile_prefix + '.subcat{}'.format(idx)
-        is_hard_variant = (
-            plan_line.get("generation_source") == "hard_pool_variant"
+    generation_total = (
+        int(generation_plan["question_budget"])
+        if generation_plan is not None
+        else sum(int(item.get("question_count", 50)) for item in plan_json)
+    )
+    progress_context = (
+        progress_manager.stage(
+            "Generate",
+            total=generation_total,
+            cycle=cycle_number,
+            iteration=iters,
         )
-        variant_context = (
-            hard_pool.get_variant_context(
-                plan_line["category"],
-                plan_line["sub_category"],
+        if progress_manager
+        else contextlib.nullcontext(None)
+    )
+    with progress_context as progress:
+        for idx, plan_line in enumerate(plan_json):
+            outfile_prefix2 = outfile_prefix + '.subcat{}'.format(idx)
+            is_hard_variant = (
+                plan_line.get("generation_source") == "hard_pool_variant"
             )
-            if enable_hard_sample_guidance and is_hard_variant and hard_pool
-            else ""
-        )
-        if is_hard_variant and hard_pool:
-            references = [
-                sample.get("unique_key", "")[:16]
-                for sample in hard_pool.samples
-                if sample.get("sample_grade") == "train_eligible"
-                and sample.get("category") == plan_line["category"]
-                and sample.get("sub_category") == plan_line["sub_category"]
-            ][:12]
-            plan_line["reference_hard_sample_ids"] = references
-        target_count = int(plan_line.get("question_count", 50))
-        question_json = _generate_question_from_description(
-            plan_line,
-            agent_lm,
-            agent_tokenizer,
-            agent_client,
-            outfile_prefix2,
-            hard_sample_context=variant_context,
-            question_count=target_count,
-        )
-        if len(question_json) == 1:
-            question_json = question_json[0]
-        question_json = [
-            item
-            for item in question_json
-            if normalize_question_text(item.get("question"))
-            and normalize_question_text(item.get("question"))
-            not in normalized_question_texts
-        ]
-        normalized_question_texts.update(
-            normalize_question_text(item.get("question"))
-            for item in question_json
-        )
-
-        repair_round = 0
-        while len(question_json) < target_count:
-            repair_round += 1
-            if repair_round > 3:
-                raise RuntimeError(
-                    f"Generation quota repair failed for {plan_line['sub_category']}"
+            variant_context = (
+                hard_pool.get_variant_context(
+                    plan_line["category"],
+                    plan_line["sub_category"],
                 )
-            question_json_new = _generate_question_from_description(plan_line, agent_lm, agent_tokenizer,
-                                                                     agent_client, outfile_prefix2,
-                                                                    questions_old=question_json,
-                                                                    hard_sample_context=variant_context,
-                                                                    question_count=target_count)
-            question_json_new = question_json_new[0]
-            unique_new = []
-            for item in question_json_new:
-                signature = normalize_question_text(item.get("question"))
-                if not signature or signature in normalized_question_texts:
-                    continue
-                normalized_question_texts.add(signature)
-                unique_new.append(item)
-            question_json.extend(unique_new)
-        question_json_full.extend(question_json[:target_count])
+                if enable_hard_sample_guidance and is_hard_variant and hard_pool
+                else ""
+            )
+            if is_hard_variant and hard_pool:
+                references = [
+                    sample.get("unique_key", "")[:16]
+                    for sample in hard_pool.samples
+                    if sample.get("sample_grade") == "train_eligible"
+                    and sample.get("category") == plan_line["category"]
+                    and sample.get("sub_category") == plan_line["sub_category"]
+                ][:12]
+                plan_line["reference_hard_sample_ids"] = references
+            target_count = int(plan_line.get("question_count", 50))
+            question_json = _generate_question_from_description(
+                plan_line,
+                agent_lm,
+                agent_tokenizer,
+                agent_client,
+                outfile_prefix2,
+                hard_sample_context=variant_context,
+                question_count=target_count,
+            )
+            if len(question_json) == 1:
+                question_json = question_json[0]
+            question_json = [
+                item
+                for item in question_json
+                if normalize_question_text(item.get("question"))
+                and normalize_question_text(item.get("question"))
+                not in normalized_question_texts
+            ]
+            normalized_question_texts.update(
+                normalize_question_text(item.get("question"))
+                for item in question_json
+            )
+
+            repair_round = 0
+            while len(question_json) < target_count:
+                repair_round += 1
+                if repair_round > 3:
+                    raise RuntimeError(
+                        f"Generation quota repair failed for {plan_line['sub_category']}"
+                    )
+                question_json_new = _generate_question_from_description(
+                    plan_line,
+                    agent_lm,
+                    agent_tokenizer,
+                    agent_client,
+                    outfile_prefix2,
+                    questions_old=question_json,
+                    hard_sample_context=variant_context,
+                    question_count=target_count,
+                )
+                question_json_new = question_json_new[0]
+                unique_new = []
+                for item in question_json_new:
+                    signature = normalize_question_text(item.get("question"))
+                    if not signature or signature in normalized_question_texts:
+                        continue
+                    normalized_question_texts.add(signature)
+                    unique_new.append(item)
+                question_json.extend(unique_new)
+            accepted = question_json[:target_count]
+            question_json_full.extend(accepted)
+            if progress is not None:
+                progress.update(len(accepted))
     if generation_plan is not None:
         expected = int(generation_plan["question_budget"])
         if len(question_json_full) != expected:
@@ -874,6 +906,7 @@ def test_and_eval(
     research_config=None,
     progress_manager=None,
     cycle_number=None,
+    event_logger=None,
 ):
     inference_file = f"{outfile_prefix}.test_taker_inference.json"
     compare_file = f"{outfile_prefix}.compare_answers.json"
@@ -890,6 +923,15 @@ def test_and_eval(
         return cached_inference
 
     print(len(question_json), "number of questions.")
+    if event_logger:
+        event_logger.event(
+            "INFO",
+            "Infer",
+            "stage_started",
+            f"questions={len(question_json)}",
+            cycle=cycle_number,
+            iteration=iter_number,
+        )
     test_taker_output = generate_math_inference(
         question_json,
         test_taker_info,
@@ -899,6 +941,15 @@ def test_and_eval(
         cycle=cycle_number,
         iteration=iter_number,
     )
+    if event_logger:
+        event_logger.event(
+            "INFO",
+            "Infer",
+            "stage_completed",
+            f"completed={len(test_taker_output)}",
+            cycle=cycle_number,
+            iteration=iter_number,
+        )
     if len(question_json) != len(test_taker_output):
         raise RuntimeError(
             "Inference cache is incomplete after generation: "
@@ -933,13 +984,61 @@ def test_and_eval(
     )
     os.makedirs(temp_log_dir, exist_ok=True)
     judge_prefix = os.path.join(temp_log_dir, "judge")
-    _, judgments = fast_compare_answers(
-        gold_records,
-        test_taker_output,
-        tool_info,
-        outfile_prefix=judge_prefix,
-        gold_ans_key="answer",
+    if event_logger:
+        event_logger.event(
+            "INFO",
+            "Evaluate",
+            "stage_started",
+            f"questions={len(test_taker_output)}",
+            cycle=cycle_number,
+            iteration=iter_number,
+        )
+    evaluator_progress_context = (
+        progress_manager.stage(
+            "Evaluate",
+            total=len(test_taker_output),
+            cycle=cycle_number,
+            iteration=iter_number,
+        )
+        if progress_manager
+        else contextlib.nullcontext(None)
     )
+    with evaluator_progress_context as evaluator_progress:
+        original_tqdm = tqdm.tqdm
+
+        def _tracked_evaluator_iterator(iterable, *args, **kwargs):
+            del args, kwargs
+            for item in iterable:
+                yield item
+                if evaluator_progress is not None:
+                    evaluator_progress.update(1)
+
+        if progress_manager:
+            tqdm.tqdm = _tracked_evaluator_iterator
+        try:
+            evaluator_cache_exists = os.path.exists(
+                f"{judge_prefix}.compare_answers.json"
+            )
+            _, judgments = fast_compare_answers(
+                gold_records,
+                test_taker_output,
+                tool_info,
+                outfile_prefix=judge_prefix,
+                gold_ans_key="answer",
+            )
+            if evaluator_cache_exists and evaluator_progress is not None:
+                evaluator_progress.update(len(test_taker_output))
+        finally:
+            tqdm.tqdm = original_tqdm
+    if event_logger:
+        event_logger.event(
+            "INFO",
+            "Evaluate",
+            "stage_completed",
+            f"completed={len(judgments)}",
+            cycle=cycle_number,
+            iteration=iter_number,
+        )
     if len(judgments) != len(test_taker_output):
         raise RuntimeError("Judgement count does not match inference count")
 
@@ -1486,13 +1585,20 @@ def _run_math_iteration(
             "generation_plan_created",
             (
                 f"questions={generation_plan['question_budget']} "
-                f"quota_feasible={str(generation_plan['quota_feasible']).lower()}"
+                f"quota_status={generation_plan['cumulative_quota_status']} "
+                "coverage_target=cumulative"
             ),
             cycle=cycle_number,
             iteration=iter_number,
             metrics={
                 "source_budget": generation_plan["source_budget"],
                 "quota_feasible": generation_plan["quota_feasible"],
+                "cumulative_quota_status": generation_plan[
+                    "cumulative_quota_status"
+                ],
+                "remaining_questions_for_full_quota": generation_plan[
+                    "remaining_questions_for_full_quota_before_iteration"
+                ],
             },
         )
     else:
@@ -1553,7 +1659,20 @@ def _run_math_iteration(
                 coverage_summary=coverage_summary,
                 hard_pool_file=paths["hard_pool_file"],
                 generation_plan=generation_plan,
+                progress_manager=(
+                    research_run.progress if research_run else None
+                ),
+                cycle_number=cycle_number,
             )
+            if research_run:
+                research_run.logger.event(
+                    "INFO",
+                    "Generate",
+                    "stage_completed",
+                    f"completed={len(json_category)}",
+                    cycle=cycle_number,
+                    iteration=iter_number,
+                )
         json_dict = test_and_eval(
             copy.deepcopy(json_category),
             args.outfile_prefix,
@@ -1568,6 +1687,9 @@ def _run_math_iteration(
                 research_run.progress if research_run else None
             ),
             cycle_number=cycle_number,
+            event_logger=(
+                research_run.logger if research_run else None
+            ),
         )
         compare_summary = _build_compare_summary(
             iter_number,
@@ -1771,8 +1893,8 @@ def _run_math_iteration(
         )
         research_run.logger.event(
             "INFO",
-            "Evaluate",
-            "stage_completed",
+            "Iteration",
+            "iteration_completed",
             f"accuracy={compare_summary['global_accuracy']:.4f}",
             cycle=cycle_number,
             iteration=iter_number,

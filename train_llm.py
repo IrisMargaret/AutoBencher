@@ -26,6 +26,16 @@ REQUIRED_PACKAGES = (
 )
 
 
+def _transformers_dtype_kwargs(transformers_module, dtype):
+    """Use the non-deprecated dtype keyword on Transformers 5+."""
+    version_text = str(getattr(transformers_module, "__version__", "0"))
+    try:
+        major_version = int(version_text.split(".", 1)[0])
+    except ValueError:
+        major_version = 0
+    return {"dtype": dtype} if major_version >= 5 else {"torch_dtype": dtype}
+
+
 # [ADDED] Use a stable, machine-readable log prefix.
 def configure_logging():
     logging.basicConfig(
@@ -269,6 +279,7 @@ def _training_config(args, adapter_output, use_bfloat16):
 # [ADDED] Train a QLoRA adapter, merge it, and save a complete local model.
 def train_and_merge(args, model_source, records):
     import torch
+    import transformers
     from datasets import Dataset
     from peft import LoraConfig, PeftModel, prepare_model_for_kbit_training
     from transformers import (
@@ -315,8 +326,8 @@ def train_and_merge(args, model_source, records):
         trust_remote_code=True,
         quantization_config=quantization_config,
         device_map={"": 0},
-        torch_dtype=compute_dtype,
         low_cpu_mem_usage=True,
+        **_transformers_dtype_kwargs(transformers, compute_dtype),
     )
     model.config.use_cache = False
     model = prepare_model_for_kbit_training(
@@ -416,9 +427,9 @@ def train_and_merge(args, model_source, records):
             model_source,
             local_files_only=True,
             trust_remote_code=True,
-            torch_dtype=compute_dtype,
             low_cpu_mem_usage=True,
             device_map={"": "cpu"},
+            **_transformers_dtype_kwargs(transformers, compute_dtype),
         )
         adapter_model = PeftModel.from_pretrained(
             base_model,

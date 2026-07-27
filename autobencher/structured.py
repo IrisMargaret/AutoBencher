@@ -34,6 +34,30 @@ ANSWER_TYPES = {
     "multiple_choice",
 }
 
+ANSWER_TYPE_ALIASES = {
+    "int": "integer",
+    "whole_number": "integer",
+    "float": "decimal",
+    "number": "decimal",
+    "numeric": "decimal",
+    "fraction": "rational",
+    "ratio": "rational",
+    "percent": "percentage",
+    "bool": "boolean",
+    "string": "text",
+    "free_text": "text",
+    "expression": "symbolic_expression",
+    "algebraic_expression": "symbolic_expression",
+    "ordered_pair": "ordered_tuple",
+    "tuple": "ordered_tuple",
+    "list": "unordered_collection",
+    "collection": "unordered_collection",
+    "array": "vector",
+    "quantity": "unit_value",
+    "quantity_with_unit": "unit_value",
+    "choice": "multiple_choice",
+}
+
 ERROR_TAGS = (
     "concept_confusion",
     "formula_memory_error",
@@ -67,6 +91,16 @@ ROLE_PREFIX_PATTERN = re.compile(
 SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "schemas"
 
 
+def normalize_answer_type(value: Any) -> str:
+    """Map common model-produced aliases onto the versioned answer schema."""
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(value or "text").strip().lower(),
+    ).strip("_")
+    return ANSWER_TYPE_ALIASES.get(normalized, normalized)
+
+
 def validate_json_schema(payload: Any, schema_name: str) -> None:
     """Validate an artifact against a checked-in Draft 2020-12 schema."""
     schema_path = SCHEMA_ROOT / schema_name
@@ -94,7 +128,7 @@ def validate_generated_question(payload: Mapping[str, Any]) -> None:
 
 def test_taker_prompt(question: Mapping[str, Any], config: Mapping[str, Any]) -> str:
     prompt_config = config["test_taker_prompt"]
-    answer_type = str(question.get("answer_type", "text"))
+    answer_type = normalize_answer_type(question.get("answer_type", "text"))
     return f"""You are the test-taker model. You have no tools.
 Use only your internal mathematical reasoning. Never call Python, a calculator,
 SymPy, search, files, a browser, an API, or any external tool.
@@ -240,7 +274,9 @@ def parse_test_taker_output(
             for step in reasoning
         ):
             continue
-        if str(parsed["answer_type"]) != str(expected_answer_type):
+        parsed_answer_type = normalize_answer_type(parsed["answer_type"])
+        expected_type = normalize_answer_type(expected_answer_type)
+        if parsed_answer_type != expected_type:
             continue
         try:
             confidence = float(parsed["confidence"])
@@ -259,7 +295,7 @@ def parse_test_taker_output(
         result["parsed_response"] = {
             "reasoning_summary": [step.strip() for step in reasoning],
             "final_answer": str(parsed["final_answer"]).strip(),
-            "answer_type": str(parsed["answer_type"]),
+            "answer_type": parsed_answer_type,
             "confidence": confidence,
         }
         result["parse_status"] = "success"
@@ -347,7 +383,7 @@ def normalize_answer(
     answer_type: str,
     config: Mapping[str, Any],
 ) -> dict[str, Any]:
-    answer_type = str(answer_type)
+    answer_type = normalize_answer_type(answer_type)
     if answer_type not in ANSWER_TYPES:
         return {"success": False, "answer_type": answer_type, "value": None}
     normalized: Any
