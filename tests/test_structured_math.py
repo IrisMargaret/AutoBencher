@@ -141,6 +141,77 @@ def test_multiple_objects_are_irrelevant(config):
     assert parsed["parse_status"] == "irrelevant_output"
 
 
+def test_first_structured_json_is_safely_extracted_from_model_overrun(config):
+    raw = (
+        "I will solve the problem briefly.\n"
+        "```json\n"
+        + response("105*sqrt(3)", "decimal")
+        + "\n```"
+        "Human: Solve an unrelated equation.\n"
+        "Assistant: This suffix must be discarded."
+    )
+    parsed = parse_test_taker_output(raw, None, "decimal", config)
+    assert parsed["parse_status"] == "success"
+    assert parsed["parsed_response"]["final_answer"] == "105*sqrt(3)"
+    assert parsed["extraneous_content_discarded"] is True
+    assert parsed["discarded_prefix_chars"] > 0
+    assert parsed["discarded_suffix_chars"] > 0
+    assert parsed["contains_irrelevant_content"] is False
+
+
+def test_excess_reasoning_is_truncated_without_losing_final_answer(config):
+    reasoning = [f"Step {index}." for index in range(1, 11)]
+    raw = json.dumps(
+        {
+            "reasoning_summary": reasoning,
+            "final_answer": -71,
+            "answer_type": "integer",
+            "confidence": 0.0,
+        }
+    ) + "Human: Solve an unrelated problem."
+    parsed = parse_test_taker_output(raw, None, "integer", config)
+    assert parsed["parse_status"] == "success"
+    assert parsed["parsed_response"]["final_answer"] == "-71"
+    assert len(parsed["parsed_response"]["reasoning_summary"]) == 8
+    assert parsed["reasoning_steps_truncated"] is True
+    assert parsed["original_reasoning_step_count"] == 10
+    assert parsed["reasoning_steps_dropped"] == 2
+    assert parsed["discarded_suffix_chars"] > 0
+
+
+def test_invalid_latex_escape_is_repaired_without_rejecting_answer(config):
+    raw = (
+        r'{"reasoning_summary":["Use \(x+1\) and simplify."],'
+        '"final_answer":"2","answer_type":"integer","confidence":0.8}'
+    )
+    parsed = parse_test_taker_output(raw, None, "integer", config)
+    assert parsed["parse_status"] == "success"
+    assert parsed["parsed_response"]["final_answer"] == "2"
+
+
+def test_generated_question_rejects_corrupted_unicode():
+    with pytest.raises(ValueError, match="corrupted Unicode"):
+        validate_generated_question(
+            {
+                "question_id": "q1",
+                "category": "Arithmetic",
+                "subcategory": "Integer Operations",
+                "difficulty": 3,
+                "question": "Evaluate 2 \u8133 3.",
+                "answer_type": "integer",
+                "canonical_answer": "6",
+                "display_answer": "6",
+                "unit": None,
+                "tolerance": None,
+                "order_sensitive": False,
+                "generation_source": "coverage_deficit",
+                "reference_hard_sample_ids": [],
+                "target_error_type": None,
+                "generation_strategy": "quota_repair",
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("gold", "predicted", "answer_type"),
     [

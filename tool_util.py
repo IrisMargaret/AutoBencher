@@ -399,6 +399,14 @@ def canonicalize_math_record(record, index=0):
         "repair_attempts",
         "contains_prompt_echo",
         "contains_irrelevant_content",
+        "extraneous_content_discarded",
+        "discarded_prefix_chars",
+        "discarded_suffix_chars",
+        "reasoning_steps_truncated",
+        "original_reasoning_step_count",
+        "reasoning_steps_dropped",
+        "reasoning_step_chars_truncated",
+        "parser_version",
         "tool_violation",
         "test_taker_tool_call_count",
         "evaluation_status",
@@ -464,6 +472,30 @@ def generate_math_inference(
         if existing:
             record.update(existing)
 
+    if research_config:
+        for record in canonical_records:
+            record["prompt"] = test_taker_prompt(record, research_config)
+            raw_response = str(record.get("raw_response", "") or "")
+            if not raw_response:
+                continue
+            reparsed = parse_test_taker_output(
+                raw_response,
+                record["prompt"],
+                record["answer_type"],
+                research_config,
+            )
+            record.update(reparsed)
+            record["parser_version"] = "structured_v2"
+            if reparsed["parse_status"] == "success":
+                record["test_taker_response"] = reparsed[
+                    "parsed_response"
+                ]["final_answer"]
+            else:
+                # [MODIFIED] Invalid historical responses are retryable. A
+                # non-empty status marker must never make a failed record look
+                # like a completed inference cache entry.
+                record["test_taker_response"] = ""
+
     # Persist the full question set before the first request so this file alone
     # is sufficient to resume an interrupted inference run.
     dump_standard_json(canonical_records, outfile)
@@ -496,9 +528,6 @@ def generate_math_inference(
         max_length = int(
             research_config["models"]["test_taker"]["max_new_tokens"]
         )
-        for record in canonical_records:
-            record["prompt"] = test_taker_prompt(record, research_config)
-        dump_standard_json(canonical_records, outfile)
     progress_context = (
         progress_manager.stage(
             "Infer",
@@ -528,6 +557,11 @@ def generate_math_inference(
                 max_tokens=max_length,
                 service=client_choice,
                 terminate_by_linebreak="no",
+                stop_sequences=(
+                    research_config["test_taker_prompt"]["stop_sequences"]
+                    if research_config
+                    else None
+                ),
                 use_helm=use_helm,
                 auth=auth,
                 verbose=False,
@@ -543,6 +577,7 @@ def generate_math_inference(
                         research_config,
                     )
                     record.update(parsed)
+                    record["parser_version"] = "structured_v2"
                     record["test_taker_response"] = (
                         parsed["parsed_response"].get("final_answer", "")
                         if parsed["parse_status"] == "success"

@@ -109,6 +109,7 @@ def query_ollama(
     max_tokens,
     num_completions,
     verbose,
+    stop_sequences=None,
 ):
     # Existing callers only consume the first completion. Preserve that
     # behavior while using Ollama's native endpoint.
@@ -143,6 +144,7 @@ def query_ollama(
                 "options": {
                     "temperature": temperature,
                     "num_predict": max_tokens,
+                    "stop": list(stop_sequences or []),
                 },
             },
         )
@@ -233,6 +235,52 @@ def _as_request_result(texts):
     )
 
 
+def _truncate_at_stop(text, stop_sequences):
+    positions = [
+        position
+        for stop_sequence in stop_sequences or []
+        if stop_sequence
+        for position in [text.find(stop_sequence)]
+        if position >= 0
+    ]
+    return text[:min(positions)].rstrip() if positions else text
+
+
+def _contains_complete_structured_json(text):
+    required_fields = (
+        '"reasoning_summary"',
+        '"final_answer"',
+        '"answer_type"',
+        '"confidence"',
+    )
+    for start in (index for index, character in enumerate(text) if character == "{"):
+        depth = 0
+        quoted = False
+        escaped = False
+        for index in range(start, len(text)):
+            character = text[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    quoted = False
+                continue
+            if character == '"':
+                quoted = True
+            elif character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    fragment = text[start:index + 1]
+                    if all(field in fragment for field in required_fields):
+                        return True
+                    break
+    return False
+
+
 def gen_from_prompt(
     model,
     tokenizer,
@@ -246,6 +294,7 @@ def gen_from_prompt(
     seed=101,
     process_func=None,
     terminate_by_linebreak=True,
+    stop_sequences=None,
     verbose=False,
     use_helm=False,
     auth=None,
@@ -260,23 +309,92 @@ def gen_from_prompt(
             raise RuntimeError("Local inference requires torch") from exc
         if process_func is not None:
             prompt = process_func(prompt)
-        prompt_ids = tokenizer(prompt, return_tensors="pt", padding=True)
+        formatted_prompts = list(prompt)
+        if getattr(tokenizer, "chat_template", None):
+            formatted_prompts = [
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": item}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for item in prompt
+            ]
+        prompt_ids = tokenizer(
+            formatted_prompts,
+            return_tensors="pt",
+            padding=True,
+        )
         attention_mask = prompt_ids["attention_mask"].to(model.device)
         input_ids = prompt_ids["input_ids"].to(model.device)
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            generated_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                temperature=temperature,
-                do_sample=temperature > 0,
-                max_length=max_tokens + input_ids.size(1),
-                num_return_sequences=num_completions,
-                eos_token_id=2,
-                pad_token_id=2,
+        generation_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "do_sample": temperature > 0,
+            "max_new_tokens": max_tokens,
+            "num_return_sequences": num_completions,
+            "eos_token_id": tokenizer.eos_token_id,
+            "pad_token_id": (
+                tokenizer.pad_token_id
+                if tokenizer.pad_token_id is not None
+                else tokenizer.eos_token_id
+            ),
+        }
+        if temperature > 0:
+            generation_kwargs["temperature"] = temperature
+        encoded_stops = []
+        for stop_sequence in stop_sequences or []:
+            stop_ids = tokenizer(
+                stop_sequence,
+                add_special_tokens=False,
+            ).input_ids
+            if stop_ids:
+                encoded_stops.append(stop_ids)
+        if encoded_stops:
+            from transformers import StoppingCriteria, StoppingCriteriaList
+
+            prompt_length = input_ids.size(1)
+
+            class StopOnSequences(StoppingCriteria):
+                def __call__(self, generated, scores, **kwargs):
+                    del scores, kwargs
+                    suffixes = generated[:, prompt_length:]
+                    return all(
+                        (
+                            any(
+                                row.size(0) >= len(stop_ids)
+                                and row[-len(stop_ids):].tolist() == stop_ids
+                                for stop_ids in encoded_stops
+                            )
+                            or (
+                                row.size(0) > 0
+                                and "}" in tokenizer.decode(
+                                    row[-2:],
+                                    skip_special_tokens=False,
+                                )
+                                and _contains_complete_structured_json(
+                                    tokenizer.decode(
+                                        row,
+                                        skip_special_tokens=True,
+                                    )
+                                )
+                            )
+                        )
+                        for row in suffixes
+                    )
+
+            generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                [StopOnSequences()]
             )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            generated_ids = model.generate(**generation_kwargs)
         texts = tokenizer.batch_decode(
             generated_ids[:, input_ids.size(1) :], skip_special_tokens=True
         )
+        if stop_sequences:
+            texts = [
+                _truncate_at_stop(text, stop_sequences)
+                for text in texts
+            ]
         if terminate_by_linebreak != "no":
             texts = [text.split("\n")[0] for text in texts]
         return _as_request_result(texts)
@@ -290,6 +408,7 @@ def gen_from_prompt(
             max_tokens=max_tokens,
             num_completions=num_completions,
             verbose=verbose,
+            stop_sequences=stop_sequences,
         )
         return _as_request_result(texts)
 
@@ -302,6 +421,7 @@ def gen_from_prompt(
             max_tokens=max_tokens,
             num_completions=num_completions,
             verbose=verbose,
+            stop_sequences=stop_sequences,
         )
         return _as_request_result(texts)
 
@@ -316,6 +436,7 @@ def gen_from_prompt(
             max_tokens=max_tokens,
             num_completions=num_completions,
             verbose=verbose,
+            stop_sequences=stop_sequences,
         )
         return _as_request_result(texts)
 
@@ -334,7 +455,7 @@ def gen_from_prompt(
                     max_tokens=max_tokens,
                     num_completions=num_completions,
                     random=str(seed),
-                    stop_sequences=["\n"],
+                    stop_sequences=list(stop_sequences or ["\n"]),
                 )
                 return service.make_request(auth, request)
             except Exception:
@@ -344,17 +465,32 @@ def gen_from_prompt(
     raise NotImplementedError(f"Unsupported model: {model}")
 
 
-def query_claude(client, model, prompt_lst, temperature, max_tokens, num_completions, verbose, max_num_retries=5):
+def query_claude(
+    client,
+    model,
+    prompt_lst,
+    temperature,
+    max_tokens,
+    num_completions,
+    verbose,
+    stop_sequences=None,
+    max_num_retries=5,
+):
     results = []
     for prompt in prompt_lst:
         message = None
         for retry in range(max_num_retries):
             try:
+                request_kwargs = {
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "model": model,
+                }
+                if stop_sequences:
+                    request_kwargs["stop_sequences"] = list(stop_sequences)
                 message = client.messages.create(
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    messages=[{"role": "user", "content": prompt}],
-                    model=model,
+                    **request_kwargs
                 )
                 break
             except Exception:
@@ -369,7 +505,15 @@ def query_claude(client, model, prompt_lst, temperature, max_tokens, num_complet
 
 
 def query_openai_compatible(
-    client, model, prompt_lst, temperature, max_tokens, num_completions, verbose, max_num_retries=5
+    client,
+    model,
+    prompt_lst,
+    temperature,
+    max_tokens,
+    num_completions,
+    verbose,
+    stop_sequences=None,
+    max_num_retries=5,
 ):
     results = []
     for prompt in prompt_lst:
@@ -386,6 +530,8 @@ def query_openai_compatible(
                     max_tokens=max_tokens,
                     n=num_completions,
                 )
+                if stop_sequences:
+                    request_kwargs["stop"] = list(stop_sequences)
                 # V4 models can spend the entire small token budget on hidden
                 # reasoning. AutoBencher expects the original non-thinking
                 # ChatCompletions behavior, especially for 20-token judgments.

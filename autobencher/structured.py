@@ -7,6 +7,7 @@ import json
 import math
 import re
 import unicodedata
+import warnings
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping
@@ -217,6 +218,16 @@ def validate_json_schema(payload: Any, schema_name: str) -> None:
 def validate_generated_question(payload: Mapping[str, Any]) -> None:
     """Validate the strict generated-question contract."""
     validate_json_schema(dict(payload), "generated_question.schema.json")
+    text_fields = (
+        payload.get("question", ""),
+        payload.get("canonical_answer", ""),
+        payload.get("display_answer", ""),
+    )
+    if any(re.search(r"[\u3400-\u9fff\ufffd]", str(value)) for value in text_fields):
+        raise ValueError(
+            "Generated question validation failed: non-English or corrupted "
+            "Unicode text detected"
+        )
 
 
 def test_taker_prompt(question: Mapping[str, Any], config: Mapping[str, Any]) -> str:
@@ -260,24 +271,80 @@ def _repair_json_text(text: str) -> str:
         r'\1"\2"\3',
         repaired,
     )
+    repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", repaired)
     return repaired
 
 
-def _extract_single_object(text: str) -> tuple[str | None, str, bool]:
+def _balanced_object_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    for start in (match.start() for match in re.finditer(r"\{", text)):
+        depth = 0
+        quote = None
+        escaped = False
+        for index in range(start, len(text)):
+            character = text[index]
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote:
+                    quote = None
+                continue
+            if character in {'"', "'"}:
+                quote = character
+            elif character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    spans.append((start, index + 1))
+                    break
+    return list(dict.fromkeys(spans))
+
+
+def _load_relaxed_object(text: str) -> dict[str, Any] | None:
+    for candidate in (text, _repair_json_text(text)):
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", SyntaxWarning)
+                    value = ast.literal_eval(candidate)
+            except (ValueError, SyntaxError):
+                continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _extract_json_objects(text: str) -> list[tuple[int, int, dict[str, Any]]]:
     decoder = json.JSONDecoder()
     candidates = []
     for match in re.finditer(r"\{", text):
         try:
-            value, end = decoder.raw_decode(text[match.start():])
+            value, relative_end = decoder.raw_decode(text[match.start():])
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            candidates.append((match.start(), match.start() + end))
-    if len(candidates) != 1:
-        return None, text, len(candidates) > 1
-    start, end = candidates[0]
-    surrounding = (text[:start] + text[end:]).strip()
-    return text[start:end], surrounding, False
+            candidate = (
+                match.start(),
+                match.start() + relative_end,
+                value,
+            )
+            if candidate[:2] not in {
+                existing[:2]
+                for existing in candidates
+            }:
+                candidates.append(candidate)
+    for start, end in _balanced_object_spans(text):
+        if (start, end) in {existing[:2] for existing in candidates}:
+            continue
+        value = _load_relaxed_object(text[start:end])
+        if value is not None:
+            candidates.append((start, end, value))
+    return candidates
 
 
 def _contains_tool_call(text: str) -> bool:
@@ -313,6 +380,13 @@ def parse_test_taker_output(
         "contains_prompt_echo": _prompt_echo(raw, prompt),
         "contains_irrelevant_content": False,
         "tool_violation": _contains_tool_call(raw),
+        "extraneous_content_discarded": False,
+        "discarded_prefix_chars": 0,
+        "discarded_suffix_chars": 0,
+        "reasoning_steps_truncated": False,
+        "original_reasoning_step_count": 0,
+        "reasoning_steps_dropped": 0,
+        "reasoning_step_chars_truncated": 0,
     }
     if result["tool_violation"]:
         result["parse_status"] = "tool_violation"
@@ -328,45 +402,73 @@ def parse_test_taker_output(
     attempts = [raw]
     if max_repairs > 0:
         attempts.append(_repair_json_text(raw))
+    required = {"reasoning_summary", "final_answer", "answer_type", "confidence"}
     for attempt, candidate in enumerate(attempts[: max_repairs + 1]):
-        object_text, surrounding, multiple = _extract_single_object(candidate)
-        if multiple:
+        structured_candidates = [
+            item
+            for item in _extract_json_objects(candidate)
+            if required.issubset(item[2])
+        ]
+        if len(structured_candidates) > 1:
             result["contains_irrelevant_content"] = True
             result["parse_status"] = "irrelevant_output"
             return result
-        if object_text is None:
+        prefix = ""
+        suffix = ""
+        if structured_candidates:
+            start, end, parsed = structured_candidates[0]
+            prefix = candidate[:start].strip()
+            suffix = candidate[end:].strip()
+        else:
             object_text = candidate if candidate.startswith("{") else None
-        if object_text is None:
-            continue
-        try:
-            parsed = json.loads(object_text)
-        except json.JSONDecodeError:
-            try:
-                parsed = ast.literal_eval(object_text)
-            except (ValueError, SyntaxError):
+            if object_text is None:
+                continue
+            parsed = _load_relaxed_object(object_text)
+            if parsed is None:
                 continue
         if not isinstance(parsed, dict):
             continue
-        required = {"reasoning_summary", "final_answer", "answer_type", "confidence"}
         if not required.issubset(parsed):
             continue
+        surrounding = bool(prefix or suffix)
+        if surrounding and attempt < min(max_repairs, len(attempts) - 1):
+            # Prefer a clean repaired candidate, for example a fenced JSON
+            # block, before accepting a safely isolated structured object.
+            continue
+        if surrounding:
+            result.update(
+                {
+                    "extraneous_content_discarded": True,
+                    "discarded_prefix_chars": len(prefix),
+                    "discarded_suffix_chars": len(suffix),
+                }
+            )
         reasoning = parsed["reasoning_summary"]
         if not isinstance(reasoning, list) or not all(
             isinstance(step, str) and step.strip() for step in reasoning
         ):
             continue
         prompt_config = config["test_taker_prompt"]
-        if not (
-            int(prompt_config["min_reasoning_steps"])
-            <= len(reasoning)
-            <= int(prompt_config["max_reasoning_steps"])
-        ):
+        min_reasoning_steps = int(prompt_config["min_reasoning_steps"])
+        max_reasoning_steps = int(prompt_config["max_reasoning_steps"])
+        max_chars_per_step = int(prompt_config["max_chars_per_step"])
+        original_reasoning_step_count = len(reasoning)
+        if original_reasoning_step_count < min_reasoning_steps:
             continue
-        if any(
-            len(step) > int(prompt_config["max_chars_per_step"])
-            for step in reasoning
-        ):
-            continue
+        normalized_reasoning = []
+        reasoning_step_chars_truncated = 0
+        for step in reasoning[:max_reasoning_steps]:
+            normalized_step = step.strip()
+            if len(normalized_step) > max_chars_per_step:
+                reasoning_step_chars_truncated += (
+                    len(normalized_step) - max_chars_per_step
+                )
+                normalized_step = normalized_step[:max_chars_per_step].rstrip()
+            normalized_reasoning.append(normalized_step)
+        reasoning_steps_dropped = max(
+            0,
+            original_reasoning_step_count - max_reasoning_steps,
+        )
         parsed_answer_type = normalize_answer_type(parsed["answer_type"])
         expected_type = normalize_answer_type(expected_answer_type)
         if parsed_answer_type != expected_type:
@@ -379,18 +481,27 @@ def parse_test_taker_output(
             continue
         if not str(parsed["final_answer"]).strip():
             continue
-        if surrounding:
-            if attempt < min(max_repairs, len(attempts) - 1):
-                continue
-            result["contains_irrelevant_content"] = True
-            result["parse_status"] = "irrelevant_output"
-            return result
         result["parsed_response"] = {
-            "reasoning_summary": [step.strip() for step in reasoning],
+            "reasoning_summary": normalized_reasoning,
             "final_answer": str(parsed["final_answer"]).strip(),
             "answer_type": parsed_answer_type,
             "confidence": confidence,
         }
+        result.update(
+            {
+                "reasoning_steps_truncated": bool(
+                    reasoning_steps_dropped
+                    or reasoning_step_chars_truncated
+                ),
+                "original_reasoning_step_count": (
+                    original_reasoning_step_count
+                ),
+                "reasoning_steps_dropped": reasoning_steps_dropped,
+                "reasoning_step_chars_truncated": (
+                    reasoning_step_chars_truncated
+                ),
+            }
+        )
         result["parse_status"] = "success"
         result["repair_attempts"] = attempt
         return result

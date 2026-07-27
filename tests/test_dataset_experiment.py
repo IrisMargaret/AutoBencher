@@ -15,7 +15,12 @@ from autobencher.dataset import (
     write_alpaca_jsonl,
 )
 from autobencher.experiment import ProgressManager, ResearchRun, atomic_json
-from tool_util import dump_standard_json, manage_hard_pool
+from tool_util import (
+    canonicalize_math_record,
+    dump_standard_json,
+    generate_math_inference,
+    manage_hard_pool,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -203,6 +208,53 @@ def test_hard_pool_resume_is_idempotent(tmp_path):
     manage_hard_pool(inference, hard_pool, source_iter=1, source_cycle=1)
     pool = json.loads(hard_pool.read_text(encoding="utf-8"))
     assert pool[0]["occurrences"] == 1
+
+
+def test_old_irrelevant_cache_is_reparsed_without_model_call(
+    tmp_path,
+    config,
+    monkeypatch,
+):
+    question = {
+        "id": 1,
+        "question_id": "q1",
+        "category": "Arithmetic",
+        "sub_category": "Integer Operations",
+        "question": "What is 2 + 2?",
+        "answer_type": "integer",
+        "canonical_answer": "4",
+        "gold_answer": "4",
+        "difficulty": 1,
+    }
+    cached = canonicalize_math_record(question, 0)
+    cached.update(
+        {
+            "raw_response": (
+                "Explanation.\n"
+                '{"reasoning_summary":["Add."],"final_answer":"4",'
+                '"answer_type":"integer","confidence":1.0}'
+                "Human: unrelated"
+            ),
+            "parse_status": "irrelevant_output",
+            "test_taker_response": "IRRELEVANT_OUTPUT",
+        }
+    )
+    inference_path = tmp_path / "inference.json"
+    dump_standard_json([cached], inference_path)
+
+    def fail_if_called(**kwargs):
+        raise AssertionError(f"model should not be called: {kwargs}")
+
+    monkeypatch.setattr("tool_util.gen_from_prompt", fail_if_called)
+    records = generate_math_inference(
+        [question],
+        ("unused", None, object()),
+        inference_path,
+        research_config=config,
+    )
+    assert records[0]["parse_status"] == "success"
+    assert records[0]["test_taker_response"] == "4"
+    assert records[0]["parser_version"] == "structured_v2"
 
 
 def test_research_run_writes_reproducibility_snapshot(tmp_path, config):

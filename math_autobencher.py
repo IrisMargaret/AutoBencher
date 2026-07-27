@@ -627,13 +627,18 @@ Train-eligible examples:
                     )
             if any(
                 re.search(
-                    r"[\u3400-\u9fff]",
-                    f"{item.get('question', '')} {item.get('answer', '')}",
+                    r"[\u3400-\u9fff\ufffd]",
+                    (
+                        f"{item.get('question', '')} "
+                        f"{item.get('canonical_answer', '')} "
+                        f"{item.get('display_answer', '')}"
+                    ),
                 )
                 for item in questions
             ):
                 raise ValueError(
-                    "Generated questions and answers must use English text only"
+                    "Generated questions and answers must use English text "
+                    "only and must not contain corrupted Unicode"
                 )
             valid_json = True
             break
@@ -924,6 +929,14 @@ def test_and_eval(
     if (
         cached_inference
         and all(record["test_taker_response"] for record in cached_inference)
+        and (
+            not research_config
+            or all(
+                record.get("parse_status") == "success"
+                and record.get("parser_version") == "structured_v2"
+                for record in cached_inference
+            )
+        )
         and len(cached_compare) == 1
         and "category_statistics" in cached_compare[0]
         and cached_compare[0].get("total_questions") == len(cached_inference)
@@ -993,6 +1006,25 @@ def test_and_eval(
     )
     os.makedirs(temp_log_dir, exist_ok=True)
     judge_prefix = os.path.join(temp_log_dir, "judge")
+    judge_cache_path = f"{judge_prefix}.compare_answers.json"
+    judge_cache = read_json_records(judge_cache_path)
+    judge_cache_matches = (
+        len(judge_cache) == len(test_taker_output)
+        and all(
+            str(cached.get("question", "")).strip()
+            == str(current.get("question", "")).strip()
+            and str(cached.get("test_taker_answer", "")).strip()
+            == str(current.get("test_taker_response", "")).strip()
+            for cached, current in zip(judge_cache, test_taker_output)
+        )
+    )
+    if judge_cache and not judge_cache_matches:
+        for stale_path in (
+            judge_cache_path,
+            f"{judge_prefix}.compare_answers.jsonl",
+        ):
+            if os.path.isfile(stale_path):
+                os.remove(stale_path)
     if event_logger:
         event_logger.event(
             "INFO",
@@ -1025,9 +1057,7 @@ def test_and_eval(
         if progress_manager:
             tqdm.tqdm = _tracked_evaluator_iterator
         try:
-            evaluator_cache_exists = os.path.exists(
-                f"{judge_prefix}.compare_answers.json"
-            )
+            evaluator_cache_exists = os.path.exists(judge_cache_path)
             _, judgments = fast_compare_answers(
                 gold_records,
                 test_taker_output,
@@ -1543,6 +1573,31 @@ def _run_math_iteration(
         if args.mode == "eval"
         else load_math_inference(paths["inference_file"])
     )
+    # [MODIFIED] Never resume an iteration whose cached question text contains
+    # non-English or encoding-corrupted symbols. Regeneration is safer than
+    # evaluating or exporting an ambiguous mathematical expression.
+    corrupted_cached_questions = [
+        record.get("question_id", record.get("id", "unknown"))
+        for record in migrated_records
+        if re.search(
+            r"[\u3400-\u9fff\ufffd]",
+            str(record.get("question", "")),
+        )
+    ]
+    if corrupted_cached_questions:
+        if research_run:
+            research_run.logger.event(
+                "WARNING",
+                "Generate",
+                "corrupted_question_cache_invalidated",
+                f"questions={len(corrupted_cached_questions)}",
+                cycle=cycle_number,
+                iteration=iter_number,
+                metrics={
+                    "question_ids": corrupted_cached_questions[:20],
+                },
+            )
+        migrated_records = []
     if research_run and migrated_records:
         cached_hashes = {
             str(record.get("config_hash"))
@@ -1634,6 +1689,14 @@ def _run_math_iteration(
     if (
         migrated_records
         and all(record["test_taker_response"] for record in migrated_records)
+        and (
+            not research_config
+            or all(
+                record.get("parse_status") == "success"
+                and record.get("parser_version") == "structured_v2"
+                for record in migrated_records
+            )
+        )
         and has_standard_compare
         and os.path.exists(paths["inference_file"])
     ):

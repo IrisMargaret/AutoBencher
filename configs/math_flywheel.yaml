@@ -184,6 +184,10 @@ test_taker_prompt:
     - "\nUser:"
     - "\nSystem:"
     - "\nAssistant:"
+    - "Human:"
+    - "User:"
+    - "System:"
+    - "Assistant:"
     - "<|im_end|>"
     - "<|endoftext|>"
 

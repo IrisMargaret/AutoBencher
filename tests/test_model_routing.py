@@ -11,6 +11,41 @@ import util
 
 
 class OllamaRoutingTests(unittest.TestCase):
+    def test_completion_is_truncated_at_first_stop_sequence(self):
+        text = '{"final_answer":"4"}Human: unrelated'
+        self.assertEqual(
+            util._truncate_at_stop(text, ["Human:", "User:"]),
+            '{"final_answer":"4"}',
+        )
+
+    def test_complete_structured_json_is_detected_after_preamble(self):
+        text = (
+            "Reasoning first.\n"
+            '{"reasoning_summary":["Add."],"final_answer":"4",'
+            '"answer_type":"integer","confidence":1.0}'
+            "Human: unrelated"
+        )
+        self.assertTrue(util._contains_complete_structured_json(text))
+
+    def test_openai_compatible_request_receives_stop_sequences(self):
+        client = Mock()
+        completion = Mock()
+        completion.choices = [
+            Mock(message=Mock(content='{"final_answer":"4"}'))
+        ]
+        client.chat.completions.create.return_value = completion
+
+        util.gen_from_prompt(
+            model="local-openai-compatible",
+            tokenizer=None,
+            prompt=["Return JSON."],
+            service=client,
+            stop_sequences=["Human:", "<|im_end|>"],
+        )
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["stop"], ["Human:", "<|im_end|>"])
+
     def test_transformers_five_uses_dtype_keyword(self):
         module = Mock(__version__="5.14.1")
         marker = object()

@@ -664,6 +664,24 @@ The parser records raw response, parsed response, repair count, parse status,
 prompt echo, irrelevant content, and tool violation. Output statuses are
 separate from mathematical correctness.
 
+Local Transformers inference applies the model chat template, uses the
+tokenizer EOS ID, forwards configured role stop sequences, and stops as soon as
+the first complete structured-answer JSON object closes. If a model still adds
+an explanation before the JSON or leaks another dialogue after it, the parser
+accepts the unique valid structured object and records
+`extraneous_content_discarded`, `discarded_prefix_chars`, and
+`discarded_suffix_chars`. Multiple structured answers, prompt echo, and tool
+calls remain hard failures.
+
+An otherwise valid answer is not discarded only because the model emitted more
+reasoning steps than requested. Excess steps and overlong step text are safely
+truncated while `reasoning_steps_truncated`,
+`original_reasoning_step_count`, `reasoning_steps_dropped`, and
+`reasoning_step_chars_truncated` preserve the audit trail. Generated questions
+containing CJK text or the Unicode replacement character are rejected before
+inference so encoding-corrupted math notation cannot enter evaluation or
+training data.
+
 Supported answer types include integer, decimal, rational, percentage, Boolean,
 symbolic expression, equation, inequality, set, interval, tuple, collection,
 vector, matrix, unit value, multiple choice, and text. Numeric tolerance and
