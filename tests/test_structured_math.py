@@ -64,6 +64,37 @@ def test_fraction_alias_normalizes_to_rational(config):
     assert parsed["parsed_response"]["answer_type"] == "rational"
 
 
+def test_mixed_number_alias_normalizes_to_rational(config):
+    assert normalize_answer_type("mixed_number", "1 1/2") == "rational"
+    parsed = parse_test_taker_output(
+        response("1 1/2", "mixed_number"),
+        None,
+        "rational",
+        config,
+    )
+    assert parsed["parse_status"] == "success"
+    assert parsed["parsed_response"]["answer_type"] == "rational"
+
+
+@pytest.mark.parametrize(
+    ("raw_type", "canonical_answer", "expected"),
+    [
+        ("custom_scalar", "3.25", "decimal"),
+        ("exact_solution", "x = 4", "equation"),
+        ("answer", "7/9", "rational"),
+        ("result_kind", "12 kg", "unit_value"),
+        ("custom_kind", "{1, 2}", "set"),
+        ("unknown", "plain response", "text"),
+    ],
+)
+def test_unknown_answer_type_uses_canonical_answer_inference(
+    raw_type,
+    canonical_answer,
+    expected,
+):
+    assert normalize_answer_type(raw_type, canonical_answer) == expected
+
+
 def test_markdown_json_is_repaired(config):
     parsed = parse_test_taker_output(
         f"```json\n{response()}\n```", None, "integer", config

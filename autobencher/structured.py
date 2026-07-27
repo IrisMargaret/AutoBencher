@@ -41,6 +41,10 @@ ANSWER_TYPE_ALIASES = {
     "number": "decimal",
     "numeric": "decimal",
     "fraction": "rational",
+    "mixed_fraction": "rational",
+    "mixed_number": "rational",
+    "proper_fraction": "rational",
+    "improper_fraction": "rational",
     "ratio": "rational",
     "percent": "percentage",
     "bool": "boolean",
@@ -48,6 +52,9 @@ ANSWER_TYPE_ALIASES = {
     "free_text": "text",
     "expression": "symbolic_expression",
     "algebraic_expression": "symbolic_expression",
+    "algebraic": "symbolic_expression",
+    "polynomial": "symbolic_expression",
+    "function": "symbolic_expression",
     "ordered_pair": "ordered_tuple",
     "tuple": "ordered_tuple",
     "list": "unordered_collection",
@@ -55,7 +62,9 @@ ANSWER_TYPE_ALIASES = {
     "array": "vector",
     "quantity": "unit_value",
     "quantity_with_unit": "unit_value",
+    "measurement": "unit_value",
     "choice": "multiple_choice",
+    "multiple_choice_answer": "multiple_choice",
 }
 
 ERROR_TAGS = (
@@ -91,14 +100,98 @@ ROLE_PREFIX_PATTERN = re.compile(
 SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "schemas"
 
 
-def normalize_answer_type(value: Any) -> str:
-    """Map common model-produced aliases onto the versioned answer schema."""
+def _infer_answer_type(canonical_answer: Any) -> str:
+    if isinstance(canonical_answer, bool):
+        return "boolean"
+    if isinstance(canonical_answer, int):
+        return "integer"
+    if isinstance(canonical_answer, float):
+        return "decimal"
+    if isinstance(canonical_answer, (list, tuple)):
+        if canonical_answer and all(
+            isinstance(row, (list, tuple))
+            for row in canonical_answer
+        ):
+            return "matrix"
+        return "ordered_tuple"
+    text = str(canonical_answer or "").strip()
+    lowered = text.lower()
+    if re.fullmatch(r"[-+]?\d+\s+\d+\s*/\s*\d+", text):
+        return "rational"
+    if text.endswith("%"):
+        return "percentage"
+    if re.fullmatch(
+        r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:/\d+)?\s*[A-Za-z\u00b0]+",
+        text,
+    ):
+        return "unit_value"
+    if any(operator in text for operator in ("<=", ">=", "\u2264", "\u2265", "<", ">")):
+        return "inequality"
+    if "=" in text:
+        return "equation"
+    if re.fullmatch(r"[\[(].+,.+[\])]", text):
+        return "interval"
+    if text.startswith("{") and text.endswith("}"):
+        return "set"
+    if text.startswith("(") and text.endswith(")") and "," in text:
+        return "ordered_tuple"
+    if re.fullmatch(r"[-+]?\d+\s*/\s*\d+", text):
+        return "rational"
+    if re.fullmatch(r"[-+]?\d+", text):
+        return "integer"
+    if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)", text):
+        return "decimal"
+    if lowered in {"true", "false", "yes", "no", "\u662f", "\u5426"}:
+        return "boolean"
+    if re.search(r"[A-Za-z]", text) and re.search(r"[+\-*/^()]", text):
+        return "symbolic_expression"
+    return "text"
+
+
+def normalize_answer_type(
+    value: Any,
+    canonical_answer: Any = None,
+) -> str:
+    """Map arbitrary model type names onto the fixed answer-type enum."""
     normalized = re.sub(
         r"[^a-z0-9]+",
         "_",
         str(value or "text").strip().lower(),
     ).strip("_")
-    return ANSWER_TYPE_ALIASES.get(normalized, normalized)
+    normalized = ANSWER_TYPE_ALIASES.get(normalized, normalized)
+    if normalized in ANSWER_TYPES:
+        return normalized
+    keyword_rules = (
+        ("fraction", "rational"),
+        ("ratio", "rational"),
+        ("percent", "percentage"),
+        ("integer", "integer"),
+        ("whole", "integer"),
+        ("decimal", "decimal"),
+        ("float", "decimal"),
+        ("boolean", "boolean"),
+        ("equation", "equation"),
+        ("inequality", "inequality"),
+        ("interval", "interval"),
+        ("matrix", "matrix"),
+        ("vector", "vector"),
+        ("tuple", "ordered_tuple"),
+        ("pair", "ordered_tuple"),
+        ("collection", "unordered_collection"),
+        ("set", "set"),
+        ("unit", "unit_value"),
+        ("measure", "unit_value"),
+        ("choice", "multiple_choice"),
+        ("expression", "symbolic_expression"),
+        ("algebra", "symbolic_expression"),
+        ("polynomial", "symbolic_expression"),
+        ("text", "text"),
+        ("string", "text"),
+    )
+    for keyword, answer_type in keyword_rules:
+        if keyword in normalized:
+            return answer_type
+    return _infer_answer_type(canonical_answer)
 
 
 def validate_json_schema(payload: Any, schema_name: str) -> None:

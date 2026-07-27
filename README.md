@@ -669,7 +669,9 @@ symbolic expression, equation, inequality, set, interval, tuple, collection,
 vector, matrix, unit value, multiple choice, and text. Numeric tolerance and
 unit rules come from YAML. Common model aliases are canonicalized before Schema
 validation, including `fraction` to `rational`, `percent` to `percentage`, and
-`bool` to `boolean`.
+`bool` to `boolean`. Mixed-number aliases such as `mixed_number` and
+`mixed_fraction` also map to `rational`; unknown labels fall back to
+deterministic inference from the canonical answer.
 
 Error attribution follows output validity, answer equivalence, then
 mathematical evidence. Fixed tags are:

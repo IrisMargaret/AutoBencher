@@ -542,6 +542,12 @@ Mandatory quality and output rules:
    mathematical structure.
 6. Ensure canonical_answer can be independently verified.
 7. Use only English text.
+8. answer_type must be exactly one of: integer, decimal, rational,
+   percentage, boolean, text, symbolic_expression, equation, inequality,
+   set, interval, ordered_tuple, unordered_collection, vector, matrix,
+   unit_value, multiple_choice.
+9. Use rational for every proper, improper, or mixed fraction. Never emit
+   fraction, mixed_fraction, or mixed_number as answer_type.
 """
 
     sub_category = description_json.get(
@@ -646,7 +652,10 @@ Train-eligible examples:
         line["subcategory"] = sub_category
         line["sub_category"] = sub_category
         raw_answer_type = str(line.get("answer_type", "text"))
-        line["answer_type"] = normalize_answer_type(raw_answer_type)
+        line["answer_type"] = normalize_answer_type(
+            raw_answer_type,
+            line.get("canonical_answer"),
+        )
         if line["answer_type"] != raw_answer_type:
             line["raw_answer_type"] = raw_answer_type
         line["answer"] = line["canonical_answer"]
