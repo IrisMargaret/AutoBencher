@@ -115,6 +115,15 @@
     "generation_strategy": {
       "type": "string",
       "minLength": 1
+    },
+    "truth_validation_details": {
+      "type": "object"
+    },
+    "failure_type": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "additionalProperties": true

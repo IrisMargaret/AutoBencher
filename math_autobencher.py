@@ -42,6 +42,7 @@ from autobencher.structured import (
     normalize_answer_type,
     validate_generated_question,
 )
+from autobencher.truth_solver import FailureType, TruthSolver
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
 from tool_util import (
     DEFAULT_SYSTEM_MESSAGE,
@@ -761,6 +762,63 @@ def _validate_ordered_tuple_system(
     research_config,
 ):
     """Independently solve and then substitute into the same parsed system."""
+    # [MODIFIED] All authoritative SymPy work is centralized in TruthSolver.
+    # This adapter preserves the existing gold-validation JSON field names.
+    solver = TruthSolver.from_config(research_config)
+    truth = solver.solve(question_text)
+    candidate = solver.validate_candidate(
+        question_text,
+        proposed_gold_answer,
+    )
+    truth_details = dict(truth.truth_validation_details)
+    substitution_details = list(
+        candidate.get("substitution_details")
+        or truth_details.get("substitution_details")
+        or []
+    )
+    verification_passed = bool(
+        truth.success
+        and candidate.get("verification_passed")
+    )
+    source_hash = truth_details.get("source_question_sha256")
+    return {
+        "status": "passed" if verification_passed else "failed",
+        "recomputed_answer": truth.canonical_answer or "",
+        "answer_type": truth.answer_type or "ordered_tuple",
+        "answer_type_consistent": truth.answer_type == "ordered_tuple",
+        "verification_passed": verification_passed,
+        "substitution_passed": bool(
+            candidate.get("substitution_passed")
+        ),
+        "verification_method": (
+            "TruthSolver independent solve and per-equation substitution"
+        ),
+        "failure_reason": (
+            None
+            if verification_passed
+            else (
+                truth.failure_summary
+                or candidate.get("failure_type")
+                or "The candidate failed deterministic truth validation."
+            )
+        ),
+        "answer_equivalent": verification_passed,
+        "question_source_consistent": bool(source_hash),
+        "source_question_sha256": source_hash,
+        "solve_question_sha256": source_hash,
+        "substitution_question_sha256": source_hash,
+        "solver_status": (
+            truth_details.get("solver_branch")
+            if truth.success
+            else truth.failure_type
+        ),
+        "substitution_details": substitution_details,
+        "failure_type": candidate.get("failure_type"),
+        "truth_validation_details": truth_details,
+    }
+
+    # Legacy implementation retained below only until downstream migrations
+    # finish; it is unreachable and no longer participates in truth solving.
     # [ADDED] Avoid an optional binary gmpy2 backend from making validation
     # unavailable when the host package is ABI-incompatible.
     os.environ.setdefault("SYMPY_GROUND_TYPES", "python")
@@ -1388,6 +1446,358 @@ Train-eligible examples:
     )
     return extracted_json
 
+
+# [ADDED] New question-only generator. LLM output is never used as a truth
+# source; TruthSolver is the only component allowed to create gold fields.
+def _generate_question_text_with_truth(
+    description_json,
+    agent_lm,
+    agent_tokenizer,
+    agent_client,
+    outfile_prefix="att1",
+    questions_old=None,
+    hard_sample_context="",
+    question_count=50,
+    research_config=None,
+    repair_feedback=None,
+):
+    question_count = int(question_count)
+    sub_category = description_json.get(
+        "sub_category",
+        description_json.get("subcategory_description", ""),
+    )
+    generation_config = research_config["generation"]
+    max_retry = int(generation_config["generator_max_retry"])
+    truth_solver = TruthSolver.from_config(research_config)
+    context = f"""Generate exactly {question_count} English math questions for:
+Category: {description_json["category"]}
+Subcategory: {sub_category}
+Difficulty: {description_json.get("difficulty", 5)}
+
+Return only one JSON array in this exact question-only format:
+[
+  {{"question": "What is 5 + 3?"}}
+]
+
+Mandatory rules:
+1. Every object must contain exactly one key: question.
+2. Never output an answer, candidate answer, gold answer, solution, answer type,
+   explanation, reasoning, hint, metadata, or Markdown.
+3. Every question must be self-contained, objectively solvable, and have a
+   finite closed-form answer that SymPy can independently derive.
+4. Use explicit solver-friendly wording:
+   - equations: "Solve for x: ... = ...."
+   - systems: "Solve the system for (x, y): eq1, eq2."
+   - integrals: "Integrate EXPR with respect to x from A to B."
+   - limits: "Find the limit of EXPR as x approaches A."
+   - calculations: "Compute EXPR."
+5. Write powers as ^ or ** and use explicit equality signs.
+6. Use English only and never copy an earlier question verbatim.
+"""
+    if "system" in sub_category.lower():
+        context += """
+System-specific constraint:
+- Include the ordered variable tuple and every complete equation.
+- Construct a consistent system with one unique solution.
+- A valid solution must satisfy every equation simultaneously.
+- Do not emit any numerical solution or candidate tuple.
+"""
+    if hard_sample_context:
+        context += f"""
+Use these weakness patterns only as structural inspiration. Do not copy their
+answers or question text:
+{hard_sample_context}
+"""
+    if questions_old:
+        previous_questions = [
+            str(item.get("question", "")).strip()
+            for item in questions_old
+            if isinstance(item, dict)
+        ]
+        context += (
+            "\nPreviously accepted questions that must not be repeated:\n"
+            + json.dumps(
+                previous_questions,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    feedback = str(repair_feedback or "").strip()
+    failures = []
+    accepted_questions = []
+    for attempt in range(1, max_retry + 1):
+        feedback_block = ""
+        if feedback:
+            feedback_block = f"""
+Previous attempt failure summary:
+{feedback}
+Correct every listed failure. Do not repeat the same invalid output pattern.
+"""
+        response = ""
+        try:
+            request_result = gen_from_prompt(
+                model=agent_lm,
+                tokenizer=agent_tokenizer,
+                prompt=[context + feedback_block],
+                echo_prompt=False,
+                temperature=float(generation_config["temperature"]),
+                top_p=float(generation_config["top_p"]),
+                max_tokens=8192,
+                process_func=None,
+                service=agent_client,
+                terminate_by_linebreak="no",
+            )
+            response = request_result.completions[0].text
+            extracted = extract_json_v2(response, None)
+            items = extracted[0]
+            if not isinstance(items, list) or not items:
+                raise ValueError(
+                    "Expected a non-empty question-only JSON array"
+                )
+            format_errors = []
+            normalized_items = []
+            for item_index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    format_errors.append(
+                        f"item {item_index} is not a JSON object"
+                    )
+                    continue
+                keys = set(item)
+                if keys != {"question"}:
+                    forbidden = sorted(keys - {"question"})
+                    failure_type = FailureType.GENERATOR_FORMAT_ERROR.value
+                    candidate = next(
+                        (
+                            item.get(key)
+                            for key in (
+                                "canonical_answer",
+                                "gold_answer",
+                                "candidate_gold_answer",
+                                "answer",
+                            )
+                            if item.get(key) is not None
+                        ),
+                        None,
+                    )
+                    if candidate is not None and item.get("question"):
+                        candidate_check = truth_solver.validate_candidate(
+                            item["question"],
+                            candidate,
+                        )
+                        if candidate_check.get("failure_type") == (
+                            FailureType.PARTIAL_SOLUTION.value
+                        ):
+                            failure_type = (
+                                FailureType.PARTIAL_SOLUTION.value
+                            )
+                            format_errors.append(
+                                "item "
+                                f"{item_index} leaked a partial solution "
+                                f"that passed "
+                                f"{candidate_check['equations_passed']}/"
+                                f"{candidate_check['equations_total']} "
+                                "equations"
+                            )
+                    failures.append(
+                        {
+                            "stage": "generator",
+                            "failure_type": failure_type,
+                            "attempt": attempt,
+                            "item_index": item_index,
+                            "question": item.get("question"),
+                            "unexpected_fields": forbidden,
+                        }
+                    )
+                    format_errors.append(
+                        f"item {item_index} contains forbidden fields: "
+                        + ", ".join(forbidden)
+                    )
+                    continue
+                question_text = str(item["question"]).strip()
+                if not question_text:
+                    format_errors.append(
+                        f"item {item_index} has an empty question"
+                    )
+                    continue
+                if re.search(r"[\u3400-\u9fff\ufffd]", question_text):
+                    format_errors.append(
+                        f"item {item_index} is not valid English UTF-8 text"
+                    )
+                    continue
+                normalized_items.append({"question": question_text})
+            if format_errors:
+                feedback = "; ".join(format_errors[:12])
+                failures.append(
+                    {
+                        "stage": "generator",
+                        "failure_type": (
+                            FailureType.GENERATOR_FORMAT_ERROR.value
+                        ),
+                        "attempt": attempt,
+                        "failure_summary": feedback,
+                    }
+                )
+                _write_attempt_log(
+                    outfile_prefix,
+                    "question_only_generator",
+                    attempt,
+                    response,
+                )
+                continue
+            accepted_questions = normalized_items
+            break
+        except (ValueError, TypeError, IndexError) as exc:
+            feedback = f"{type(exc).__name__}: {exc}"
+            failures.append(
+                {
+                    "stage": "generator",
+                    "failure_type": (
+                        FailureType.GENERATOR_FORMAT_ERROR.value
+                    ),
+                    "attempt": attempt,
+                    "failure_summary": feedback,
+                }
+            )
+            _write_attempt_log(
+                outfile_prefix,
+                "question_only_generator",
+                attempt,
+                response,
+            )
+
+    if not accepted_questions:
+        failures.append(
+            {
+                "stage": "generator",
+                "failure_type": FailureType.REPAIR_EXHAUSTED.value,
+                "attempts": max_retry,
+                "failure_summary": (
+                    "Question-only generator repair attempts were exhausted."
+                ),
+            }
+        )
+
+    solved_questions = []
+    for index, item in enumerate(accepted_questions):
+        question_text = item["question"]
+        truth = truth_solver.solve(question_text)
+        if not truth.success:
+            failures.append(
+                {
+                    "stage": "truth_solver",
+                    "failure_type": truth.failure_type,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": truth.failure_summary,
+                    "truth_validation_details": (
+                        truth.truth_validation_details
+                    ),
+                }
+            )
+            continue
+        canonical_answer = str(truth.canonical_answer)
+        truth_details = dict(truth.truth_validation_details)
+        solved_questions.append(
+            {
+                "id": f"q_{index + 1}",
+                "question_id": f"q_{index + 1}",
+                "category": description_json["category"],
+                "subcategory": sub_category,
+                "sub_category": sub_category,
+                "difficulty": max(
+                    1,
+                    min(
+                        10,
+                        int(description_json.get("difficulty", 5)),
+                    ),
+                ),
+                "question": question_text,
+                "answer_type": truth.answer_type,
+                "canonical_answer": canonical_answer,
+                "display_answer": canonical_answer,
+                "answer": canonical_answer,
+                "gold_answer": canonical_answer,
+                "unit": None,
+                "tolerance": None,
+                "order_sensitive": truth.answer_type == "ordered_tuple",
+                "generation_source": description_json.get(
+                    "generation_source",
+                    "coverage_deficit",
+                ),
+                "reference_hard_sample_ids": list(
+                    description_json.get(
+                        "reference_hard_sample_ids",
+                        [],
+                    )
+                ),
+                "target_error_type": description_json.get(
+                    "target_error_type"
+                ),
+                "generation_strategy": description_json.get(
+                    "generation_strategy",
+                    "quota_repair",
+                ),
+                "truth_validation_details": truth_details,
+                "failure_type": None,
+                "gold_answer_validation": {
+                    "status": "passed",
+                    "recomputed_answer": canonical_answer,
+                    "answer_type": truth.answer_type,
+                    "answer_type_consistent": True,
+                    "verification_passed": True,
+                    "substitution_passed": bool(
+                        truth_details.get("substitution_passed", True)
+                    ),
+                    "verification_method": (
+                        "TruthSolver authoritative independent solve"
+                    ),
+                    "failure_reason": None,
+                    "answer_equivalent": True,
+                    "failure_type": None,
+                    "truth_validation_details": truth_details,
+                },
+            }
+        )
+
+    failure_file = f"{outfile_prefix}.generation_failures.json"
+    existing_failures = read_json_records(failure_file)
+    dump_standard_json(
+        existing_failures + failures,
+        failure_file,
+    )
+    truth_audits = [
+        {
+            "question_id": item["question_id"],
+            "question": item["question"],
+            "proposed_gold_answer": None,
+            "validation": item["gold_answer_validation"],
+        }
+        for item in solved_questions
+    ]
+    audit_file = f"{outfile_prefix}.gold_answer_validation.json"
+    dump_standard_json(
+        read_json_records(audit_file) + truth_audits,
+        audit_file,
+    )
+    failure_counts = defaultdict(int)
+    for failure in failures:
+        failure_counts[str(failure.get("failure_type", "unknown"))] += 1
+    dump_standard_json(
+        {
+            "requested_questions": question_count,
+            "generator_output_questions": len(accepted_questions),
+            "valid_truth_solved_questions": len(solved_questions),
+            "discarded_questions": max(
+                0,
+                len(accepted_questions) - len(solved_questions),
+            ),
+            "failure_counts": dict(sorted(failure_counts.items())),
+        },
+        f"{outfile_prefix}.generation_batch_summary.json",
+    )
+    return [solved_questions]
+
+
 def _ask_question_v3(
     agent_info,
     history,
@@ -1465,6 +1875,42 @@ def _ask_question_v3(
         else 1
     )
     subcategory_shortfalls = []
+    subcategory_statistics = []
+    generation_health_file = os.path.join(
+        os.path.dirname(os.path.abspath(hard_pool_file))
+        if hard_pool_file
+        else os.path.dirname(os.path.abspath(outfile_prefix)),
+        "generation_health.json",
+    )
+    health_records = read_json_records(generation_health_file)
+    generation_health = (
+        dict(health_records[0])
+        if health_records and isinstance(health_records[0], dict)
+        else {}
+    )
+    current_global_iteration = int(
+        generation_plan.get("global_iteration", iters)
+        if generation_plan
+        else iters
+    )
+    cooldown_threshold = (
+        int(
+            research_config["generation"][
+                "subcategory_failure_cooldown_threshold"
+            ]
+        )
+        if research_config
+        else 3
+    )
+    cooldown_iterations = (
+        int(
+            research_config["generation"][
+                "subcategory_cooldown_iterations"
+            ]
+        )
+        if research_config
+        else 2
+    )
     generation_total = (
         int(generation_plan["question_budget"])
         if generation_plan is not None
@@ -1483,6 +1929,46 @@ def _ask_question_v3(
     with progress_context as progress:
         for idx, plan_line in enumerate(plan_json):
             outfile_prefix2 = outfile_prefix + '.subcat{}'.format(idx)
+            health_key = (
+                f"{plan_line['category']}|||{plan_line['sub_category']}"
+            )
+            health_state = dict(generation_health.get(health_key, {}))
+            cooldown_until = int(
+                health_state.get("cooldown_until_iteration", 0)
+            )
+            target_count = int(plan_line.get("question_count", 50))
+            if current_global_iteration <= cooldown_until:
+                cooldown_failure = {
+                    "category": plan_line["category"],
+                    "sub_category": plan_line["sub_category"],
+                    "requested": target_count,
+                    "verified": 0,
+                    "shortfall": target_count,
+                    "repair_rounds": 0,
+                    "reason": "subcategory_cooldown",
+                    "cooldown_until_iteration": cooldown_until,
+                }
+                subcategory_shortfalls.append(cooldown_failure)
+                subcategory_statistics.append(
+                    {
+                        "category": plan_line["category"],
+                        "sub_category": plan_line["sub_category"],
+                        "generated_total": 0,
+                        "valid_samples": 0,
+                        "failure_counts": {
+                            FailureType.SUBCATEGORY_COOLDOWN.value: (
+                                target_count
+                            )
+                        },
+                        "coverage_gap": target_count,
+                    }
+                )
+                print(
+                    "[Generate] subcategory_cooldown "
+                    f"sub_category={plan_line['sub_category']!r} "
+                    f"until_iteration={cooldown_until}"
+                )
+                continue
             is_hard_variant = (
                 plan_line.get("generation_source") == "hard_pool_variant"
             )
@@ -1503,8 +1989,7 @@ def _ask_question_v3(
                     and sample.get("sub_category") == plan_line["sub_category"]
                 ][:12]
                 plan_line["reference_hard_sample_ids"] = references
-            target_count = int(plan_line.get("question_count", 50))
-            question_json = _generate_question_from_description(
+            question_json = _generate_question_text_with_truth(
                 plan_line,
                 agent_lm,
                 agent_tokenizer,
@@ -1527,14 +2012,50 @@ def _ask_question_v3(
                 normalize_question_text(item.get("question"))
                 for item in question_json
             )
+            batch_summary_records = read_json_records(
+                f"{outfile_prefix2}.generation_batch_summary.json"
+            )
+            batch_summary = (
+                dict(batch_summary_records[0])
+                if batch_summary_records
+                and isinstance(batch_summary_records[0], dict)
+                else {}
+            )
+            aggregate_generated = int(
+                batch_summary.get("generator_output_questions", 0)
+            )
+            aggregate_failures = defaultdict(int)
+            for key, value in batch_summary.get(
+                "failure_counts",
+                {},
+            ).items():
+                aggregate_failures[str(key)] += int(value)
+            truth_failure_present = any(
+                aggregate_failures.get(label, 0) > 0
+                for label in (
+                    FailureType.TRUTH_PARSE_FAIL.value,
+                    FailureType.NO_CLOSED_SOLUTION.value,
+                    FailureType.INFINITE_SOLUTIONS.value,
+                    FailureType.SOLVE_TIMEOUT.value,
+                )
+            )
+            generator_repair_exhausted = (
+                aggregate_failures.get(
+                    FailureType.REPAIR_EXHAUSTED.value,
+                    0,
+                )
+                > 0
+            )
 
             repair_round = 0
             while (
                 len(question_json) < target_count
                 and repair_round < repair_limit
+                and not truth_failure_present
+                and not generator_repair_exhausted
             ):
                 repair_round += 1
-                question_json_new = _generate_question_from_description(
+                question_json_new = _generate_question_text_with_truth(
                     plan_line,
                     agent_lm,
                     agent_tokenizer,
@@ -1544,8 +2065,49 @@ def _ask_question_v3(
                     hard_sample_context=variant_context,
                     question_count=target_count,
                     research_config=research_config,
+                    repair_feedback=(
+                        "The previous batch contained duplicate question "
+                        "text. Generate structurally different questions "
+                        "while preserving the assigned subcategory."
+                    ),
                 )
                 question_json_new = question_json_new[0]
+                repair_summary_records = read_json_records(
+                    f"{outfile_prefix2}.generation_batch_summary.json"
+                )
+                repair_summary = (
+                    dict(repair_summary_records[0])
+                    if repair_summary_records
+                    and isinstance(repair_summary_records[0], dict)
+                    else {}
+                )
+                aggregate_generated += int(
+                    repair_summary.get(
+                        "generator_output_questions",
+                        0,
+                    )
+                )
+                for key, value in repair_summary.get(
+                    "failure_counts",
+                    {},
+                ).items():
+                    aggregate_failures[str(key)] += int(value)
+                truth_failure_present = any(
+                    aggregate_failures.get(label, 0) > 0
+                    for label in (
+                        FailureType.TRUTH_PARSE_FAIL.value,
+                        FailureType.NO_CLOSED_SOLUTION.value,
+                        FailureType.INFINITE_SOLUTIONS.value,
+                        FailureType.SOLVE_TIMEOUT.value,
+                    )
+                )
+                generator_repair_exhausted = (
+                    aggregate_failures.get(
+                        FailureType.REPAIR_EXHAUSTED.value,
+                        0,
+                    )
+                    > 0
+                )
                 unique_new = []
                 for item in question_json_new:
                     signature = normalize_question_text(item.get("question"))
@@ -1561,6 +2123,46 @@ def _ask_question_v3(
             plan_line["verified_question_count"] = verified_count
             plan_line["question_shortfall"] = shortfall
             plan_line["quota_repair_rounds_used"] = repair_round
+            if verified_count:
+                health_state.update(
+                    {
+                        "consecutive_failures": 0,
+                        "cooldown_until_iteration": 0,
+                        "last_success_iteration": (
+                            current_global_iteration
+                        ),
+                    }
+                )
+            else:
+                consecutive_failures = int(
+                    health_state.get("consecutive_failures", 0)
+                ) + 1
+                health_state["consecutive_failures"] = (
+                    consecutive_failures
+                )
+                health_state["last_failure_iteration"] = (
+                    current_global_iteration
+                )
+                if consecutive_failures >= cooldown_threshold:
+                    health_state["cooldown_until_iteration"] = (
+                        current_global_iteration + cooldown_iterations
+                    )
+            health_state["last_failure_counts"] = dict(
+                sorted(aggregate_failures.items())
+            )
+            generation_health[health_key] = health_state
+            subcategory_statistics.append(
+                {
+                    "category": plan_line["category"],
+                    "sub_category": plan_line["sub_category"],
+                    "generated_total": aggregate_generated,
+                    "valid_samples": verified_count,
+                    "failure_counts": dict(
+                        sorted(aggregate_failures.items())
+                    ),
+                    "coverage_gap": shortfall,
+                }
+            )
             if shortfall:
                 subcategory_shortfalls.append(
                     {
@@ -1598,27 +2200,24 @@ def _ask_question_v3(
             "verified_questions": verified_total,
             "question_shortfall": max(0, expected - verified_total),
             "partial_iteration": verified_total != expected,
+            "below_minimum_verified": (
+                verified_total < minimum_verified_questions
+            ),
+            "partial_budget_allowed": allow_partial_budget,
             "subcategory_shortfalls": subcategory_shortfalls,
+            "subcategory_statistics": subcategory_statistics,
         }
+        dump_standard_json(generation_health, generation_health_file)
         generation_plan["generation_result"] = generation_result
         dump_standard_json(generation_result, (
             f"{outfile_prefix}.generation_quota_summary.json"
         ))
-        if verified_total < minimum_verified_questions:
-            raise RuntimeError(
-                "No usable verified question set was generated: "
-                f"{verified_total}/{minimum_verified_questions}"
-            )
-        if verified_total != expected and not allow_partial_budget:
-            raise RuntimeError(
-                "Generated question count mismatch: "
-                f"{verified_total}/{expected}"
-            )
         if verified_total != expected:
             print(
                 "[Generate] partial_verified_iteration "
                 f"verified={verified_total}/{expected} "
-                "coverage_target=cumulative"
+                "coverage_target=cumulative "
+                "action=continue_without_cycle_failure"
             )
         # [MODIFIED] Persist the realized verified counts alongside the
         # original plan without requiring all subcategories in one iteration.
@@ -1873,6 +2472,11 @@ def test_and_eval(
         raise RuntimeError("Judgement count does not match inference count")
 
     standardized_records = []
+    truth_solver = (
+        TruthSolver.from_config(research_config)
+        if research_config
+        else None
+    )
     for index, (record, judgment) in enumerate(
         zip(test_taker_output, judgments)
     ):
@@ -1903,6 +2507,23 @@ def test_and_eval(
                 standardized.get("answer_type", "text"),
                 research_config,
             )
+            candidate_truth_check = None
+            if (
+                truth_solver is not None
+                and standardized.get("answer_type") == "ordered_tuple"
+                and "=" in standardized.get("question", "")
+                and standardized.get("test_taker_response")
+            ):
+                candidate_truth_check = truth_solver.validate_candidate(
+                    standardized["question"],
+                    standardized["test_taker_response"],
+                )
+                if candidate_truth_check.get("failure_type") == (
+                    FailureType.PARTIAL_SOLUTION.value
+                ):
+                    standardized["failure_type"] = (
+                        FailureType.PARTIAL_SOLUTION.value
+                    )
             status = parse_result["parse_status"]
             if status != "success":
                 evaluation_status = status
@@ -1953,6 +2574,7 @@ def test_and_eval(
                         equivalence["gold_normalized"]["success"]
                     ),
                     "question_parse_success": True,
+                    "test_taker_truth_validation": candidate_truth_check,
                     **attribution,
                 }
             )
@@ -2432,6 +3054,36 @@ def _run_math_iteration(
         if args.mode == "eval"
         else load_math_inference(paths["inference_file"])
     )
+    # [ADDED] Never reuse a legacy cache whose gold did not originate from
+    # TruthSolver. This prevents pre-migration LLM-authored gold from entering
+    # evaluation, the hard pool, or training exports.
+    untrusted_truth_cache = [
+        record.get("question_id", record.get("id", "unknown"))
+        for record in migrated_records
+        if not record.get("truth_validation_details", {}).get(
+            "source_question_sha256"
+        )
+    ]
+    if untrusted_truth_cache:
+        if research_run:
+            research_run.logger.event(
+                "WARNING",
+                "TruthPipeline",
+                "legacy_gold_cache_invalidated",
+                (
+                    "failure_type=truth_parse_fail "
+                    f"questions={len(untrusted_truth_cache)}"
+                ),
+                cycle=cycle_number,
+                iteration=iter_number,
+                metrics={
+                    "failure_type": (
+                        FailureType.TRUTH_PARSE_FAIL.value
+                    ),
+                    "question_ids": untrusted_truth_cache[:20],
+                },
+            )
+        migrated_records = []
     # [MODIFIED] Never resume an iteration whose cached question text contains
     # non-English or encoding-corrupted symbols. Regeneration is safer than
     # evaluating or exporting an ambiguous mathematical expression.
@@ -2602,6 +3254,39 @@ def _run_math_iteration(
                     if generation_plan
                     else {}
                 )
+                for subcategory_stat in generation_result.get(
+                    "subcategory_statistics",
+                    [],
+                ):
+                    for failure_type, failure_count in (
+                        subcategory_stat.get(
+                            "failure_counts",
+                            {},
+                        ).items()
+                    ):
+                        research_run.logger.event(
+                            "WARNING",
+                            "TruthPipeline",
+                            "sample_generation_failure",
+                            (
+                                f"failure_type={failure_type} "
+                                f"count={failure_count} "
+                                "sub_category="
+                                f"{subcategory_stat.get('sub_category')!r}"
+                            ),
+                            cycle=cycle_number,
+                            iteration=iter_number,
+                            metrics={
+                                "failure_type": failure_type,
+                                "failure_count": failure_count,
+                                "category": subcategory_stat.get(
+                                    "category"
+                                ),
+                                "sub_category": subcategory_stat.get(
+                                    "sub_category"
+                                ),
+                            },
+                        )
                 if generation_result.get("partial_iteration"):
                     research_run.logger.event(
                         "WARNING",
@@ -2626,24 +3311,45 @@ def _run_math_iteration(
                     cycle=cycle_number,
                     iteration=iter_number,
                 )
-        json_dict = test_and_eval(
-            copy.deepcopy(json_category),
-            args.outfile_prefix,
-            test_taker_info,
-            agent_info,
-            evaluator_info,
-            gold_ans_key="answer",
-            iter_number=iter_number,
-            temp_log_dir=paths["temp_log_dir"],
-            research_config=research_config,
-            progress_manager=(
-                research_run.progress if research_run else None
-            ),
-            cycle_number=cycle_number,
-            event_logger=(
-                research_run.logger if research_run else None
-            ),
-        )
+        if json_category:
+            json_dict = test_and_eval(
+                copy.deepcopy(json_category),
+                args.outfile_prefix,
+                test_taker_info,
+                agent_info,
+                evaluator_info,
+                gold_ans_key="answer",
+                iter_number=iter_number,
+                temp_log_dir=paths["temp_log_dir"],
+                research_config=research_config,
+                progress_manager=(
+                    research_run.progress if research_run else None
+                ),
+                cycle_number=cycle_number,
+                event_logger=(
+                    research_run.logger if research_run else None
+                ),
+            )
+        else:
+            # [ADDED] All single-sample failures are isolated. An iteration
+            # with zero surviving truths is recorded, not raised as a Cycle
+            # runtime error.
+            json_dict = []
+            dump_standard_json([], paths["inference_file"])
+            if research_run:
+                research_run.logger.event(
+                    "WARNING",
+                    "Generate",
+                    "no_verified_questions",
+                    "completed=0 action=continue_cycle",
+                    cycle=cycle_number,
+                    iteration=iter_number,
+                    metrics=(
+                        generation_plan.get("generation_result", {})
+                        if generation_plan
+                        else {}
+                    ),
+                )
         compare_summary = _build_compare_summary(
             iter_number,
             json_dict,
@@ -2740,6 +3446,11 @@ def _run_math_iteration(
                 "evaluator_tool_calls": record.get(
                     "evaluator_tool_calls",
                     [],
+                ),
+                "failure_type": record.get("failure_type"),
+                "truth_validation_details": record.get(
+                    "truth_validation_details",
+                    {},
                 ),
             }
             for record in json_dict
@@ -2868,18 +3579,95 @@ def _run_math_iteration(
         flywheel_triggers,
         _lowest_sub_categories(compare_summary),
     )
-    print(
-        get_summary_of_results(
-            json_dict,
-            gold_key="gold_answer",
-            verbose=False,
+    if json_dict:
+        print(
+            get_summary_of_results(
+                json_dict,
+                gold_key="gold_answer",
+                verbose=False,
+            )
         )
-    )
+    else:
+        print("[MathFlywheel] verified_questions=0 action=continue_cycle")
     return {
         "paths": paths,
         "global_iter_number": global_iter_number,
         "global_accuracy": compare_summary["global_accuracy"],
         "hard_pool_total": hard_total,
+        "generation_result": (
+            generation_plan.get("generation_result", {})
+            if generation_plan
+            else {}
+        ),
+    }
+
+
+# [ADDED] Aggregate generator and TruthSolver health at Cycle granularity.
+def _aggregate_cycle_generation_statistics(iteration_results):
+    grouped = {}
+    for result in iteration_results:
+        for item in result.get(
+            "subcategory_statistics",
+            [],
+        ):
+            key = (
+                str(item.get("category", "")),
+                str(item.get("sub_category", "")),
+            )
+            aggregate = grouped.setdefault(
+                key,
+                {
+                    "category": key[0],
+                    "sub_category": key[1],
+                    "generated_total": 0,
+                    "valid_samples": 0,
+                    "failure_counts": {},
+                    "coverage_gap": 0,
+                },
+            )
+            aggregate["generated_total"] += int(
+                item.get("generated_total", 0)
+            )
+            aggregate["valid_samples"] += int(
+                item.get("valid_samples", 0)
+            )
+            aggregate["coverage_gap"] += int(
+                item.get("coverage_gap", 0)
+            )
+            for failure_type, count in item.get(
+                "failure_counts",
+                {},
+            ).items():
+                aggregate["failure_counts"][failure_type] = (
+                    aggregate["failure_counts"].get(failure_type, 0)
+                    + int(count)
+                )
+    categories = sorted(
+        grouped.values(),
+        key=lambda item: (
+            item["category"],
+            item["sub_category"],
+        ),
+    )
+    total_generated = sum(
+        item["generated_total"] for item in categories
+    )
+    total_valid = sum(item["valid_samples"] for item in categories)
+    total_failures = defaultdict(int)
+    for item in categories:
+        for failure_type, count in item["failure_counts"].items():
+            total_failures[failure_type] += count
+    return {
+        "generated_total": total_generated,
+        "valid_samples": total_valid,
+        "valid_rate": (
+            total_valid / total_generated if total_generated else 0.0
+        ),
+        "failure_counts": dict(sorted(total_failures.items())),
+        "coverage_gap": sum(
+            item["coverage_gap"] for item in categories
+        ),
+        "subcategory_statistics": categories,
     }
 
 
@@ -2977,6 +3765,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
             history_dict = run_history
             stage = "evaluation"
             last_iteration = None
+            cycle_generation_results = []
             for iter_number in range(1, args.num_iters + 1):
                 try:
                     last_iteration = _run_math_iteration(
@@ -3001,8 +3790,26 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 cycle_entry["last_global_accuracy"] = last_iteration[
                     "global_accuracy"
                 ]
+                cycle_generation_results.append(
+                    last_iteration.get("generation_result", {})
+                )
                 _save_cycle_record(cycle_record_path, cycle_record)
 
+            cycle_generation_statistics = (
+                _aggregate_cycle_generation_statistics(
+                    cycle_generation_results
+                )
+            )
+            cycle_entry["generation_statistics"] = (
+                cycle_generation_statistics
+            )
+            if getattr(args, "research_run", None):
+                args.research_run.save_cycle_artifact(
+                    cycle_number,
+                    "metrics",
+                    "generation_statistics",
+                    cycle_generation_statistics,
+                )
             if args.mode == "eval":
                 cycle_entry["status"] = "completed"
                 cycle_entry["finetune_status"] = "disabled"

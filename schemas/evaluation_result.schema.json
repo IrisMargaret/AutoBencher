@@ -33,6 +33,15 @@
     },
     "evaluator_tool_calls": {
       "type": "array"
+    },
+    "failure_type": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "truth_validation_details": {
+      "type": "object"
     }
   },
   "additionalProperties": true

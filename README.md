@@ -60,11 +60,14 @@ Core capabilities include:
 ```text
 YAML configuration + explicit CLI overrides
   -> taxonomy quota and adaptive-priority scheduler
-  -> quality-constrained question generation
+  -> question-only LLM generator (temperature=0.0, top_p=0.1)
+  -> expression preprocessing and syntax normalization
+  -> TruthSolver route (equation/system/integral/limit/expression)
+  -> canonical gold plus deterministic truth substitution
+  -> failed-truth discard, failure accounting, and subcategory cooldown
   -> no-tool test-taker structured inference
   -> JSON parsing and controlled format repair
-  -> answer normalization and deterministic equivalence
-  -> privileged evaluator verification and tool audit
+  -> canonical-gold answer normalization and deterministic equivalence
   -> hierarchical error attribution
   -> hard-pool update and coverage state
   -> mixed dataset construction and deduplication
@@ -91,7 +94,8 @@ AutoBencher/
 │   ├── coverage.py
 │   ├── dataset.py
 │   ├── experiment.py
-│   └── structured.py
+│   ├── structured.py
+│   └── truth_solver.py
 ├── configs/
 │   ├── environments/
 │   │   ├── local.yaml
@@ -725,13 +729,20 @@ posterior. Boundary proximity, coverage deficit, uncertainty, persistent error,
 and retention are combined into an auditable priority. Difficulty changes only
 after the minimum observation count.
 
-## Generated gold-answer verification
+## Authoritative truth generation
 
-Question generation and gold-answer verification are separate evaluator calls.
-After the evaluator proposes a question and `canonical_answer`, the system sends
-the complete question back to the privileged evaluator with an explicit
-instruction to solve it independently and substitute the proposed answer into
-all applicable equations, domains, units, and constraints.
+The LLM generator returns only objects shaped as `{"question": "..."}`. Answer,
+solution, answer-type, and metadata keys are forbidden. AutoBencher then strips
+natural-language wrappers, normalizes syntax such as `x^2` to `x**2`, and sends
+the extracted expression to `TruthSolver`. Only `TruthSolver` may populate
+`canonical_answer`, `gold_answer`, `display_answer`, and `answer_type`.
+
+`TruthSolver` routes single equations, linear systems, polynomial systems,
+integrals, limits, and direct expressions to separate SymPy branches. A truth
+is admitted only after deterministic verification against the original
+question. Parse errors, absent closed forms, infinite solutions, and timeouts
+are discarded before test-taker inference and receive structured failure
+labels.
 
 A question enters test-taker inference only when all of the following hold:
 
@@ -740,8 +751,8 @@ A question enters test-taker inference only when all of the following hold:
 - the recomputed answer is deterministically equivalent to the proposed gold;
 - the validator answer type matches the generated-question answer type.
 
-For `ordered_tuple` systems of equations, evaluator self-reported validation
-flags are never trusted. SymPy parses the exact original `question` string,
+For `ordered_tuple` systems of equations, no evaluator-reported answer exists
+or is trusted. SymPy parses the exact original `question` string,
 solves the system independently, and then substitutes the proposed tuple into
 every parsed equality. The audit records the original equation, substituted
 left value, substituted right value, difference, and pass/fail result for each
@@ -749,19 +760,45 @@ equation. Source hashes prove that independent solving and substitution used
 the same original question. Parse failures, timeouts, no-solution systems,
 non-unique systems, and underdetermined systems fail closed.
 
-Rejected questions are removed before inference and the existing quota-repair
-loop generates replacements. Every accepted or rejected check is recorded in
-`*.subcat<N>.gold_answer_validation.json`; accepted question records also carry
-the `gold_answer_validation` object. This behavior is controlled by
-`generation.require_gold_answer_validation` and the related validation retry,
-temperature, and token settings in YAML.
+Truth failures are discarded and are never sent back to the LLM for blind
+repair. Generator-format failures alone may be repaired, and every retry
+includes the previous structured failure summary. A leaked candidate that
+satisfies only some system equations is labeled `partial_solution`; feedback
+includes the passed/total equation count. Accepted records preserve
+`truth_validation_details`, `canonical_answer`, and `failure_type`.
 
-If one subcategory still has no verified replacement after
-`generation.max_quota_repair_rounds`, AutoBencher records the shortfall and
-continues with the verified questions from that iteration. Coverage remains a
-cumulative multi-iteration target. A partial iteration fails only when fewer
-than `generation.minimum_verified_questions` survive, or when
-`generation.allow_partial_question_budget` is disabled.
+If one subcategory still has no valid sample after configured retries,
+AutoBencher records the shortfall and continues the Cycle, including when an
+iteration has zero survivors. Coverage remains a cumulative multi-iteration
+target. Repeated zero-valid batches trigger a temporary subcategory cooldown.
+Cycle-level `generation_statistics.json` reports generated totals, valid
+samples, failure counts, and coverage gaps by category and subcategory.
+
+Stable truth-pipeline failure labels are:
+
+```text
+truth_parse_fail
+no_closed_solution
+infinite_solutions
+solve_timeout
+partial_solution
+repair_exhausted
+generator_format_error
+```
+
+Generation behavior is centralized under `generation` in YAML:
+
+```yaml
+generation:
+  temperature: 0.0
+  top_p: 0.1
+  generator_max_retry: 3
+  max_quota_repair_rounds: 3
+  truth_solver_timeout_seconds: 10
+  truth_solver_max_retry: 1
+  subcategory_failure_cooldown_threshold: 3
+  subcategory_cooldown_iterations: 2
+```
 
 ## Test-taker isolation and evaluation
 

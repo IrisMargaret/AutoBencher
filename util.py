@@ -110,6 +110,7 @@ def query_ollama(
     num_completions,
     verbose,
     stop_sequences=None,
+    top_p=1.0,
 ):
     # Existing callers only consume the first completion. Preserve that
     # behavior while using Ollama's native endpoint.
@@ -143,6 +144,7 @@ def query_ollama(
                 "keep_alive": service.keep_alive,
                 "options": {
                     "temperature": temperature,
+                    "top_p": top_p,
                     "num_predict": max_tokens,
                     "stop": list(stop_sequences or []),
                 },
@@ -287,6 +289,7 @@ def gen_from_prompt(
     prompt,
     echo_prompt=False,
     temperature=0.0,
+    top_p=1.0,
     max_tokens=20,
     num_completions=1,
     output_scores=False,
@@ -341,6 +344,7 @@ def gen_from_prompt(
         }
         if temperature > 0:
             generation_kwargs["temperature"] = temperature
+            generation_kwargs["top_p"] = top_p
         encoded_stops = []
         for stop_sequence in stop_sequences or []:
             stop_ids = tokenizer(
@@ -405,6 +409,7 @@ def gen_from_prompt(
             model=model,
             prompt_lst=prompt,
             temperature=temperature,
+            top_p=top_p,
             max_tokens=max_tokens,
             num_completions=num_completions,
             verbose=verbose,
@@ -418,6 +423,7 @@ def gen_from_prompt(
             model=model,
             prompt_lst=prompt,
             temperature=temperature,
+            top_p=top_p,
             max_tokens=max_tokens,
             num_completions=num_completions,
             verbose=verbose,
@@ -433,6 +439,7 @@ def gen_from_prompt(
             model=model,
             prompt_lst=prompt,
             temperature=temperature,
+            top_p=top_p,
             max_tokens=max_tokens,
             num_completions=num_completions,
             verbose=verbose,
@@ -475,6 +482,7 @@ def query_claude(
     verbose,
     stop_sequences=None,
     max_num_retries=5,
+    top_p=1.0,
 ):
     results = []
     for prompt in prompt_lst:
@@ -484,6 +492,7 @@ def query_claude(
                 request_kwargs = {
                     "max_tokens": max_tokens,
                     "temperature": temperature,
+                    "top_p": top_p,
                     "messages": [{"role": "user", "content": prompt}],
                     "model": model,
                 }
@@ -514,6 +523,7 @@ def query_openai_compatible(
     verbose,
     stop_sequences=None,
     max_num_retries=5,
+    top_p=1.0,
 ):
     results = []
     for prompt in prompt_lst:
@@ -527,6 +537,7 @@ def query_openai_compatible(
                         {"role": "user", "content": prompt},
                     ],
                     temperature=temperature,
+                    top_p=top_p,
                     max_tokens=max_tokens,
                     n=num_completions,
                 )

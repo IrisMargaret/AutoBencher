@@ -148,3 +148,46 @@ def test_adaptive_sampler_increases_easy_bucket_difficulty(config):
     )
     assert priority["selected_difficulty"] == 6
     assert "above_target_accuracy_increase_difficulty" in priority["sampling_reason"]
+
+
+def test_lower_accuracy_subcategory_receives_higher_dynamic_priority(config):
+    state = {
+        ("Linear Equations", 5): {
+            "correct_count": 1,
+            "incorrect_count": 9,
+            "alpha": 2.0,
+            "beta": 10.0,
+            "posterior_mean": 1 / 6,
+            "posterior_variance": 0.01,
+            "observation_count": 10,
+        },
+        ("Matrix Operations", 5): {
+            "correct_count": 9,
+            "incorrect_count": 1,
+            "alpha": 10.0,
+            "beta": 2.0,
+            "posterior_mean": 5 / 6,
+            "posterior_variance": 0.01,
+            "observation_count": 10,
+        },
+    }
+    low_accuracy = adaptive_priority(
+        "Linear Equations",
+        5,
+        1,
+        1,
+        state,
+        config,
+    )
+    high_accuracy = adaptive_priority(
+        "Matrix Operations",
+        5,
+        1,
+        1,
+        state,
+        config,
+    )
+    assert (
+        low_accuracy["priority_score"]
+        > high_accuracy["priority_score"]
+    )

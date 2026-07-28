@@ -175,9 +175,16 @@ generation_mix:
 
 generation:
   max_questions_per_prompt: 50
+  temperature: 0.0
+  top_p: 0.1
+  generator_max_retry: 3
   max_quota_repair_rounds: 3
   allow_partial_question_budget: true
   minimum_verified_questions: 1
+  truth_solver_timeout_seconds: 10
+  truth_solver_max_retry: 1
+  subcategory_failure_cooldown_threshold: 3
+  subcategory_cooldown_iterations: 2
   require_gold_answer_validation: true
   gold_validation_attempts: 2
   gold_validation_temperature: 0.0

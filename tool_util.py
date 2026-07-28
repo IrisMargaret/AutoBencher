@@ -396,6 +396,9 @@ def canonicalize_math_record(record, index=0):
         # [ADDED] Preserve the evaluator's independent gold-answer audit
         # through inference, evaluation, hard-pool, and research exports.
         "gold_answer_validation",
+        "truth_validation_details",
+        "test_taker_truth_validation",
+        "failure_type",
         "raw_response",
         "parsed_response",
         "parse_status",

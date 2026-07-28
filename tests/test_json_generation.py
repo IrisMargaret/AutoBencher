@@ -7,6 +7,7 @@ from unittest.mock import patch
 import math_autobencher
 import tool_util
 from autobencher.config import load_project_config
+from autobencher.truth_solver import FailureType
 from tool_util import (
     ERROR_TAGS,
     clean_redundant_files,
@@ -411,7 +412,7 @@ class GenerationQuotaRepairTests(unittest.TestCase):
             prefix = str(Path(temp_dir, "iteration"))
             with patch.object(
                 math_autobencher,
-                "_generate_question_from_description",
+                "_generate_question_text_with_truth",
                 side_effect=generate,
             ) as generator:
                 questions, _ = math_autobencher._ask_question_v3(
@@ -429,6 +430,290 @@ class GenerationQuotaRepairTests(unittest.TestCase):
             )
             self.assertEqual(
                 plan["generation_result"]["question_shortfall"],
+                1,
+            )
+
+    def test_all_single_sample_repairs_exhaust_without_runtime_error(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        plan = {
+            "question_budget": 1,
+            "cycle": 1,
+            "global_iteration": 1,
+            "allocations": [
+                {
+                    "category": "Algebra",
+                    "sub_category": "Polynomials and Inequalities",
+                    "question_count": 1,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 4,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration"))
+            with patch.object(
+                math_autobencher,
+                "_generate_question_text_with_truth",
+                return_value=[[]],
+            ):
+                questions, _ = math_autobencher._ask_question_v3(
+                    ("model", None, object()),
+                    [],
+                    1,
+                    prefix,
+                    generation_plan=plan,
+                    research_config=config,
+                )
+        self.assertEqual(questions, [])
+        self.assertTrue(plan["generation_result"]["below_minimum_verified"])
+        self.assertEqual(
+            plan["generation_result"]["question_shortfall"],
+            1,
+        )
+
+    def test_repeated_subcategory_failure_triggers_temporary_cooldown(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+
+        def plan(iteration):
+            return {
+                "question_budget": 1,
+                "cycle": 1,
+                "global_iteration": iteration,
+                "allocations": [
+                    {
+                        "category": "Algebra",
+                        "sub_category": "Polynomials and Inequalities",
+                        "question_count": 1,
+                        "generation_source": "coverage_deficit",
+                        "generation_strategy": "quota_repair",
+                        "difficulty": 4,
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            hard_pool = str(Path(temp_dir, "hard_pool.json"))
+            with patch.object(
+                math_autobencher,
+                "_generate_question_text_with_truth",
+                return_value=[[]],
+            ) as generate:
+                for iteration in range(1, 4):
+                    math_autobencher._ask_question_v3(
+                        ("model", None, object()),
+                        [],
+                        iteration,
+                        str(Path(temp_dir, f"iter_{iteration}")),
+                        hard_pool_file=hard_pool,
+                        generation_plan=plan(iteration),
+                        research_config=config,
+                    )
+                before_cooldown_calls = generate.call_count
+                fourth_plan = plan(4)
+                questions, _ = math_autobencher._ask_question_v3(
+                    ("model", None, object()),
+                    [],
+                    4,
+                    str(Path(temp_dir, "iter_4")),
+                    hard_pool_file=hard_pool,
+                    generation_plan=fourth_plan,
+                    research_config=config,
+                )
+            self.assertEqual(questions, [])
+            self.assertEqual(generate.call_count, before_cooldown_calls)
+            self.assertEqual(
+                fourth_plan["generation_result"][
+                    "subcategory_shortfalls"
+                ][0]["reason"],
+                "subcategory_cooldown",
+            )
+
+    def test_cycle_generation_statistics_are_grouped_by_subcategory(self):
+        summary = math_autobencher._aggregate_cycle_generation_statistics(
+            [
+                {
+                    "subcategory_statistics": [
+                        {
+                            "category": "Algebra",
+                            "sub_category": "Linear Equations",
+                            "generated_total": 3,
+                            "valid_samples": 2,
+                            "failure_counts": {"truth_parse_fail": 1},
+                            "coverage_gap": 1,
+                        }
+                    ]
+                },
+                {
+                    "subcategory_statistics": [
+                        {
+                            "category": "Algebra",
+                            "sub_category": "Linear Equations",
+                            "generated_total": 2,
+                            "valid_samples": 1,
+                            "failure_counts": {"repair_exhausted": 1},
+                            "coverage_gap": 1,
+                        }
+                    ]
+                },
+            ]
+        )
+        self.assertEqual(summary["generated_total"], 5)
+        self.assertEqual(summary["valid_samples"], 3)
+        self.assertEqual(summary["coverage_gap"], 2)
+        self.assertEqual(
+            summary["failure_counts"],
+            {"repair_exhausted": 1, "truth_parse_fail": 1},
+        )
+
+
+class QuestionOnlyTruthPipelineTests(unittest.TestCase):
+    @staticmethod
+    def _result(payload):
+        completion = type("Completion", (), {})()
+        completion.text = json.dumps(payload)
+        result = type("RequestResult", (), {})()
+        result.completions = [completion]
+        return result
+
+    @staticmethod
+    def _description(sub_category="Linear Equations"):
+        return {
+            "category": "Algebra",
+            "sub_category": sub_category,
+            "difficulty": 4,
+            "generation_source": "coverage_deficit",
+            "generation_strategy": "quota_repair",
+        }
+
+    def test_llm_question_only_output_receives_truth_solver_gold(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                return_value=self._result(
+                    [{"question": "Solve for x: 3x + 2 = 11."}]
+                ),
+            ) as generate:
+                result = (
+                    math_autobencher._generate_question_text_with_truth(
+                        self._description(),
+                        "model",
+                        None,
+                        object(),
+                        prefix,
+                        question_count=1,
+                        research_config=config,
+                    )
+                )
+            question = result[0][0]
+            self.assertEqual(question["canonical_answer"], "3")
+            self.assertEqual(question["gold_answer"], "3")
+            self.assertIsNone(question["failure_type"])
+            self.assertEqual(
+                question["truth_validation_details"]["solver_branch"],
+                "single_equation",
+            )
+            self.assertEqual(
+                generate.call_args.kwargs["temperature"],
+                0.0,
+            )
+            self.assertEqual(generate.call_args.kwargs["top_p"], 0.1)
+
+    def test_leaked_partial_gold_adds_feedback_before_retry(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        faulty_question = (
+            "Solve the system for (x, y, z): "
+            "x + 2y - z = 5, 2x - y + 3z = 4, "
+            "-x + 3y + 2z = 7."
+        )
+        invalid = [
+            {
+                "question": faulty_question,
+                "candidate_gold_answer": "(2, 1, -1)",
+            }
+        ]
+        valid = [{"question": "Solve for x: x + 4 = 9."}]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                side_effect=[
+                    self._result(invalid),
+                    self._result(valid),
+                ],
+            ) as generate:
+                result = (
+                    math_autobencher._generate_question_text_with_truth(
+                        self._description("Systems of Equations"),
+                        "model",
+                        None,
+                        object(),
+                        prefix,
+                        question_count=1,
+                        research_config=config,
+                    )
+                )
+            self.assertEqual(result[0][0]["canonical_answer"], "5")
+            second_prompt = generate.call_args_list[1].kwargs["prompt"][0]
+            self.assertIn("passed 1/3 equations", second_prompt)
+            failures = json.loads(
+                Path(
+                    f"{prefix}.generation_failures.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                any(
+                    item.get("failure_type")
+                    == FailureType.PARTIAL_SOLUTION.value
+                    for item in failures
+                )
+            )
+
+    def test_truth_solver_failure_is_discarded_without_llm_repair(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                return_value=self._result(
+                    [{"question": "Describe a beautiful number."}]
+                ),
+            ) as generate:
+                result = (
+                    math_autobencher._generate_question_text_with_truth(
+                        self._description(),
+                        "model",
+                        None,
+                        object(),
+                        prefix,
+                        question_count=1,
+                        research_config=config,
+                    )
+                )
+            self.assertEqual(result, [[]])
+            self.assertEqual(generate.call_count, 1)
+            summary = json.loads(
+                Path(
+                    f"{prefix}.generation_batch_summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                summary["failure_counts"]["truth_parse_fail"],
                 1,
             )
 

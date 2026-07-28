@@ -263,9 +263,16 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "generation": {
         "max_questions_per_prompt": 50,
+        "temperature": 0.0,
+        "top_p": 0.1,
+        "generator_max_retry": 3,
         "max_quota_repair_rounds": 3,
         "allow_partial_question_budget": True,
         "minimum_verified_questions": 1,
+        "truth_solver_timeout_seconds": 10,
+        "truth_solver_max_retry": 1,
+        "subcategory_failure_cooldown_threshold": 3,
+        "subcategory_cooldown_iterations": 2,
         "require_gold_answer_validation": True,
         "gold_validation_attempts": 2,
         "gold_validation_temperature": 0.0,
@@ -766,8 +773,12 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             prompt_batch,
         )
     for path in (
+        "generation.generator_max_retry",
         "generation.max_quota_repair_rounds",
         "generation.minimum_verified_questions",
+        "generation.truth_solver_max_retry",
+        "generation.subcategory_failure_cooldown_threshold",
+        "generation.subcategory_cooldown_iterations",
         "generation.gold_validation_attempts",
         "generation.gold_validation_max_tokens",
     ):
@@ -776,7 +787,7 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             raise ConfigurationError(path, "must be a positive integer", value)
     validation_timeout = _get(
         config,
-        "generation.gold_validation_timeout_seconds",
+        "generation.truth_solver_timeout_seconds",
     )
     if (
         not isinstance(validation_timeout, (int, float))
@@ -784,9 +795,33 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         or validation_timeout <= 0
     ):
         raise ConfigurationError(
-            "generation.gold_validation_timeout_seconds",
+            "generation.truth_solver_timeout_seconds",
             "must be a positive number",
             validation_timeout,
+        )
+    generation_temperature = _get(config, "generation.temperature")
+    generation_top_p = _get(config, "generation.top_p")
+    for path, value in (
+        ("generation.temperature", generation_temperature),
+        ("generation.top_p", generation_top_p),
+    ):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ConfigurationError(
+                path,
+                "must be a numeric sampling value",
+                value,
+            )
+    if float(generation_temperature) != 0.0:
+        raise ConfigurationError(
+            "generation.temperature",
+            "math generation temperature must be 0.0",
+            generation_temperature,
+        )
+    if float(generation_top_p) != 0.1:
+        raise ConfigurationError(
+            "generation.top_p",
+            "math generation top_p must be 0.1",
+            generation_top_p,
         )
     for path in (
         "generation.allow_partial_question_budget",

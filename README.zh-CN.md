@@ -23,6 +23,20 @@ Wiki 与 Multilingual 入口继续保持兼容。
 - 统一配置加载、配置来源追踪、配置哈希和原子化输出。
 - 每个阶段只显示一个动态进度条。
 
+## 新生成与真值架构
+
+```text
+动态 Quota 调度
+→ question-only LLM Generator（temperature=0.0, top_p=0.1）
+→ 自然语言剥离与表达式标准化
+→ TruthSolver 分支求解
+→ canonical gold 回代验证
+→ Truth 失败样本丢弃、失败计数与子类目冷却
+→ 无工具 test-taker 作答
+→ 与 canonical gold 确定性比较
+→ hard pool、训练集与下一 Cycle
+```
+
 ## 环境要求
 
 - Python 3.10 或更高版本。
@@ -312,12 +326,16 @@ python run_scripts.py math \
 test_<N>/cycle/cycle_<N>/failure/failure_summary.json
 ```
 
-## Gold answer 独立验证
+## TruthSolver 权威真值
 
-出题与答案验证是两次独立的 evaluator 调用。evaluator 首次生成题目和
-`canonical_answer` 后，系统立即把完整题目带回 privileged evaluator，要求它不信任
-候选答案，重新独立求解，并将候选答案回代到所有适用的方程、定义域、符号、单位和
-题目约束中。
+LLM Generator 只能返回 `{"question": "..."}`。答案、候选答案、答案类型、解题过程
+和元数据字段全部禁止输出。系统先剥离自然语言包装并将 `x^2` 等语法标准化为
+`x**2`，再交给独立的 `TruthSolver`。只有 `TruthSolver` 可以写入
+`canonical_answer`、`gold_answer`、`display_answer` 和 `answer_type`。
+
+`TruthSolver` 分别路由一元方程、线性方程组、多项式系统、积分、极限和直接表达式。
+解析失败、无闭式解、无穷多解和求解超时的样本会在 test-taker 推理前直接丢弃并记录
+结构化 `failure_type`，不会把失败真值送回 LLM 盲目修复。
 
 题目只有同时满足以下条件才会进入 test-taker 推理：
 
@@ -326,22 +344,34 @@ test_<N>/cycle/cycle_<N>/failure/failure_summary.json
 - 重算答案与候选 gold answer 通过确定性等价比较；
 - validator 返回的答案类型与题目答案类型一致。
 
-对于 `ordered_tuple` 方程组，系统不再信任 evaluator 自报的布尔值。SymPy 会直接从
+对于 `ordered_tuple` 方程组，系统不存在也不信任 evaluator 自报答案。SymPy 会从
 完全一致的原始 `question` 字符串解析方程并独立求解，然后把候选元组逐条代入每一个
 原始等式。审计记录每条原始方程、代入后的左值、右值、差值和通过状态；题干哈希用于
 证明独立求解与回代使用的是同一份原始题干。解析异常、超时、无解、多解和无穷多解均
 按验证失败处理。
 
-失败题目会在推理前被剔除，并由现有 quota repair 循环自动补题。每个通过或失败的
-结果都会写入 `*.subcat<N>.gold_answer_validation.json`；通过题目的正式记录还包含
-`gold_answer_validation` 审计对象。开关和重试参数统一由 YAML 中的
-`generation.require_gold_answer_validation`、`gold_validation_attempts`、
-`gold_validation_temperature` 和 `gold_validation_max_tokens` 管理。
+只有 Generator 输出格式错误时才允许修复，下一次 Prompt 必须携带上一轮失败摘要。
+如果 Generator 违规泄漏候选答案，且该答案只满足部分方程，则记录
+`partial_solution` 和“通过方程数/总方程数”，并把它作为负面反馈。TruthSolver 失败
+不 repair，直接丢弃。
 
-单个细分题型达到 `generation.max_quota_repair_rounds` 后仍没有合格补题时，不再终止
-整个 Cycle。系统记录该细分题型缺口并使用本轮其余已验证题目继续评测，覆盖率仍按多轮
-累计计算。只有合格题目少于 `generation.minimum_verified_questions`，或显式关闭
-`generation.allow_partial_question_budget` 时，部分迭代才会失败。
+单条样本或单个细分题型修复耗尽时不再抛出 runtime error。系统记录覆盖率缺口后继续
+当前 Cycle；即使本轮没有任何合格题目也会输出空迭代统计。连续失败达到配置阈值后，
+对应子类目进入临时冷却。Cycle 结束时
+`cycle_<N>/metrics/generation_statistics.json` 输出生成总数、有效样本数、各失败计数和
+category/subcategory 覆盖率缺口。
+
+固定失败标签：
+
+```text
+truth_parse_fail
+no_closed_solution
+infinite_solutions
+solve_timeout
+partial_solution
+repair_exhausted
+generator_format_error
+```
 
 ## JSON 与答案规范
 

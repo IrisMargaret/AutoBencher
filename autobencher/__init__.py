@@ -10,6 +10,12 @@ from .config import (
     str2bool,
     thaw_config,
 )
+from .truth_solver import (
+    FailureType,
+    MathExpressionPreprocessor,
+    TruthSolveResult,
+    TruthSolver,
+)
 
 __all__ = [
     "ConfigurationError",
@@ -20,4 +26,8 @@ __all__ = [
     "resolve_sensitive_environment",
     "str2bool",
     "thaw_config",
+    "FailureType",
+    "MathExpressionPreprocessor",
+    "TruthSolveResult",
+    "TruthSolver",
 ]

@@ -95,6 +95,22 @@ def test_invalid_generation_ratio_fails_fast():
         )
 
 
+def test_math_generator_sampling_contract_is_fixed():
+    with pytest.raises(
+        ConfigurationError,
+        match="generation.temperature",
+    ):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=["generation.temperature=0.2"],
+        )
+    with pytest.raises(ConfigurationError, match="generation.top_p"):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=["generation.top_p=0.9"],
+        )
+
+
 def test_test_taker_tools_cannot_be_enabled():
     with pytest.raises(ConfigurationError, match="use_external_tools"):
         load_resolved_config(
