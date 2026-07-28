@@ -11,6 +11,13 @@ experiment:
   export_interval: 1
   clean_cycle_cache: false
   resume: true
+  disk_warning_threshold_gb: 10
+
+compatibility:
+  use_helm: false
+  preserve_existing_cli: true
+  preserve_existing_cache: true
+  preserve_existing_output_fields: true
 
 models:
   evaluator:
@@ -18,11 +25,21 @@ models:
     use_privileged_tools: true
     temperature: 0.2
     max_tokens: 4096
+    top_p: 0.9
+    request_timeout_seconds: 120
+    max_retries: 3
+    retry_delay_seconds: 5
   test_taker:
     model_path: qwen2.5:7b-instruct
     use_external_tools: false
     temperature: 0.0
     max_new_tokens: 1024
+    top_p: 1.0
+    do_sample: false
+    request_timeout_seconds: 300
+    max_retries: 3
+  judge:
+    model_name: null
 
 paths:
   output_root: math_flywheel
@@ -30,6 +47,21 @@ paths:
   cache_dir: null
   model_output_dir: null
   log_dir: null
+  temp_dir: null
+  dataset_dir: null
+  checkpoint_dir: null
+  review_dir: null
+
+sensitive_environment:
+  deepseek_api_key: DEEPSEEK_API_KEY
+  deepseek_base_url: DEEPSEEK_BASE_URL
+  openai_api_key: OPENAI_API_KEY
+  openai_organization: OPENAI_ORG_ID
+  anthropic_api_key: ANTHROPIC_API_KEY
+  vllm_api_key: VLLM_API_KEY
+  vllm_base_url: VLLM_BASE_URL
+  ollama_api_key: OLLAMA_API_KEY
+  ollama_base_url: OLLAMA_BASE_URL
 
 coverage:
   default_min_quota: 20
@@ -143,6 +175,10 @@ generation_mix:
 
 generation:
   max_questions_per_prompt: 50
+  require_gold_answer_validation: true
+  gold_validation_attempts: 2
+  gold_validation_temperature: 0.0
+  gold_validation_max_tokens: 4096
 
 hard_pool:
   enabled: true

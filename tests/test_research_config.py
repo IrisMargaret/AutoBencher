@@ -5,6 +5,7 @@ import pytest
 from autobencher.config import (
     ConfigurationError,
     config_hash,
+    load_project_config,
     load_resolved_config,
     str2bool,
 )
@@ -14,6 +15,8 @@ from run_scripts import _strip_implicit_config_options, build_command
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "configs" / "math_flywheel.yaml"
 SMOKE_CONFIG = ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+EXPERIMENT_CONFIG = ROOT / "configs" / "experiments" / "math_flywheel.yaml"
+VOLCENGINE_CONFIG = ROOT / "configs" / "environments" / "volcengine.yaml"
 
 
 def test_default_config_loads_and_contains_nine_categories():
@@ -36,6 +39,32 @@ def test_precedence_is_defaults_then_yaml_then_cli_then_temporary():
         temporary_overrides=["experiment.num_iterations=4"],
     )
     assert config["experiment"]["num_iterations"] == 4
+
+
+def test_environment_is_between_base_and_experiment_layers():
+    config, provenance = load_resolved_config(
+        EXPERIMENT_CONFIG,
+        environment_path=VOLCENGINE_CONFIG,
+    )
+    expected = "/vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct"
+    assert config["models"]["test_taker"]["model_path"] == expected
+    source = provenance["field_sources"]["models.test_taker.model_path"]
+    assert source["source"].endswith("volcengine.yaml")
+
+
+def test_unknown_override_field_fails_fast():
+    with pytest.raises(ConfigurationError, match="unknown field"):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=["experiment.unknown_switch=true"],
+        )
+
+
+def test_runtime_project_config_is_recursively_immutable():
+    config, _ = load_project_config(SMOKE_CONFIG)
+    with pytest.raises(TypeError, match="immutable"):
+        config["experiment"]["num_iterations"] = 99
+    assert config.experiment.num_iterations == 1
 
 
 @pytest.mark.parametrize(

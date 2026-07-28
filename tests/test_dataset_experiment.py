@@ -14,7 +14,12 @@ from autobencher.dataset import (
     token_jaccard,
     write_alpaca_jsonl,
 )
-from autobencher.experiment import ProgressManager, ResearchRun, atomic_json
+from autobencher.experiment import (
+    ProgressManager,
+    ResearchRun,
+    allocate_test_run_dir,
+    atomic_json,
+)
 from tool_util import (
     canonicalize_math_record,
     dump_standard_json,
@@ -30,6 +35,14 @@ CONFIG_PATH = ROOT / "configs" / "math_flywheel_smoke_test.yaml"
 @pytest.fixture
 def config():
     return load_resolved_config(CONFIG_PATH)[0]
+
+
+def test_test_directory_allocator_uses_maximum_existing_number(tmp_path):
+    (tmp_path / "test_2").mkdir()
+    (tmp_path / "test_9").mkdir()
+    (tmp_path / "unrelated").mkdir()
+    allocated = allocate_test_run_dir(tmp_path)
+    assert allocated.name == "test_10"
 
 
 def record(question, answer, *, correct=False, accuracy=0.2, **extra):
@@ -263,6 +276,12 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
     run = ResearchRun(config, provenance, "mock-run", ROOT)
     run.initialize({"config": str(CONFIG_PATH)})
     assert (run.run_dir / "resolved_config.json").is_file()
+    assert (run.run_dir / "resolved_config.yaml").is_file()
+    assert (run.run_dir / "config_sources.json").is_file()
+    assert (run.run_dir / "config_validation.json").is_file()
+    assert (run.run_dir / "config_hash.txt").is_file()
+    assert run.run_dir.name == "test_1"
+    assert (run.run_dir / "cycle").is_dir()
     assert (run.run_dir / "environment.json").is_file()
     assert (run.run_dir / "run_manifest.json").is_file()
 

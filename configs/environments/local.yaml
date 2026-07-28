@@ -1,0 +1,20 @@
+schema_version: "1.0"
+
+models:
+  test_taker:
+    model_path: qwen2.5:7b-instruct
+
+paths:
+  output_root: math_flywheel
+  cache_dir: null
+  model_output_dir: null
+  log_dir: null
+  temp_dir: null
+  dataset_dir: null
+  checkpoint_dir: null
+  review_dir: null
+
+logging:
+  progress_enabled: true
+  progress_leave: false
+  progress_dynamic_ncols: true

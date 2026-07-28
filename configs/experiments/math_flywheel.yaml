@@ -1,0 +1,7 @@
+extends: ../math_flywheel.yaml
+
+schema_version: "1.0"
+
+experiment:
+  name: qwen7b_deepseek_math_flywheel
+  mode: data_flywheel

@@ -1,0 +1,20 @@
+schema_version: "1.0"
+
+models:
+  test_taker:
+    model_path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+
+paths:
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  cache_dir: /vepfs-mlp2/queue010/20262202597/.cache
+  model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
+  log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
+  temp_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/temp
+  dataset_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/datasets
+  checkpoint_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/checkpoints
+  review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
+
+logging:
+  progress_enabled: true
+  progress_leave: false
+  progress_dynamic_ncols: true

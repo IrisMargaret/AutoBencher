@@ -3,6 +3,7 @@ import gc
 import random
 import sys
 import contextlib
+import traceback
 from pathlib import Path
 
 import requests
@@ -17,7 +18,8 @@ import numpy as np
 
 from autobencher.config import (
     ConfigurationError,
-    load_resolved_config,
+    cli_config_overrides,
+    load_project_config,
     str2bool,
 )
 from autobencher.coverage import coverage_metrics, generation_schedule
@@ -493,7 +495,192 @@ Train-eligible historical hard-sample context:
                 outfile_prefix, "question_plan_with_aim", attempt, response
             )
     raise RuntimeError("Failed to generate a valid math plan after 3 attempts") from last_error
+# [ADDED] A separate evaluator pass must verify every proposed gold answer
+# before the question can enter test-taker inference.
+def _validate_generated_gold_answers(
+    questions,
+    agent_lm,
+    agent_tokenizer,
+    agent_client,
+    research_config,
+    outfile_prefix,
+):
+    """Independently recompute and substitute proposed gold answers."""
+    if not research_config or not research_config["generation"][
+        "require_gold_answer_validation"
+    ]:
+        return list(questions)
+    validation_input = [
+        {
+            "validation_id": index,
+            "question": question["question"],
+            "answer_type": question["answer_type"],
+            "proposed_gold_answer": question["canonical_answer"],
+            "unit": question.get("unit"),
+            "tolerance": question.get("tolerance"),
+        }
+        for index, question in enumerate(questions)
+    ]
+    prompt = f"""You are the privileged math gold-answer validator.
+Independently solve every problem below. Do not trust the proposed answer.
+For equations, inequalities, constraints, geometry, and word problems,
+substitute the proposed answer back into every original condition. For direct
+calculations, recompute the result using an independent derivation.
 
+Return only one JSON array with exactly one object per validation_id:
+[
+  {{
+    "validation_id": 0,
+    "recomputed_answer": "standalone answer",
+    "answer_type": "integer",
+    "verification_passed": true,
+    "substitution_passed": true,
+    "verification_method": "independent recomputation and substitution",
+    "failure_reason": null
+  }}
+]
+
+Rules:
+- verification_passed is true only when the proposed answer is mathematically
+  correct, unique under the stated conditions, and has the requested type.
+- substitution_passed is true only when the answer satisfies every applicable
+  equation, domain, sign, unit, and problem constraint.
+- Never copy the proposed answer without independently recomputing it.
+- Use English strings and output no Markdown or additional text.
+
+Problems:
+{json.dumps(validation_input, ensure_ascii=False, indent=2)}
+"""
+    validation_config = research_config["generation"]
+    last_error = None
+    attempts = int(validation_config["gold_validation_attempts"])
+    for attempt in range(1, attempts + 1):
+        response = ""
+        try:
+            request_result = gen_from_prompt(
+                model=agent_lm,
+                tokenizer=agent_tokenizer,
+                prompt=[prompt],
+                echo_prompt=False,
+                temperature=float(
+                    validation_config["gold_validation_temperature"]
+                ),
+                max_tokens=int(
+                    validation_config["gold_validation_max_tokens"]
+                ),
+                process_func=None,
+                service=agent_client,
+                terminate_by_linebreak="no",
+            )
+            response = request_result.completions[0].text
+            extracted = extract_json_v2(response, None)
+            validations = extracted[0]
+            if (
+                not isinstance(validations, list)
+                or len(validations) != len(questions)
+            ):
+                raise ValueError(
+                    "Gold validation must return one result per question"
+                )
+            by_id = {}
+            for item in validations:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Every gold validation result must be an object"
+                    )
+                validation_id = int(item.get("validation_id", -1))
+                if validation_id in by_id:
+                    raise ValueError("Duplicate gold validation_id")
+                by_id[validation_id] = item
+            expected_ids = set(range(len(questions)))
+            if set(by_id) != expected_ids:
+                raise ValueError(
+                    "Gold validation_id values must exactly match the input"
+                )
+            accepted = []
+            audit_records = []
+            for index, question in enumerate(questions):
+                validation = by_id[index]
+                recomputed_answer = validation.get("recomputed_answer", "")
+                verification_passed = validation.get("verification_passed")
+                substitution_passed = validation.get("substitution_passed")
+                if not isinstance(verification_passed, bool):
+                    raise ValueError(
+                        "verification_passed must be a JSON boolean"
+                    )
+                if not isinstance(substitution_passed, bool):
+                    raise ValueError(
+                        "substitution_passed must be a JSON boolean"
+                    )
+                equivalence = answers_equivalent(
+                    question["canonical_answer"],
+                    recomputed_answer,
+                    question["answer_type"],
+                    research_config,
+                )
+                validator_answer_type = normalize_answer_type(
+                    validation.get(
+                        "answer_type",
+                        question["answer_type"],
+                    ),
+                    recomputed_answer,
+                )
+                answer_type_consistent = (
+                    validator_answer_type == question["answer_type"]
+                )
+                audit = {
+                    "status": (
+                        "passed"
+                        if verification_passed
+                        and substitution_passed
+                        and equivalence["equivalent"]
+                        and answer_type_consistent
+                        else "failed"
+                    ),
+                    "recomputed_answer": recomputed_answer,
+                    "answer_type": validator_answer_type,
+                    "answer_type_consistent": answer_type_consistent,
+                    "verification_passed": verification_passed,
+                    "substitution_passed": substitution_passed,
+                    "verification_method": str(
+                        validation.get("verification_method", "")
+                    ).strip(),
+                    "failure_reason": validation.get("failure_reason"),
+                    "answer_equivalent": bool(equivalence["equivalent"]),
+                }
+                question["gold_answer_validation"] = audit
+                audit_records.append(
+                    {
+                        "question_id": question.get("question_id"),
+                        "question": question["question"],
+                        "proposed_gold_answer": question[
+                            "canonical_answer"
+                        ],
+                        "validation": audit,
+                    }
+                )
+                if audit["status"] == "passed":
+                    accepted.append(question)
+            # [ADDED] Keep both accepted and rejected gold-answer checks for
+            # reproducibility. Failed questions never enter test-taker inference.
+            audit_file = f"{outfile_prefix}.gold_answer_validation.json"
+            existing_audits = read_json_records(audit_file)
+            dump_standard_json(
+                existing_audits + audit_records,
+                audit_file,
+            )
+            return accepted
+        except (ValueError, TypeError, IndexError) as exc:
+            last_error = exc
+            _write_attempt_log(
+                outfile_prefix,
+                "gold_answer_validation",
+                attempt,
+                response,
+            )
+    raise RuntimeError(
+        "Failed to validate generated gold answers"
+    ) from last_error
 
 
 def _generate_question_from_description(
@@ -505,6 +692,7 @@ def _generate_question_from_description(
     questions_old=None,
     hard_sample_context="",
     question_count=50,
+    research_config=None,
 ):
     question_count = int(question_count)
     context = f"""Your goal is to generate exactly {question_count} math questions
@@ -684,6 +872,14 @@ Train-eligible examples:
             "generation_strategy",
             "quota_repair",
         )
+    extracted_json[0] = _validate_generated_gold_answers(
+        extracted_json[0],
+        agent_lm,
+        agent_tokenizer,
+        agent_client,
+        research_config,
+        outfile_prefix,
+    )
     return extracted_json
 
 def _ask_question_v3(
@@ -698,6 +894,7 @@ def _ask_question_v3(
     generation_plan=None,
     progress_manager=None,
     cycle_number=None,
+    research_config=None,
 ):
     agent_lm, agent_tokenizer, agent_client = agent_info
     plan_outfile = f"{outfile_prefix}.question_plan_with_aim.json"
@@ -781,6 +978,7 @@ def _ask_question_v3(
                 outfile_prefix2,
                 hard_sample_context=variant_context,
                 question_count=target_count,
+                research_config=research_config,
             )
             if len(question_json) == 1:
                 question_json = question_json[0]
@@ -812,6 +1010,7 @@ def _ask_question_v3(
                     questions_old=question_json,
                     hard_sample_context=variant_context,
                     question_count=target_count,
+                    research_config=research_config,
                 )
                 question_json_new = question_json_new[0]
                 unique_new = []
@@ -1195,7 +1394,7 @@ def _build_iteration_paths(outfile_prefix1, iter_number, cycle_number=None):
     raw_base_name = os.path.basename(raw_prefix)
     base_name = raw_base_name.rstrip(".") or "math"
     cycle_dir = (
-        os.path.join(output_root, f"cycle_{cycle_number}")
+        os.path.join(output_root, "cycle", f"cycle_{cycle_number}")
         if cycle_number is not None
         else output_root
     )
@@ -1461,6 +1660,8 @@ def _save_cycle_record(path, record):
 
 
 def _failure_type(stage, exc):
+    if isinstance(exc, KeyboardInterrupt):
+        return "interrupted"
     detail = str(exc).lower()
     if "out of memory" in detail or "cuda oom" in detail:
         return "finetune_oom"
@@ -1476,8 +1677,20 @@ def _failure_type(stage, exc):
 
 
 def _sanitize_error(exc):
-    message = re.sub(r"[\u3400-\u9fff]+", " ", str(exc))
+    message = str(exc).strip()
+    if not message:
+        message = repr(exc).strip() or type(exc).__name__
+    message = re.sub(r"[\u3400-\u9fff]+", " ", message)
     return re.sub(r"\s+", " ", message).strip()[:4000]
+
+
+def _sanitize_traceback(exc):
+    """Preserve an actionable traceback even when an exception has no message."""
+    formatted = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
+    formatted = re.sub(r"[\u3400-\u9fff]+", " ", formatted)
+    return formatted.strip()[-12000:]
 
 
 def _save_research_cycle_manifest(args, cycle_entry):
@@ -1490,7 +1703,7 @@ def _save_research_cycle_manifest(args, cycle_entry):
             "cycle_id": cycle_entry["cycle"],
             **cycle_entry,
         },
-        research_run.run_dir
+        research_run.cycle_root
         / f"cycle_{cycle_entry['cycle']}"
         / "cycle_manifest.json",
     )
@@ -1511,7 +1724,10 @@ def _load_completed_cycle_history(output_root, cycles):
             int(cycle.get("iterations_completed", 0)) + 1,
         ):
             iteration_dir = (
-                root / f"cycle_{cycle_number}" / f"iter_{iteration_number}"
+                root
+                / "cycle"
+                / f"cycle_{cycle_number}"
+                / f"iter_{iteration_number}"
             )
             candidates = sorted(
                 iteration_dir.glob("*.test_taker_inference.json")
@@ -1735,6 +1951,7 @@ def _run_math_iteration(
                     research_run.progress if research_run else None
                 ),
                 cycle_number=cycle_number,
+                research_config=research_config,
             )
             if research_run:
                 research_run.logger.event(
@@ -2157,7 +2374,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
             stage = "training_export"
             if getattr(args, "research_run", None):
                 training_dir = (
-                    args.research_run.run_dir
+                    args.research_run.cycle_root
                     / f"cycle_{cycle_number}"
                     / "training"
                 )
@@ -2326,7 +2543,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
             current_test_taker_model = os.path.abspath(finetune_output)
             if getattr(args, "research_run", None):
                 training_dir = (
-                    args.research_run.run_dir
+                    args.research_run.cycle_root
                     / f"cycle_{cycle_number}"
                     / "training"
                 )
@@ -2369,6 +2586,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
             cycle_entry["failed_stage"] = stage
             cycle_entry["failure_type"] = _failure_type(stage, exc)
             cycle_entry["error"] = _sanitize_error(exc)
+            cycle_entry["exception_type"] = type(exc).__name__
+            cycle_entry["traceback"] = _sanitize_traceback(exc)
             cycle_entry["completed_at"] = _utc_timestamp()
             cycle_record["status"] = "failed"
             cycle_record["active_test_taker_model"] = current_test_taker_model
@@ -2380,6 +2599,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     "stage": stage,
                     "failure_type": cycle_entry["failure_type"],
                     "error": cycle_entry["error"],
+                    "exception_type": cycle_entry["exception_type"],
+                    "traceback": cycle_entry["traceback"],
                     "base_model": current_test_taker_model,
                     "completed_at": cycle_entry["completed_at"],
                 }
@@ -2411,7 +2632,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
     _save_cycle_record(cycle_record_path, cycle_record)
     if getattr(args, "research_run", None):
         all_iteration_summaries = []
-        for path in args.research_run.run_dir.glob(
+        for path in args.research_run.cycle_root.glob(
             "cycle_*/iter_*/iteration_summary.json"
         ):
             records = read_json_records(path)
@@ -2483,9 +2704,16 @@ def _build_parser():
     parser.add_argument("--outfile_prefix1", type=str, default="att1")
     parser.add_argument(
         "--config",
+        "--experiment",
         type=str,
         default=None,
         help="YAML configuration profile; existing CLI options override it.",
+    )
+    parser.add_argument(
+        "--environment",
+        type=str,
+        default=None,
+        help="Optional environment YAML merged below the experiment profile.",
     )
     parser.add_argument("--run_id", type=str, default=None)
     parser.add_argument("--resume", type=_parse_bool, default=None)
@@ -2539,87 +2767,16 @@ def _set_nested(mapping, path, value):
 
 
 def _configuration_cli_overrides(args, config_explicit):
-    definitions = (
-        (("agent_modelname",), "agent_modelname", "models.evaluator.model_name"),
-        (
-            ("test_taker_modelname",),
-            "test_taker_modelname",
-            "models.test_taker.model_path",
-        ),
-        (("exp_mode",), "exp_mode", "experiment.exp_mode"),
-        (("num_iters",), "num_iters", "experiment.num_iterations"),
-        (("mode",), "mode", "experiment.mode"),
-        (("export_interval",), "export_interval", "experiment.export_interval"),
-        (("max_cycle",), "max_cycle", "experiment.max_cycles"),
-        (
-            ("clean_cycle_cache",),
-            "clean_cycle_cache",
-            "experiment.clean_cycle_cache",
-        ),
-        (("finetune_gpu",), "finetune_gpu", "finetune.gpu"),
-        (("finetune_epoch",), "finetune_epoch", "finetune.epochs"),
-        (("finetune_batch",), "finetune_batch", "finetune.batch_size"),
-        (("lora_rank",), "lora_rank", "finetune.lora_rank"),
-        (
-            ("new_local_model_suffix",),
-            "new_local_model_suffix",
-            "finetune.new_local_model_suffix",
-        ),
+    explicit_options = {
+        token.split("=", 1)[0]
+        for token in sys.argv[1:]
+        if token.startswith("--")
+    }
+    return cli_config_overrides(
+        args,
+        explicit_options=explicit_options,
+        include_implicit_defaults=not config_explicit,
     )
-    overlay = {}
-    for option_names, attribute, path in definitions:
-        explicit = any(
-            _cli_option_present(
-                f"--{name}",
-                f"--{name.replace('_', '-')}",
-            )
-            for name in option_names
-        )
-        if explicit or not config_explicit:
-            _set_nested(overlay, path, getattr(args, attribute))
-    if _cli_option_present("--acc_target", "--acc-target") or not config_explicit:
-        pieces = [
-            piece
-            for piece in re.split(r"\s*(?:--|,)\s*", args.acc_target)
-            if piece
-        ]
-        if len(pieces) != 2:
-            raise ConfigurationError(
-                "acc_target",
-                "expected low,high or low--high",
-                args.acc_target,
-            )
-        low, high = map(float, pieces)
-        _set_nested(
-            overlay,
-            "adaptive_sampling.target_accuracy_low",
-            low,
-        )
-        _set_nested(
-            overlay,
-            "adaptive_sampling.target_accuracy_high",
-            high,
-        )
-        _set_nested(
-            overlay,
-            "adaptive_sampling.target_accuracy_mid",
-            (low + high) / 2,
-        )
-    if _cli_option_present("--outfile_prefix1", "--outfile-prefix1") or not config_explicit:
-        raw_prefix = os.path.abspath(args.outfile_prefix1)
-        _set_nested(
-            overlay,
-            "paths.output_root",
-            os.path.dirname(raw_prefix) or os.getcwd(),
-        )
-        _set_nested(
-            overlay,
-            "paths.outfile_prefix",
-            os.path.basename(raw_prefix).rstrip(".") or "math",
-        )
-    if args.resume is not None:
-        _set_nested(overlay, "experiment.resume", args.resume)
-    return overlay
 
 
 def _apply_resolved_configuration(args, config, config_explicit):
@@ -2637,6 +2794,15 @@ def _apply_resolved_configuration(args, config, config_explicit):
     args.lora_rank = int(config["finetune"]["lora_rank"])
     args.new_local_model_suffix = str(
         config["finetune"]["new_local_model_suffix"]
+    )
+    args.disk_warning_threshold = float(
+        config["experiment"]["disk_warning_threshold_gb"]
+    )
+    args.temperature = float(config["models"]["evaluator"]["temperature"])
+    args.top_p = float(config["models"]["evaluator"]["top_p"])
+    args.tool_modelname = config["models"]["judge"]["model_name"]
+    args.use_helm = (
+        "yes" if config["compatibility"]["use_helm"] else "no"
     )
     args.acc_target = (
         f"{config['adaptive_sampling']['target_accuracy_low']},"
@@ -2660,8 +2826,9 @@ def main():
     )
     try:
         cli_overrides = _configuration_cli_overrides(args, config_explicit)
-        resolved_config, provenance = load_resolved_config(
+        resolved_config, provenance = load_project_config(
             config_path,
+            environment_path=args.environment,
             cli_overrides=cli_overrides,
             temporary_overrides=args.override,
             validate_paths=True,
@@ -2704,14 +2871,11 @@ def main():
         project_root=Path(__file__).resolve().parent,
         legacy_output_root=(None if config_explicit else output_root),
     )
-    if config_explicit and not _cli_option_present(
-        "--outfile_prefix1",
-        "--outfile-prefix1",
-    ):
-        prefix = str(resolved_config["paths"]["outfile_prefix"]).rstrip(".")
-        args.outfile_prefix1 = str(research_run.run_dir / f"{prefix}.")
-        output_root = _output_root(args.outfile_prefix1)
-        os.makedirs(output_root, exist_ok=True)
+    # [MODIFIED] Every invocation is self-contained in test_<N>. Legacy CLI
+    # output prefixes still choose the archive root and base filename.
+    prefix = str(resolved_config["paths"]["outfile_prefix"]).rstrip(".")
+    args.outfile_prefix1 = str(research_run.run_dir / f"{prefix}.")
+    output_root = _output_root(args.outfile_prefix1)
     args.research_run = research_run
     serializable_args = {
         key: value

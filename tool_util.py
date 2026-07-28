@@ -393,6 +393,9 @@ def canonicalize_math_record(record, index=0):
         "reference_hard_sample_ids",
         "target_error_type",
         "generation_strategy",
+        # [ADDED] Preserve the evaluator's independent gold-answer audit
+        # through inference, evaluation, hard-pool, and research exports.
+        "gold_answer_validation",
         "raw_response",
         "parsed_response",
         "parse_status",

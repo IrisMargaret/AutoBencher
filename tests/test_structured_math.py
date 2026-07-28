@@ -7,6 +7,7 @@ from autobencher.config import load_resolved_config
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
+    clean_answer_candidate,
     normalize_answer_type,
     parse_test_taker_output,
     test_taker_prompt as strict_test_taker_prompt,
@@ -230,6 +231,76 @@ def test_answer_equivalence_types(config, gold, predicted, answer_type):
     assert answers_equivalent(
         gold, predicted, answer_type, config
     )["equivalent"] is True
+
+
+@pytest.mark.parametrize(
+    ("raw_answer", "cleaned_answer"),
+    [
+        ("x = 1", "1"),
+        ("x=11/7", "11/7"),
+        ("135\u00b0", "135"),
+        ("  281/40  ", "281/40"),
+    ],
+)
+def test_clean_answer_candidate(raw_answer, cleaned_answer):
+    assert clean_answer_candidate(raw_answer) == cleaned_answer
+
+
+def test_clean_answer_candidate_preserves_numeric_zero():
+    assert clean_answer_candidate(0) == "0"
+
+
+def test_numeric_equivalence_cleans_prediction_without_mutating_parse(config):
+    parsed = parse_test_taker_output(
+        response("x = 1", "rational"),
+        None,
+        "rational",
+        config,
+    )
+    original_raw_response = parsed["raw_response"]
+    original_parsed_response = dict(parsed["parsed_response"])
+    result = answers_equivalent(
+        "1",
+        parsed["parsed_response"]["final_answer"],
+        "rational",
+        config,
+    )
+    assert result["equivalent"] is True
+    assert result["deterministic_checks"]["format_valid"] is True
+    attribution = attribute_error(
+        {"question": "Solve for the rational value of x."},
+        parsed,
+        result,
+        config,
+    )
+    assert attribution["primary_error_tag"] is None
+    assert parsed["raw_response"] == original_raw_response
+    assert parsed["parsed_response"] == original_parsed_response
+    assert parsed["parsed_response"]["final_answer"] == "x = 1"
+
+
+@pytest.mark.parametrize(
+    ("gold", "predicted", "answer_type"),
+    [
+        ("x=11/7", "11/7", "rational"),
+        ("135\u00b0", "135", "decimal"),
+        ("  281/40  ", "281/40", "rational"),
+    ],
+)
+def test_gold_and_prediction_use_same_scalar_cleanup(
+    config,
+    gold,
+    predicted,
+    answer_type,
+):
+    result = answers_equivalent(gold, predicted, answer_type, config)
+    assert result["equivalent"] is True
+    assert result["deterministic_checks"]["format_valid"] is True
+
+
+def test_equation_assignment_is_not_rewritten_as_numeric(config):
+    result = answers_equivalent("2*x=4", "x=2", "equation", config)
+    assert result["equivalent"] is True
 
 
 def test_unit_mismatch_is_not_equivalent(config):

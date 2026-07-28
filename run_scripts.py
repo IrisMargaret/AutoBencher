@@ -135,6 +135,7 @@ def build_command(
     disk_warning_threshold=10,
     clean_cycle_cache=True,
     config=None,
+    environment=None,
     run_id=None,
     resume=None,
     overrides=None,
@@ -194,6 +195,7 @@ def build_command(
         "--clean_cycle_cache", str(bool(clean_cycle_cache)).lower(),
     ]
     _append_option(math_options, "--config", config)
+    _append_option(math_options, "--environment", environment)
     _append_option(math_options, "--run_id", run_id)
     if resume is not None:
         _append_option(math_options, "--resume", str(bool(resume)).lower())
@@ -301,7 +303,8 @@ def main():
         type=parse_bool,
         default=True,
     )
-    parser.add_argument("--config")
+    parser.add_argument("--config", "--experiment", dest="config")
+    parser.add_argument("--environment")
     parser.add_argument("--run-id", "--run_id", dest="run_id")
     parser.add_argument("--resume", type=parse_bool)
     parser.add_argument(
@@ -359,6 +362,7 @@ def main():
         disk_warning_threshold=args.disk_warning_threshold,
         clean_cycle_cache=args.clean_cycle_cache,
         config=args.config,
+        environment=args.environment,
         run_id=args.run_id,
         resume=args.resume,
         overrides=args.override,

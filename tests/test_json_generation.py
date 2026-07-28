@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import math_autobencher
 import tool_util
+from autobencher.config import load_project_config
 from tool_util import (
     ERROR_TAGS,
     clean_redundant_files,
@@ -13,6 +14,8 @@ from tool_util import (
     extract_json_v2,
     manage_hard_pool,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -102,6 +105,161 @@ class MathPlanRetryTests(unittest.TestCase):
             len(math_autobencher._normalize_math_plan([items])[0]),
             5,
         )
+
+
+class GoldAnswerValidationTests(unittest.TestCase):
+    @staticmethod
+    def _result(payload):
+        completion = type("Completion", (), {})()
+        completion.text = json.dumps(payload)
+        result = type("RequestResult", (), {})()
+        result.completions = [completion]
+        return result
+
+    def test_only_independently_verified_gold_answers_are_accepted(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        questions = [
+            {
+                "question_id": "q1",
+                "question": "What is 2 + 2?",
+                "answer_type": "integer",
+                "canonical_answer": "4",
+                "unit": None,
+                "tolerance": None,
+            },
+            {
+                "question_id": "q2",
+                "question": "What is 3 + 3?",
+                "answer_type": "integer",
+                "canonical_answer": "7",
+                "unit": None,
+                "tolerance": None,
+            },
+        ]
+        validation = [
+            {
+                "validation_id": 0,
+                "recomputed_answer": "4",
+                "answer_type": "integer",
+                "verification_passed": True,
+                "substitution_passed": True,
+                "verification_method": "independent addition",
+                "failure_reason": None,
+            },
+            {
+                "validation_id": 1,
+                "recomputed_answer": "6",
+                "answer_type": "integer",
+                "verification_passed": False,
+                "substitution_passed": False,
+                "verification_method": "independent addition",
+                "failure_reason": "The proposed answer is incorrect.",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration.subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                return_value=self._result(validation),
+            ):
+                accepted = (
+                    math_autobencher._validate_generated_gold_answers(
+                        questions,
+                        "model",
+                        None,
+                        object(),
+                        config,
+                        prefix,
+                    )
+                )
+
+            self.assertEqual(
+                [item["question_id"] for item in accepted],
+                ["q1"],
+            )
+            self.assertEqual(
+                accepted[0]["gold_answer_validation"]["status"],
+                "passed",
+            )
+            canonical = tool_util.canonicalize_math_record(
+                accepted[0],
+                0,
+            )
+            self.assertEqual(
+                canonical["gold_answer_validation"]["status"],
+                "passed",
+            )
+            audit_path = Path(
+                f"{prefix}.gold_answer_validation.json"
+            )
+            audits = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(audits), 2)
+            self.assertEqual(
+                audits[1]["validation"]["status"],
+                "failed",
+            )
+            clean_redundant_files(temp_dir)
+            self.assertTrue(audit_path.is_file())
+
+    def test_string_boolean_is_rejected_and_retried(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        invalid = [
+            {
+                "validation_id": 0,
+                "recomputed_answer": "4",
+                "answer_type": "integer",
+                "verification_passed": "false",
+                "substitution_passed": True,
+                "verification_method": "independent addition",
+                "failure_reason": None,
+            }
+        ]
+        valid = [
+            {
+                "validation_id": 0,
+                "recomputed_answer": "4",
+                "answer_type": "integer",
+                "verification_passed": True,
+                "substitution_passed": True,
+                "verification_method": "independent addition",
+                "failure_reason": None,
+            }
+        ]
+        question = {
+            "question_id": "q1",
+            "question": "What is 2 + 2?",
+            "answer_type": "integer",
+            "canonical_answer": "4",
+            "unit": None,
+            "tolerance": None,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration.subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                side_effect=[
+                    self._result(invalid),
+                    self._result(valid),
+                ],
+            ) as generate:
+                accepted = (
+                    math_autobencher._validate_generated_gold_answers(
+                        [question],
+                        "model",
+                        None,
+                        object(),
+                        config,
+                        prefix,
+                    )
+                )
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(len(accepted), 1)
 
 
 class InferenceResumeTests(unittest.TestCase):

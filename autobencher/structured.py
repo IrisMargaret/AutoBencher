@@ -516,6 +516,24 @@ def _clean_text(value: Any) -> str:
     return text.strip(" \t\r\n.;")
 
 
+def clean_answer_candidate(value: Any) -> str:
+    """Return a comparison-only scalar answer without common format wrappers.
+
+    Keep this function independent so additional non-semantic answer wrappers
+    can be added here without changing raw model output or persisted JSON.
+    """
+    cleaned = ("" if value is None else str(value)).strip()
+    cleaned = re.sub(
+        r"^[xyz]\s*=\s*",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s*\u00b0\s*$", "", cleaned)
+    return cleaned.strip()
+
+
 def _number(value: Any, percentage: bool = False) -> float | None:
     text = _clean_text(value).replace(",", "")
     has_percent_sign = text.endswith("%")
@@ -590,11 +608,21 @@ def normalize_answer(
     answer_type = normalize_answer_type(answer_type)
     if answer_type not in ANSWER_TYPES:
         return {"success": False, "answer_type": answer_type, "value": None}
+    # [MODIFIED] Use a disposable scalar copy for numeric validation. Equation
+    # and symbolic types retain variable assignments because "x = 1" is
+    # semantic equation syntax for those answer types.
+    comparison_value = (
+        clean_answer_candidate(value)
+        if isinstance(value, str)
+        and answer_type
+        in {"integer", "decimal", "rational", "percentage"}
+        else value
+    )
     normalized: Any
     if answer_type in {"integer", "decimal", "rational"}:
-        normalized = _number(value)
+        normalized = _number(comparison_value)
     elif answer_type == "percentage":
-        normalized = _number(value, percentage=True)
+        normalized = _number(comparison_value, percentage=True)
     elif answer_type == "boolean":
         lookup = {
             "yes": True,

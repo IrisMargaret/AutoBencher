@@ -1,0 +1,7 @@
+extends: ../math_flywheel_smoke_test.yaml
+
+schema_version: "1.0"
+
+experiment:
+  name: math_flywheel_smoke_test
+  mode: eval

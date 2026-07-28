@@ -93,10 +93,15 @@ AutoBencher/
 │   ├── experiment.py
 │   └── structured.py
 ├── configs/
+│   ├── environments/
+│   │   ├── local.yaml
+│   │   ├── server.yaml
+│   │   └── volcengine.yaml
+│   ├── experiments/
+│   │   ├── math_flywheel.yaml
+│   │   └── smoke_test.yaml
 │   ├── math_flywheel.yaml
-│   ├── math_flywheel_local.yaml
-│   ├── math_flywheel_smoke_test.yaml
-│   └── math_flywheel_volcengine.yaml
+│   └── math_flywheel_smoke_test.yaml
 ├── schemas/
 │   ├── error_attribution.schema.json
 │   ├── evaluation_result.schema.json
@@ -201,45 +206,100 @@ Never commit `.env`, an API key, an SSH password, or a private key.
 
 ## Configuration
 
+The math entry point loads configuration exactly once and passes one recursively
+immutable `ProjectConfig` to runtime modules. New experiments should be created
+by copying an experiment YAML; do not edit Python constants to tune an
+experiment.
+
 Configuration profiles:
 
 | File | Purpose |
 | --- | --- |
 | `configs/math_flywheel.yaml` | Full default research flywheel. |
-| `configs/math_flywheel_local.yaml` | Local workstation override. |
-| `configs/math_flywheel_volcengine.yaml` | Persistent Volcengine paths and non-TTY progress. |
 | `configs/math_flywheel_smoke_test.yaml` | One CPU/mock-sized 27-question scheduling profile. |
+| `configs/experiments/math_flywheel.yaml` | Recommended full experiment entry point. |
+| `configs/experiments/smoke_test.yaml` | Recommended smoke experiment entry point. |
+| `configs/environments/local.yaml` | Local workstation paths and model route. |
+| `configs/environments/server.yaml` | Generic persistent server paths. |
+| `configs/environments/volcengine.yaml` | Volcengine model and persistent paths. |
 
 Resolution precedence is:
 
 ```text
-safe defaults < inherited YAML < explicitly typed legacy CLI < --override
+security invariants
+  < schema defaults
+  < inherited base YAML
+  < environment YAML
+  < experiment YAML
+  < explicitly typed legacy CLI
+  < --override
+  < sensitive environment variables
 ```
 
-Launcher defaults are stripped when `run_scripts.py --config` is used, so they
-do not silently replace YAML values. Each run stores both effective snapshots:
+Environment variables are used only for credentials and private service
+addresses declared under `sensitive_environment`. Their values are never
+written to snapshots. Launcher defaults are stripped when `run_scripts.py
+--config` is used, so they do not silently replace YAML values.
 
-```text
-runs/<run_id>/resolved_config.yaml
-runs/<run_id>/resolved_config.json
+Recommended launch:
+
+```bash
+python run_scripts.py math \
+  --config configs/experiments/math_flywheel.yaml \
+  --environment configs/environments/volcengine.yaml
 ```
 
 Use temporary dotted-path overrides without editing a profile:
 
 ```bash
-python math_autobencher.py \
-  --config configs/math_flywheel_local.yaml \
-  --override experiment.questions_per_iteration=54 logging.progress_enabled=false
+python run_scripts.py math \
+  --config configs/experiments/math_flywheel.yaml \
+  --environment configs/environments/local.yaml \
+  --override experiment.seed=43 finetune.gpu=1
 ```
 
 Boolean overrides accept `true/false`, `yes/no`, `on/off`, and `1/0`.
 Configuration validation fails before model loading for invalid ratios, quotas,
-thresholds, test-taker tool access, model paths, or output permissions.
+thresholds, unknown fields, test-taker tool access, model paths, or output
+permissions. Legacy YAML fields such as `finetune_epoch` are migrated with a
+`DeprecationWarning`; unsupported schema versions are rejected.
 
 To create an experiment, copy the nearest profile, keep `extends`, and override
 only changed fields. Taxonomy quotas live under `taxonomy`, generation ratios
 under `generation_mix`, dataset ratios under `training_mix`, and progress
 settings under `logging`.
+
+Every run writes these configuration audit files inside its allocated
+`test_<N>` directory:
+
+```text
+resolved_config.yaml
+resolved_config.json
+config_sources.json
+config_validation.json
+config_hash.txt
+```
+
+`config_sources.json` records the winning source and value for each leaf field.
+Sensitive values are redacted. Compare `resolved_config.json` or
+`config_hash.txt` between two `test_<N>` directories to reproduce or audit
+experiments. A result-affecting configuration change changes the hash and
+invalidates incompatible caches.
+
+Backward-compatible options remain supported and are mapped centrally:
+
+| Legacy CLI | Configuration field |
+| --- | --- |
+| `--agent_modelname` | `models.evaluator.model_name` |
+| `--test_taker_modelname` | `models.test_taker.model_path` |
+| `--num_iters` | `experiment.num_iterations` |
+| `--max_cycle` | `experiment.max_cycles` |
+| `--acc_target` | `adaptive_sampling.target_accuracy_low/high/mid` |
+| `--finetune_gpu` | `finetune.gpu` |
+| `--finetune_epoch` | `finetune.epochs` |
+| `--finetune_batch` | `finetune.batch_size` |
+| `--lora_rank` | `finetune.lora_rank` |
+| `--clean_cycle_cache` | `experiment.clean_cycle_cache` |
 
 ## Quick start
 
@@ -445,7 +505,7 @@ df -h /vepfs-mlp2/queue010/20262202597
 ```
 
 Run artifacts also save package, platform, CUDA, device, image, driver, and Git
-metadata to `runs/<run_id>/environment.json`.
+metadata to `test_<N>/environment.json`.
 
 ### Install and run
 
@@ -522,43 +582,57 @@ Configuration-driven output:
 
 ```text
 <output_root>/
-└── runs/
-    └── <run_id>/
-        ├── resolved_config.yaml
-        ├── resolved_config.json
-        ├── environment.json
-        ├── run_manifest.json
-        ├── taxonomy_snapshot.json
-        ├── experiment_summary.json
-        ├── logs/
-        │   ├── run.log
-        │   └── events.jsonl
-        └── cycle_1/
-            ├── cycle_manifest.json
-            ├── iter_1/
-            │   ├── generation_plan.json
-            │   ├── generated_questions.json
-            │   ├── test_taker_outputs.json
-            │   ├── normalized_answers.json
-            │   ├── evaluation_results.json
-            │   ├── error_attributions.json
-            │   ├── coverage_metrics.json
-            │   ├── adaptive_sampler_state.json
-            │   ├── hard_pool_snapshot.json
-            │   └── iteration_summary.json
-            └── training/
-                ├── dataset_candidates.json
-                ├── dataset_selected.jsonl
-                ├── dataset_manifest.json
-                ├── dedup_report.json
-                ├── diversity_report.json
-                ├── finetune_config.json
-                ├── finetune_metrics.jsonl
-                ├── finetune_summary.json
-                └── checkpoint_manifest.json
+├── test_1/
+│   ├── resolved_config.yaml
+│   ├── resolved_config.json
+│   ├── config_sources.json
+│   ├── config_validation.json
+│   ├── config_hash.txt
+│   ├── environment.json
+│   ├── run_manifest.json
+│   ├── taxonomy_snapshot.json
+│   ├── experiment_summary.json
+│   ├── hard_pool.json
+│   ├── meta_summary.json
+│   ├── cycle_record.json
+│   ├── logs/
+│   │   ├── run.log
+│   │   └── events.jsonl
+│   └── cycle/
+│       └── cycle_1/
+│           ├── cycle_manifest.json
+│           ├── iter_1/
+│           │   ├── generation_plan.json
+│           │   ├── generated_questions.json
+│           │   ├── test_taker_outputs.json
+│           │   ├── normalized_answers.json
+│           │   ├── evaluation_results.json
+│           │   ├── error_attributions.json
+│           │   ├── coverage_metrics.json
+│           │   ├── adaptive_sampler_state.json
+│           │   ├── hard_pool_snapshot.json
+│           │   └── iteration_summary.json
+│           └── training/
+│               ├── dataset_candidates.json
+│               ├── dataset_selected.jsonl
+│               ├── dataset_manifest.json
+│               ├── dedup_report.json
+│               ├── diversity_report.json
+│               ├── finetune_config.json
+│               ├── finetune_metrics.jsonl
+│               ├── finetune_summary.json
+│               └── checkpoint_manifest.json
+├── test_2/
+└── test_3/
 ```
 
-Global compatibility files remain available at the active output root:
+At startup, AutoBencher scans sibling directories matching `test_<number>` and
+atomically creates `test_<maximum+1>`. Unrelated names are ignored and existing
+runs are never overwritten. Every artifact produced by that invocation stays
+inside the allocated test directory. All `cycle_<N>` directories are grouped
+under its `cycle/` directory.
+
+Global compatibility files remain available inside the active `test_<N>` root:
 `hard_pool.json`, `meta_summary.json`, and `cycle_record.json`. Iteration
 compatibility files retain `test_taker_inference.json`,
 `compare_answers.json`, and `question_plan_with_aim.json`.
@@ -645,6 +719,28 @@ posterior. Boundary proximity, coverage deficit, uncertainty, persistent error,
 and retention are combined into an auditable priority. Difficulty changes only
 after the minimum observation count.
 
+## Generated gold-answer verification
+
+Question generation and gold-answer verification are separate evaluator calls.
+After the evaluator proposes a question and `canonical_answer`, the system sends
+the complete question back to the privileged evaluator with an explicit
+instruction to solve it independently and substitute the proposed answer into
+all applicable equations, domains, units, and constraints.
+
+A question enters test-taker inference only when all of the following hold:
+
+- independent recomputation succeeds;
+- constraint/substitution verification succeeds;
+- the recomputed answer is deterministically equivalent to the proposed gold;
+- the validator answer type matches the generated-question answer type.
+
+Rejected questions are removed before inference and the existing quota-repair
+loop generates replacements. Every accepted or rejected check is recorded in
+`*.subcat<N>.gold_answer_validation.json`; accepted question records also carry
+the `gold_answer_validation` object. This behavior is controlled by
+`generation.require_gold_answer_validation` and the related validation retry,
+temperature, and token settings in YAML.
+
 ## Test-taker isolation and evaluation
 
 The test taker receives no external tools and must return exactly:
@@ -690,6 +786,13 @@ validation, including `fraction` to `rational`, `percent` to `percentage`, and
 `bool` to `boolean`. Mixed-number aliases such as `mixed_number` and
 `mixed_fraction` also map to `rational`; unknown labels fall back to
 deterministic inference from the canonical answer.
+
+Before numeric type parsing, both the canonical gold answer and the extracted
+test-taker answer are compared through a temporary cleaned copy. The cleanup
+removes surrounding whitespace, a leading scalar assignment such as `x = `,
+`y=`, or `z =`, and a trailing degree symbol. Raw responses and the persisted
+`parsed_response.final_answer` are never rewritten. Equation, symbolic, unit,
+and structured answer types retain their original syntax.
 
 Error attribution follows output validity, answer equivalence, then
 mathematical evidence. Fixed tags are:
@@ -775,8 +878,8 @@ non-TTY, so it uses stage log messages instead of emitting repeated pseudo-bars.
 Human-readable and machine-readable logs are:
 
 ```text
-runs/<run_id>/logs/run.log
-runs/<run_id>/logs/events.jsonl
+test_<N>/logs/run.log
+test_<N>/logs/events.jsonl
 ```
 
 Events include timestamp, level, run ID, cycle, iteration, stage, event,

@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import os
+import re
+import warnings
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -22,6 +24,71 @@ class ConfigurationError(RuntimeError):
         super().__init__(detail)
         self.path = path
         self.value = value
+
+
+class ProjectConfig(dict):
+    """Recursively immutable, attribute-accessible runtime configuration."""
+
+    def __init__(self, values: Mapping[str, Any]):
+        dict.__init__(
+            self,
+            {
+                key: _freeze_config(value)
+                for key, value in values.items()
+            },
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    @staticmethod
+    def _immutable(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise TypeError("ProjectConfig is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+
+def _freeze_config(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return ProjectConfig(value)
+    if isinstance(value, list):
+        return tuple(_freeze_config(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_config(item) for item in value)
+    return value
+
+
+def thaw_config(value: Any) -> Any:
+    """Return a mutable plain-data copy suitable for serialization or tests."""
+    if isinstance(value, Mapping):
+        return {
+            key: thaw_config(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [thaw_config(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def resolve_sensitive_environment(
+    config: Mapping[str, Any],
+) -> dict[str, str | None]:
+    """Read only the centrally declared sensitive environment variables."""
+    declarations = config.get("sensitive_environment", {})
+    return {
+        str(logical_name): os.environ.get(str(variable_name))
+        for logical_name, variable_name in declarations.items()
+    }
 
 
 FIXED_MATH_CATEGORIES = (
@@ -113,6 +180,13 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "export_interval": 1,
         "clean_cycle_cache": True,
         "resume": True,
+        "disk_warning_threshold_gb": 10,
+    },
+    "compatibility": {
+        "use_helm": False,
+        "preserve_existing_cli": True,
+        "preserve_existing_cache": True,
+        "preserve_existing_output_fields": True,
     },
     "models": {
         "evaluator": {
@@ -120,12 +194,23 @@ SAFE_DEFAULTS: dict[str, Any] = {
             "use_privileged_tools": True,
             "temperature": 0.2,
             "max_tokens": 4096,
+            "top_p": 0.9,
+            "request_timeout_seconds": 120,
+            "max_retries": 3,
+            "retry_delay_seconds": 5,
         },
         "test_taker": {
             "model_path": "qwen2.5:7b-instruct",
             "use_external_tools": False,
             "temperature": 0.0,
             "max_new_tokens": 1024,
+            "top_p": 1.0,
+            "do_sample": False,
+            "request_timeout_seconds": 300,
+            "max_retries": 3,
+        },
+        "judge": {
+            "model_name": None,
         },
     },
     "paths": {
@@ -134,6 +219,21 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "cache_dir": None,
         "model_output_dir": None,
         "log_dir": None,
+        "temp_dir": None,
+        "dataset_dir": None,
+        "checkpoint_dir": None,
+        "review_dir": None,
+    },
+    "sensitive_environment": {
+        "deepseek_api_key": "DEEPSEEK_API_KEY",
+        "deepseek_base_url": "DEEPSEEK_BASE_URL",
+        "openai_api_key": "OPENAI_API_KEY",
+        "openai_organization": "OPENAI_ORG_ID",
+        "anthropic_api_key": "ANTHROPIC_API_KEY",
+        "vllm_api_key": "VLLM_API_KEY",
+        "vllm_base_url": "VLLM_BASE_URL",
+        "ollama_api_key": "OLLAMA_API_KEY",
+        "ollama_base_url": "OLLAMA_BASE_URL",
     },
     "coverage": {
         "default_min_quota": 20,
@@ -163,6 +263,10 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "generation": {
         "max_questions_per_prompt": 50,
+        "require_gold_answer_validation": True,
+        "gold_validation_attempts": 2,
+        "gold_validation_temperature": 0.0,
+        "gold_validation_max_tokens": 4096,
     },
     "hard_pool": {
         "enabled": True,
@@ -285,6 +389,102 @@ SAFE_DEFAULTS: dict[str, Any] = {
 }
 
 
+CLI_CONFIG_MAPPING = (
+    ("agent_modelname", "models.evaluator.model_name"),
+    ("test_taker_modelname", "models.test_taker.model_path"),
+    ("tool_modelname", "models.judge.model_name"),
+    ("exp_mode", "experiment.exp_mode"),
+    ("num_iters", "experiment.num_iterations"),
+    ("mode", "experiment.mode"),
+    ("export_interval", "experiment.export_interval"),
+    ("max_cycle", "experiment.max_cycles"),
+    ("clean_cycle_cache", "experiment.clean_cycle_cache"),
+    ("disk_warning_threshold", "experiment.disk_warning_threshold_gb"),
+    ("finetune_gpu", "finetune.gpu"),
+    ("finetune_epoch", "finetune.epochs"),
+    ("finetune_batch", "finetune.batch_size"),
+    ("lora_rank", "finetune.lora_rank"),
+    ("new_local_model_suffix", "finetune.new_local_model_suffix"),
+    ("temperature", "models.evaluator.temperature"),
+    ("top_p", "models.evaluator.top_p"),
+)
+
+
+def cli_config_overrides(
+    namespace: Any,
+    explicit_options: Iterable[str],
+    include_implicit_defaults: bool,
+) -> dict[str, Any]:
+    """Map the backward-compatible CLI into centralized config fields."""
+    explicit = set(explicit_options)
+    overlay: dict[str, Any] = {}
+    for attribute, path in CLI_CONFIG_MAPPING:
+        value = getattr(namespace, attribute, None)
+        if value is None:
+            continue
+        option_names = {
+            f"--{attribute}",
+            f"--{attribute.replace('_', '-')}",
+        }
+        if include_implicit_defaults or option_names & explicit:
+            set_dotted(overlay, path, value)
+
+    use_helm = getattr(namespace, "use_helm", None)
+    if include_implicit_defaults or {"--use_helm", "--use-helm"} & explicit:
+        set_dotted(
+            overlay,
+            "compatibility.use_helm",
+            str(use_helm).strip().lower() == "yes",
+        )
+
+    acc_target = getattr(namespace, "acc_target", None)
+    if acc_target is not None and (
+        include_implicit_defaults
+        or {"--acc_target", "--acc-target"} & explicit
+    ):
+        pieces = [
+            piece
+            for piece in re.split(r"\s*(?:--|,)\s*", str(acc_target))
+            if piece
+        ]
+        if len(pieces) != 2:
+            raise ConfigurationError(
+                "acc_target",
+                "expected low,high or low--high",
+                acc_target,
+            )
+        low, high = map(float, pieces)
+        set_dotted(overlay, "adaptive_sampling.target_accuracy_low", low)
+        set_dotted(overlay, "adaptive_sampling.target_accuracy_high", high)
+        set_dotted(
+            overlay,
+            "adaptive_sampling.target_accuracy_mid",
+            (low + high) / 2,
+        )
+
+    outfile_prefix = getattr(namespace, "outfile_prefix1", None)
+    if outfile_prefix and (
+        include_implicit_defaults
+        or {"--outfile_prefix1", "--outfile-prefix1"} & explicit
+    ):
+        raw_prefix = os.path.abspath(os.fspath(outfile_prefix))
+        set_dotted(
+            overlay,
+            "paths.output_root",
+            os.path.dirname(raw_prefix) or os.getcwd(),
+        )
+        set_dotted(
+            overlay,
+            "paths.outfile_prefix",
+            os.path.basename(raw_prefix).rstrip(".") or "math",
+        )
+
+    resume = getattr(namespace, "resume", None)
+    if resume is not None:
+        set_dotted(overlay, "experiment.resume", bool(resume))
+    return overlay
+
+
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(dict(base))
     for key, value in overlay.items():
@@ -335,7 +535,50 @@ def parse_overrides(overrides: Iterable[str] | None) -> dict[str, Any]:
     return parsed
 
 
-def _load_yaml_with_extends(path: Path, seen: set[Path] | None = None) -> dict[str, Any]:
+LEGACY_FIELD_MIGRATIONS = {
+    "num_iters": "experiment.num_iterations",
+    "max_cycle": "experiment.max_cycles",
+    "export_interval": "experiment.export_interval",
+    "clean_cycle_cache": "experiment.clean_cycle_cache",
+    "finetune_gpu": "finetune.gpu",
+    "finetune_epoch": "finetune.epochs",
+    "finetune_batch": "finetune.batch_size",
+    "lora_rank": "finetune.lora_rank",
+    "new_local_model_suffix": "finetune.new_local_model_suffix",
+}
+
+
+def _migrate_legacy_fields(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    migrated = copy.deepcopy(dict(payload))
+    migrations = []
+    for legacy_path, current_path in LEGACY_FIELD_MIGRATIONS.items():
+        if legacy_path not in migrated:
+            continue
+        value = migrated.pop(legacy_path)
+        set_dotted(migrated, current_path, value)
+        migrations.append(
+            {
+                "legacy_path": legacy_path,
+                "current_path": current_path,
+            }
+        )
+        warnings.warn(
+            (
+                f"Configuration field {legacy_path} is deprecated; "
+                f"use {current_path}"
+            ),
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    return migrated, migrations
+
+
+def _load_yaml_layers(
+    path: Path,
+    seen: set[Path] | None = None,
+) -> list[tuple[str, dict[str, Any], list[dict[str, str]]]]:
     seen = seen or set()
     resolved = path.resolve()
     if resolved in seen:
@@ -350,10 +593,65 @@ def _load_yaml_with_extends(path: Path, seen: set[Path] | None = None) -> dict[s
     if not isinstance(payload, dict):
         raise ConfigurationError("config", "top-level YAML value must be an object")
     parent = payload.pop("extends", None)
+    payload, migrations = _migrate_legacy_fields(payload)
     if not parent:
-        return payload
+        return [(str(resolved), payload, migrations)]
     parent_path = (resolved.parent / str(parent)).resolve()
-    return deep_merge(_load_yaml_with_extends(parent_path, seen), payload)
+    return _load_yaml_layers(parent_path, seen) + [
+        (str(resolved), payload, migrations)
+    ]
+
+
+def _load_yaml_with_extends(path: Path, seen: set[Path] | None = None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for _, payload, _ in _load_yaml_layers(path, seen):
+        merged = deep_merge(merged, payload)
+    return merged
+
+
+def _flatten_leaves(
+    value: Any,
+    prefix: str = "",
+) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        flattened: dict[str, Any] = {}
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_leaves(item, path))
+        return flattened
+    return {prefix: value}
+
+
+def _record_sources(
+    field_sources: dict[str, dict[str, Any]],
+    overlay: Mapping[str, Any],
+    source: str,
+) -> None:
+    for path, value in _flatten_leaves(overlay).items():
+        field_sources[path] = {
+            "value": thaw_config(value),
+            "source": source,
+        }
+
+
+def _validate_known_fields(
+    config: Mapping[str, Any],
+    schema: Mapping[str, Any],
+    prefix: str = "",
+) -> None:
+    for key, value in config.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if key not in schema:
+            raise ConfigurationError(
+                path,
+                "unknown field; remove it or add it to the configuration schema",
+                value,
+            )
+        expected = schema[key]
+        if path == "taxonomy":
+            continue
+        if isinstance(value, Mapping) and isinstance(expected, Mapping):
+            _validate_known_fields(value, expected, path)
 
 
 def _get(config: Mapping[str, Any], path: str) -> Any:
@@ -389,6 +687,7 @@ def _validate_ratio_group(config: Mapping[str, Any], path: str, fields: list[str
 
 
 def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> None:
+    _validate_known_fields(config, SAFE_DEFAULTS)
     for path in (
         "schema_version",
         "experiment.questions_per_iteration",
@@ -398,6 +697,12 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "taxonomy",
     ):
         _get(config, path)
+    if str(_get(config, "schema_version")) != "1.0":
+        raise ConfigurationError(
+            "schema_version",
+            "unsupported configuration version; expected 1.0",
+            _get(config, "schema_version"),
+        )
     quota = _get(config, "coverage.default_min_quota")
     if not isinstance(quota, int) or isinstance(quota, bool) or quota <= 0:
         raise ConfigurationError(
@@ -427,6 +732,17 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ConfigurationError(path, "must be a positive integer", value)
+    disk_warning = _get(config, "experiment.disk_warning_threshold_gb")
+    if (
+        not isinstance(disk_warning, (int, float))
+        or isinstance(disk_warning, bool)
+        or disk_warning < 0
+    ):
+        raise ConfigurationError(
+            "experiment.disk_warning_threshold_gb",
+            "must be a non-negative number",
+            disk_warning,
+        )
     injection = _get(config, "hard_pool.injection_start_iteration")
     if not isinstance(injection, int) or injection < 1:
         raise ConfigurationError(
@@ -444,6 +760,21 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "generation.max_questions_per_prompt",
             "must be a positive integer",
             prompt_batch,
+        )
+    for path in (
+        "generation.gold_validation_attempts",
+        "generation.gold_validation_max_tokens",
+    ):
+        value = _get(config, path)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigurationError(path, "must be a positive integer", value)
+    if not isinstance(
+        _get(config, "generation.require_gold_answer_validation"),
+        bool,
+    ):
+        raise ConfigurationError(
+            "generation.require_gold_answer_validation",
+            "must be a Boolean",
         )
     test_taker_tools = _get(config, "models.test_taker.use_external_tools")
     if not isinstance(test_taker_tools, bool):
@@ -541,6 +872,14 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
                     f"taxonomy.{category}.{subcategory}",
                     "must be an object",
                 )
+            unknown_metadata = set(metadata) - {"min_quota", "base_weight"}
+            if unknown_metadata:
+                unknown = sorted(unknown_metadata)[0]
+                raise ConfigurationError(
+                    f"taxonomy.{category}.{subcategory}.{unknown}",
+                    "unknown taxonomy metadata field",
+                    metadata[unknown],
+                )
             min_quota = metadata.get("min_quota", quota)
             if not isinstance(min_quota, int) or min_quota <= 0:
                 raise ConfigurationError(
@@ -589,29 +928,96 @@ def config_hash(config: Mapping[str, Any]) -> str:
 
 def load_resolved_config(
     config_path: str | os.PathLike[str] | None,
+    environment_path: str | os.PathLike[str] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
     temporary_overrides: Iterable[str] | None = None,
     validate_paths: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    yaml_config: dict[str, Any] = {}
-    source_path = None
+    config_layers: list[
+        tuple[str, dict[str, Any], list[dict[str, str]]]
+    ] = []
     if config_path:
-        source_path = str(Path(config_path).resolve())
-        yaml_config = _load_yaml_with_extends(Path(config_path))
-    resolved = deep_merge(SAFE_DEFAULTS, yaml_config)
-    resolved = deep_merge(resolved, cli_overrides or {})
+        config_layers = _load_yaml_layers(Path(config_path))
+    environment_layers: list[
+        tuple[str, dict[str, Any], list[dict[str, str]]]
+    ] = []
+    if environment_path:
+        environment_layers = _load_yaml_layers(Path(environment_path))
+
+    resolved = copy.deepcopy(SAFE_DEFAULTS)
+    field_sources: dict[str, dict[str, Any]] = {}
+    _record_sources(field_sources, SAFE_DEFAULTS, "schema_defaults")
+    migrations: list[dict[str, str]] = []
+
+    # Parent/base configuration is lower priority than the environment. The
+    # leaf experiment remains higher priority than the environment profile.
+    base_layers = config_layers[:-1] if config_layers else []
+    experiment_layers = config_layers[-1:] if config_layers else []
+    ordered_layers = base_layers + environment_layers + experiment_layers
+    for source, overlay, layer_migrations in ordered_layers:
+        resolved = deep_merge(resolved, overlay)
+        _record_sources(field_sources, overlay, source)
+        migrations.extend(layer_migrations)
+
+    cli_overlay = copy.deepcopy(dict(cli_overrides or {}))
+    resolved = deep_merge(resolved, cli_overlay)
+    _record_sources(field_sources, cli_overlay, "cli")
     parsed_temporary = parse_overrides(temporary_overrides)
     resolved = deep_merge(resolved, parsed_temporary)
+    _record_sources(field_sources, parsed_temporary, "explicit_override")
     validate_config(resolved, validate_paths=validate_paths)
     digest = config_hash(resolved)
+    sensitive_environment = {}
+    for logical_name, variable_name in resolved["sensitive_environment"].items():
+        sensitive_environment[logical_name] = {
+            "environment_variable": variable_name,
+            "present": bool(os.environ.get(str(variable_name))),
+            "value": "***" if os.environ.get(str(variable_name)) else None,
+            "source": "environment",
+        }
     provenance = {
         "schema_version": str(resolved.get("schema_version", "1.0")),
         "config_hash": digest,
+        "field_sources": field_sources,
+        "sensitive_environment": sensitive_environment,
+        "migrations": migrations,
+        "validation": {
+            "status": "passed",
+            "validate_paths": bool(validate_paths),
+            "unknown_fields_rejected": True,
+            "ratios_validated": True,
+            "cross_field_rules_validated": True,
+        },
         "sources": {
             "safe_defaults": True,
-            "yaml_config": source_path,
-            "cli_overrides": copy.deepcopy(dict(cli_overrides or {})),
+            "config_layers": [
+                source
+                for source, _, _ in config_layers
+            ],
+            "environment_layers": [
+                source
+                for source, _, _ in environment_layers
+            ],
+            "cli_overrides": cli_overlay,
             "temporary_overrides": list(temporary_overrides or []),
         },
     }
     return resolved, provenance
+
+
+def load_project_config(
+    config_path: str | os.PathLike[str] | None,
+    environment_path: str | os.PathLike[str] | None = None,
+    cli_overrides: Mapping[str, Any] | None = None,
+    temporary_overrides: Iterable[str] | None = None,
+    validate_paths: bool = False,
+) -> tuple[ProjectConfig, dict[str, Any]]:
+    """Load the single immutable runtime configuration used by entry points."""
+    resolved, provenance = load_resolved_config(
+        config_path,
+        environment_path=environment_path,
+        cli_overrides=cli_overrides,
+        temporary_overrides=temporary_overrides,
+        validate_paths=validate_paths,
+    )
+    return ProjectConfig(resolved), provenance

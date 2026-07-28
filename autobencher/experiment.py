@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import yaml
+
+from autobencher.config import ProjectConfig, thaw_config
 
 
 def utc_now() -> str:
@@ -55,7 +58,7 @@ def atomic_yaml(data: Any, path: str | Path) -> None:
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         yaml.safe_dump(
-            data,
+            thaw_config(data),
             handle,
             allow_unicode=True,
             sort_keys=False,
@@ -64,6 +67,41 @@ def atomic_yaml(data: Any, path: str | Path) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def atomic_text(text: str, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(str(text))
+        if not str(text).endswith("\n"):
+            handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def allocate_test_run_dir(output_root: str | Path) -> Path:
+    """Atomically allocate test_<max+1> beneath the configured output root."""
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    pattern = re.compile(r"^test_(\d+)$")
+    numbers = [
+        int(match.group(1))
+        for path in root.iterdir()
+        if path.is_dir()
+        for match in [pattern.fullmatch(path.name)]
+        if match
+    ]
+    candidate_number = max(numbers, default=0) + 1
+    while True:
+        candidate = root / f"test_{candidate_number}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            candidate_number += 1
 
 
 def file_sha256(path: str | Path) -> str:
@@ -283,7 +321,11 @@ class ResearchRun:
         project_root: str | Path,
         legacy_output_root: str | Path | None = None,
     ):
-        self.config = dict(config)
+        self.config = (
+            config
+            if isinstance(config, ProjectConfig)
+            else ProjectConfig(config)
+        )
         self.provenance = dict(provenance)
         self.run_id = run_id
         self.project_root = Path(project_root).resolve()
@@ -293,8 +335,9 @@ class ResearchRun:
             if legacy_output_root is not None
             else configured_root.resolve()
         )
-        self.run_dir = self.output_root / "runs" / run_id
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir = allocate_test_run_dir(self.output_root)
+        self.cycle_root = self.run_dir / "cycle"
+        self.cycle_root.mkdir(parents=True, exist_ok=True)
         log_dir = self.run_dir / "logs"
         self.logger = ExperimentLogger(run_id, log_dir, config)
         self.progress = ProgressManager(config)
@@ -311,12 +354,32 @@ class ResearchRun:
         }
 
     def initialize(self, cli_args: Mapping[str, Any]) -> None:
-        resolved_payload = {
-            **self.config,
-            "_resolution": self.provenance,
-        }
+        resolved_payload = thaw_config(self.config)
         atomic_json(resolved_payload, self.run_dir / "resolved_config.json")
         atomic_yaml(resolved_payload, self.run_dir / "resolved_config.yaml")
+        atomic_json(
+            {
+                "schema_version": self.provenance["schema_version"],
+                "config_hash": self.config_hash,
+                "sources": self.provenance.get("sources", {}),
+                "field_sources": self.provenance.get("field_sources", {}),
+                "sensitive_environment": self.provenance.get(
+                    "sensitive_environment",
+                    {},
+                ),
+                "migrations": self.provenance.get("migrations", []),
+            },
+            self.run_dir / "config_sources.json",
+        )
+        atomic_json(
+            {
+                "schema_version": self.provenance["schema_version"],
+                "config_hash": self.config_hash,
+                **self.provenance.get("validation", {}),
+            },
+            self.run_dir / "config_validation.json",
+        )
+        atomic_text(self.config_hash, self.run_dir / "config_hash.txt")
         environment = {**self.metadata(), **environment_snapshot()}
         atomic_json(environment, self.run_dir / "environment.json")
         atomic_json(
@@ -340,7 +403,7 @@ class ResearchRun:
         )
 
     def iteration_dir(self, cycle: int, iteration: int) -> Path:
-        path = self.run_dir / f"cycle_{cycle}" / f"iter_{iteration}"
+        path = self.cycle_root / f"cycle_{cycle}" / f"iter_{iteration}"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -365,7 +428,7 @@ class ResearchRun:
         payload: Any,
     ) -> Path:
         """Persist one metadata-enveloped artifact within a cycle section."""
-        target = self.run_dir / f"cycle_{cycle}" / section / f"{name}.json"
+        target = self.cycle_root / f"cycle_{cycle}" / section / f"{name}.json"
         atomic_json(
             {
                 **self.metadata(),

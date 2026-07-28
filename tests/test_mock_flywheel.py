@@ -6,7 +6,12 @@ from autobencher.coverage import coverage_metrics, generation_schedule
 from autobencher.dataset import build_training_dataset, write_alpaca_jsonl
 from autobencher.experiment import ResearchRun
 from autobencher.structured import answers_equivalent, parse_test_taker_output
-from math_autobencher import _upsert_history_iteration
+from math_autobencher import (
+    _failure_type,
+    _sanitize_error,
+    _sanitize_traceback,
+    _upsert_history_iteration,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +26,18 @@ def test_cycle_history_upsert_is_idempotent():
     _upsert_history_iteration(history, first, 1, 1)
     _upsert_history_iteration(history, replacement, 1, 1)
     assert history == [replacement]
+
+
+def test_empty_exception_message_remains_diagnostic():
+    try:
+        raise AssertionError()
+    except AssertionError as exc:
+        assert _sanitize_error(exc) == "AssertionError()"
+        assert "AssertionError" in _sanitize_traceback(exc)
+
+
+def test_keyboard_interrupt_has_explicit_failure_type():
+    assert _failure_type("evaluation", KeyboardInterrupt()) == "interrupted"
 
 
 def test_cpu_mock_research_pipeline_exports_all_core_artifacts(tmp_path):
@@ -83,7 +100,7 @@ def test_cpu_mock_research_pipeline_exports_all_core_artifacts(tmp_path):
         },
     )
     alpaca, manifest, rejected = build_training_dataset(evaluations, config)
-    training_dir = run.run_dir / "cycle_1" / "training"
+    training_dir = run.run_dir / "cycle" / "cycle_1" / "training"
     dataset_path = training_dir / "dataset.jsonl"
     write_alpaca_jsonl(alpaca, dataset_path)
     run.save_cycle_artifact(1, "training", "dataset_manifest", manifest)
@@ -92,6 +109,7 @@ def test_cpu_mock_research_pipeline_exports_all_core_artifacts(tmp_path):
     assert dataset_path.is_file()
     assert (
         run.run_dir
+        / "cycle"
         / "cycle_1"
         / "iter_1"
         / "evaluation_results.json"
