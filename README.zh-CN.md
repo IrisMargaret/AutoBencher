@@ -326,11 +326,22 @@ test_<N>/cycle/cycle_<N>/failure/failure_summary.json
 - 重算答案与候选 gold answer 通过确定性等价比较；
 - validator 返回的答案类型与题目答案类型一致。
 
+对于 `ordered_tuple` 方程组，系统不再信任 evaluator 自报的布尔值。SymPy 会直接从
+完全一致的原始 `question` 字符串解析方程并独立求解，然后把候选元组逐条代入每一个
+原始等式。审计记录每条原始方程、代入后的左值、右值、差值和通过状态；题干哈希用于
+证明独立求解与回代使用的是同一份原始题干。解析异常、超时、无解、多解和无穷多解均
+按验证失败处理。
+
 失败题目会在推理前被剔除，并由现有 quota repair 循环自动补题。每个通过或失败的
 结果都会写入 `*.subcat<N>.gold_answer_validation.json`；通过题目的正式记录还包含
 `gold_answer_validation` 审计对象。开关和重试参数统一由 YAML 中的
 `generation.require_gold_answer_validation`、`gold_validation_attempts`、
 `gold_validation_temperature` 和 `gold_validation_max_tokens` 管理。
+
+单个细分题型达到 `generation.max_quota_repair_rounds` 后仍没有合格补题时，不再终止
+整个 Cycle。系统记录该细分题型缺口并使用本轮其余已验证题目继续评测，覆盖率仍按多轮
+累计计算。只有合格题目少于 `generation.minimum_verified_questions`，或显式关闭
+`generation.allow_partial_question_budget` 时，部分迭代才会失败。
 
 ## JSON 与答案规范
 
@@ -361,6 +372,10 @@ test_<N>/logs/events.jsonl
 
 每个阶段只创建一个动态进度条，完成后关闭，不会为每道题反复创建永久进度条。
 第三方库进度条默认关闭。
+
+`experiment.clean_cycle_cache=true` 时，每轮迭代都在 `finally` 中清理冗余分片、
+attempt 日志、临时推理文件以及空或损坏 JSON。因此生成、推理或评测异常也不会跳过
+清理；正式推理结果和 gold answer 校验审计会保留。
 
 失败记录包含：
 

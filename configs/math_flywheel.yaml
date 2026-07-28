@@ -175,10 +175,14 @@ generation_mix:
 
 generation:
   max_questions_per_prompt: 50
+  max_quota_repair_rounds: 3
+  allow_partial_question_budget: true
+  minimum_verified_questions: 1
   require_gold_answer_validation: true
   gold_validation_attempts: 2
   gold_validation_temperature: 0.0
   gold_validation_max_tokens: 4096
+  gold_validation_timeout_seconds: 10
 
 hard_pool:
   enabled: true

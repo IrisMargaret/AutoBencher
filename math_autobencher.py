@@ -1,7 +1,10 @@
 import glob
 import gc
+import hashlib
 import random
+import signal
 import sys
+import threading
 import contextlib
 import traceback
 from pathlib import Path
@@ -495,6 +498,484 @@ Train-eligible historical hard-sample context:
                 outfile_prefix, "question_plan_with_aim", attempt, response
             )
     raise RuntimeError("Failed to generate a valid math plan after 3 attempts") from last_error
+# [ADDED] Bound deterministic SymPy work on Unix workers. Windows lacks
+# SIGALRM, so the same parser limits inputs and performs an elapsed-time check.
+@contextlib.contextmanager
+def _sympy_validation_timeout(seconds):
+    seconds = float(seconds)
+    can_interrupt = (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if not can_interrupt:
+        yield
+        return
+
+    def _raise_timeout(signum, frame):
+        del signum, frame
+        raise TimeoutError("SymPy gold-answer validation timed out")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _split_top_level_equations(text):
+    """Split comma/semicolon/newline-delimited equations outside brackets."""
+    parts = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(text):
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and character in ",;\n":
+            part = text[start:index].strip()
+            if part:
+                parts.append(part)
+            start = index + 1
+    final = text[start:].strip()
+    if final:
+        parts.append(final)
+    return parts
+
+
+def _extract_ordered_tuple_system(question_text):
+    """Parse variables and equations from the exact original question text."""
+    import sympy
+    from sympy.parsing.sympy_parser import (
+        convert_xor,
+        implicit_multiplication_application,
+        parse_expr,
+        standard_transformations,
+    )
+
+    original_question = str(question_text)
+    if not original_question.strip():
+        raise ValueError("The original question is empty")
+    if len(original_question) > 16000:
+        raise ValueError("The original question exceeds the parser limit")
+
+    equation_text = original_question
+    if ":" in original_question:
+        possible_tail = original_question.rsplit(":", 1)[1]
+        if "=" in possible_tail:
+            equation_text = possible_tail
+    equation_text = re.sub(
+        r"\s+\band\b\s+(?=[A-Za-z]\w*\s*[+\-*/^=])",
+        ", ",
+        equation_text,
+        flags=re.IGNORECASE,
+    )
+    raw_equations = [
+        part.rstrip().rstrip(".").strip()
+        for part in _split_top_level_equations(equation_text)
+        if "=" in part
+    ]
+    if not raw_equations:
+        raise ValueError("No equations were found in the original question")
+    if len(raw_equations) > 20:
+        raise ValueError("The equation count exceeds the parser limit")
+
+    variable_match = re.search(
+        r"(?:for|variables?)\s*\(([^()]*)\)",
+        original_question,
+        flags=re.IGNORECASE,
+    )
+    if variable_match:
+        variable_names = re.findall(
+            r"[A-Za-z]\w*",
+            variable_match.group(1),
+        )
+    else:
+        identifiers = []
+        for raw_equation in raw_equations:
+            identifiers.extend(re.findall(r"[A-Za-z]\w*", raw_equation))
+        excluded = {
+            "sin",
+            "cos",
+            "tan",
+            "sqrt",
+            "exp",
+            "log",
+            "pi",
+            "e",
+        }
+        variable_names = sorted(
+            {
+                identifier
+                for identifier in identifiers
+                if identifier.lower() not in excluded
+            }
+        )
+    variable_names = list(dict.fromkeys(variable_names))
+    if not variable_names or len(variable_names) > 10:
+        raise ValueError("Unable to determine a bounded variable list")
+
+    symbols = sympy.symbols(" ".join(variable_names))
+    if len(variable_names) == 1:
+        symbols = (symbols,)
+    else:
+        symbols = tuple(symbols)
+    local_dict = dict(zip(variable_names, symbols))
+    local_dict.update(
+        {
+            "sin": sympy.sin,
+            "cos": sympy.cos,
+            "tan": sympy.tan,
+            "sqrt": sympy.sqrt,
+            "exp": sympy.exp,
+            "log": sympy.log,
+            "pi": sympy.pi,
+            "e": sympy.E,
+        }
+    )
+    allowed_names = set(local_dict)
+    transformations = standard_transformations + (
+        implicit_multiplication_application,
+        convert_xor,
+    )
+    equations = []
+    equation_sources = []
+    for raw_equation in raw_equations:
+        normalized = re.sub(
+            r"^\s*(?:eq(?:uation)?\s*\d+|[\[(]?\d+[\])]?)[.:]\s*",
+            "",
+            raw_equation,
+            flags=re.IGNORECASE,
+        )
+        if normalized.count("=") != 1:
+            raise ValueError(
+                f"Expected one equality operator: {raw_equation}"
+            )
+        left_text, right_text = (
+            piece.strip() for piece in normalized.split("=", 1)
+        )
+        if not left_text or not right_text:
+            raise ValueError(f"Incomplete equation: {raw_equation}")
+        for expression_text in (left_text, right_text):
+            if "__" in expression_text or not re.fullmatch(
+                r"[A-Za-z0-9_+\-*/^().\s]+",
+                expression_text,
+            ):
+                raise ValueError(
+                    f"Unsupported equation syntax: {raw_equation}"
+                )
+            identifiers = set(
+                re.findall(r"[A-Za-z]\w*", expression_text)
+            )
+            unknown = identifiers - allowed_names
+            if unknown:
+                raise ValueError(
+                    "Unknown identifiers in equation: "
+                    + ", ".join(sorted(unknown))
+                )
+        left = parse_expr(
+            left_text,
+            local_dict=local_dict,
+            transformations=transformations,
+            evaluate=True,
+        )
+        right = parse_expr(
+            right_text,
+            local_dict=local_dict,
+            transformations=transformations,
+            evaluate=True,
+        )
+        equations.append(sympy.Eq(left, right, evaluate=False))
+        equation_sources.append(f"{left_text} = {right_text}")
+    return {
+        "original_question": original_question,
+        "variables": symbols,
+        "variable_names": variable_names,
+        "equations": equations,
+        "equation_sources": equation_sources,
+        "local_dict": local_dict,
+    }
+
+
+def _parse_ordered_tuple_candidate(candidate, system):
+    """Parse a proposed tuple without using it in the independent solve."""
+    import sympy
+
+    text = str(candidate).strip()
+    text = text.replace(r"\left", "").replace(r"\right", "")
+    text = text.strip("$").strip()
+    if not (
+        len(text) >= 2
+        and text[0] in "(["
+        and text[-1] in ")]"
+    ):
+        raise ValueError("The proposed answer is not an ordered tuple")
+    components = _split_top_level_equations(text[1:-1])
+    if len(components) != len(system["variables"]):
+        raise ValueError(
+            "The tuple length does not match the system variable count"
+        )
+    values = []
+    for component in components:
+        value_text = re.sub(
+            r"^[A-Za-z]\w*\s*=\s*",
+            "",
+            component.strip(),
+        )
+        if "__" in value_text or not re.fullmatch(
+            r"[A-Za-z0-9_+\-*/^().\s]+",
+            value_text,
+        ):
+            raise ValueError("Unsupported tuple component syntax")
+        value = sympy.sympify(
+            value_text.replace("^", "**"),
+            locals=system["local_dict"],
+        )
+        if value.free_symbols:
+            raise ValueError("Tuple components must be fully specified")
+        values.append(sympy.simplify(value))
+    return tuple(values)
+
+
+def _sympy_values_equal(left, right, tolerance):
+    import sympy
+
+    difference = sympy.simplify(left - right)
+    if difference == 0 or difference.is_zero is True:
+        return True
+    if difference.free_symbols:
+        return False
+    try:
+        return abs(float(sympy.N(difference))) <= float(tolerance)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _validate_ordered_tuple_system(
+    question_text,
+    proposed_gold_answer,
+    research_config,
+):
+    """Independently solve and then substitute into the same parsed system."""
+    # [ADDED] Avoid an optional binary gmpy2 backend from making validation
+    # unavailable when the host package is ABI-incompatible.
+    os.environ.setdefault("SYMPY_GROUND_TYPES", "python")
+    os.environ.setdefault("MPMATH_NOGMPY", "1")
+    import sympy
+    from sympy.solvers.solveset import NonlinearError
+
+    original_question = str(question_text)
+    solve_question = original_question
+    substitution_question = original_question
+    if not (
+        solve_question == substitution_question == original_question
+    ):
+        raise AssertionError(
+            "Solve and substitution question sources must be identical"
+        )
+    timeout_seconds = float(
+        research_config["generation"][
+            "gold_validation_timeout_seconds"
+        ]
+    )
+    tolerance = float(
+        research_config["answer_normalization"][
+            "absolute_tolerance"
+        ]
+    )
+    started = time.monotonic()
+    question_hash = hashlib.sha256(
+        original_question.encode("utf-8")
+    ).hexdigest()
+    base_audit = {
+        "status": "failed",
+        "recomputed_answer": "",
+        "answer_type": "ordered_tuple",
+        "answer_type_consistent": True,
+        "verification_passed": False,
+        "substitution_passed": False,
+        "verification_method": (
+            "SymPy independent solve and per-equation substitution"
+        ),
+        "failure_reason": None,
+        "answer_equivalent": False,
+        "question_source_consistent": True,
+        "source_question_sha256": question_hash,
+        "solve_question_sha256": question_hash,
+        "substitution_question_sha256": question_hash,
+        "solver_status": "not_started",
+        "substitution_details": [],
+    }
+    try:
+        with _sympy_validation_timeout(timeout_seconds):
+            system = _extract_ordered_tuple_system(original_question)
+            expressions = [
+                sympy.simplify(equation.lhs - equation.rhs)
+                for equation in system["equations"]
+            ]
+            try:
+                matrix_a, matrix_b = sympy.linear_eq_to_matrix(
+                    expressions,
+                    system["variables"],
+                )
+                solution_set = sympy.linsolve(
+                    (matrix_a, matrix_b),
+                    system["variables"],
+                )
+                solver_name = "linsolve"
+            except NonlinearError:
+                solution_set = sympy.nonlinsolve(
+                    expressions,
+                    system["variables"],
+                )
+                solver_name = "nonlinsolve"
+
+            if solution_set is sympy.EmptySet or solution_set == sympy.EmptySet:
+                base_audit["solver_status"] = "no_solution"
+                base_audit["failure_reason"] = (
+                    "The original system has no solution."
+                )
+                return base_audit
+            solutions = list(solution_set)
+            if len(solutions) != 1:
+                base_audit["solver_status"] = (
+                    "no_solution" if not solutions else "multiple_solutions"
+                )
+                base_audit["failure_reason"] = (
+                    "The original system does not have exactly one solution."
+                )
+                return base_audit
+            independent_solution = tuple(
+                sympy.simplify(value) for value in solutions[0]
+            )
+            if any(
+                value.free_symbols for value in independent_solution
+            ):
+                base_audit["solver_status"] = "infinite_solutions"
+                base_audit["failure_reason"] = (
+                    "The original system has infinitely many solutions."
+                )
+                return base_audit
+            base_audit["solver_status"] = f"unique_{solver_name}"
+            base_audit["recomputed_answer"] = (
+                "("
+                + ", ".join(
+                    sympy.sstr(value)
+                    for value in independent_solution
+                )
+                + ")"
+            )
+
+            candidate = _parse_ordered_tuple_candidate(
+                proposed_gold_answer,
+                system,
+            )
+            solution_match = all(
+                _sympy_values_equal(candidate_value, solution_value, tolerance)
+                for candidate_value, solution_value in zip(
+                    candidate,
+                    independent_solution,
+                )
+            )
+            substitutions = dict(zip(system["variables"], candidate))
+            substitution_details = []
+            for index, (source, equation) in enumerate(
+                zip(
+                    system["equation_sources"],
+                    system["equations"],
+                ),
+                start=1,
+            ):
+                left_value = sympy.simplify(
+                    equation.lhs.subs(substitutions)
+                )
+                right_value = sympy.simplify(
+                    equation.rhs.subs(substitutions)
+                )
+                difference = sympy.simplify(left_value - right_value)
+                passed = _sympy_values_equal(
+                    left_value,
+                    right_value,
+                    tolerance,
+                )
+                detail = {
+                    "equation_index": index,
+                    "original_equation": source,
+                    "substituted_left": sympy.sstr(left_value),
+                    "substituted_right": sympy.sstr(right_value),
+                    "difference": sympy.sstr(difference),
+                    "passed": passed,
+                }
+                substitution_details.append(detail)
+                print(
+                    "[GoldValidation] "
+                    f"equation={index} source={source!r} "
+                    f"left={detail['substituted_left']} "
+                    f"right={detail['substituted_right']} "
+                    f"difference={detail['difference']} "
+                    f"passed={str(passed).lower()}"
+                )
+            substitution_passed = bool(substitution_details) and all(
+                detail["passed"] for detail in substitution_details
+            )
+            verification_passed = (
+                solution_match and substitution_passed
+            )
+            base_audit.update(
+                {
+                    "status": (
+                        "passed" if verification_passed else "failed"
+                    ),
+                    "verification_passed": verification_passed,
+                    "substitution_passed": substitution_passed,
+                    "answer_equivalent": solution_match,
+                    "failure_reason": (
+                        None
+                        if verification_passed
+                        else (
+                            "The proposed answer differs from the "
+                            "independent solution."
+                            if not solution_match
+                            else (
+                                "The proposed answer fails at least one "
+                                "original equation."
+                            )
+                        )
+                    ),
+                    "substitution_details": substitution_details,
+                }
+            )
+    except TimeoutError as exc:
+        base_audit["solver_status"] = "timeout"
+        base_audit["failure_reason"] = str(exc)
+    except Exception as exc:
+        # [ADDED] Fail closed for every parser/solver exception. Process-level
+        # interrupts still propagate because they do not inherit Exception.
+        base_audit["solver_status"] = "parse_or_solve_error"
+        base_audit["failure_reason"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+    elapsed = time.monotonic() - started
+    base_audit["elapsed_seconds"] = round(elapsed, 6)
+    if elapsed > timeout_seconds and base_audit["status"] == "passed":
+        base_audit.update(
+            {
+                "status": "failed",
+                "verification_passed": False,
+                "substitution_passed": False,
+                "solver_status": "timeout",
+                "failure_reason": (
+                    "SymPy gold-answer validation exceeded the timeout."
+                ),
+            }
+        )
+    return base_audit
+
+
 # [ADDED] A separate evaluator pass must verify every proposed gold answer
 # before the question can enter test-taker inference.
 def _validate_generated_gold_answers(
@@ -601,53 +1082,78 @@ Problems:
             audit_records = []
             for index, question in enumerate(questions):
                 validation = by_id[index]
-                recomputed_answer = validation.get("recomputed_answer", "")
-                verification_passed = validation.get("verification_passed")
-                substitution_passed = validation.get("substitution_passed")
-                if not isinstance(verification_passed, bool):
-                    raise ValueError(
-                        "verification_passed must be a JSON boolean"
+                if (
+                    question["answer_type"] == "ordered_tuple"
+                    and str(question["question"]).count("=") >= 1
+                ):
+                    # [MODIFIED] Never trust evaluator self-reported booleans
+                    # for tuple-valued systems. Both layers use one parsed copy
+                    # of the exact original question string.
+                    audit = _validate_ordered_tuple_system(
+                        question["question"],
+                        question["canonical_answer"],
+                        research_config,
                     )
-                if not isinstance(substitution_passed, bool):
-                    raise ValueError(
-                        "substitution_passed must be a JSON boolean"
+                else:
+                    recomputed_answer = validation.get(
+                        "recomputed_answer",
+                        "",
                     )
-                equivalence = answers_equivalent(
-                    question["canonical_answer"],
-                    recomputed_answer,
-                    question["answer_type"],
-                    research_config,
-                )
-                validator_answer_type = normalize_answer_type(
-                    validation.get(
-                        "answer_type",
+                    verification_passed = validation.get(
+                        "verification_passed"
+                    )
+                    substitution_passed = validation.get(
+                        "substitution_passed"
+                    )
+                    if not isinstance(verification_passed, bool):
+                        raise ValueError(
+                            "verification_passed must be a JSON boolean"
+                        )
+                    if not isinstance(substitution_passed, bool):
+                        raise ValueError(
+                            "substitution_passed must be a JSON boolean"
+                        )
+                    equivalence = answers_equivalent(
+                        question["canonical_answer"],
+                        recomputed_answer,
                         question["answer_type"],
-                    ),
-                    recomputed_answer,
-                )
-                answer_type_consistent = (
-                    validator_answer_type == question["answer_type"]
-                )
-                audit = {
-                    "status": (
-                        "passed"
-                        if verification_passed
-                        and substitution_passed
-                        and equivalence["equivalent"]
-                        and answer_type_consistent
-                        else "failed"
-                    ),
-                    "recomputed_answer": recomputed_answer,
-                    "answer_type": validator_answer_type,
-                    "answer_type_consistent": answer_type_consistent,
-                    "verification_passed": verification_passed,
-                    "substitution_passed": substitution_passed,
-                    "verification_method": str(
-                        validation.get("verification_method", "")
-                    ).strip(),
-                    "failure_reason": validation.get("failure_reason"),
-                    "answer_equivalent": bool(equivalence["equivalent"]),
-                }
+                        research_config,
+                    )
+                    validator_answer_type = normalize_answer_type(
+                        validation.get(
+                            "answer_type",
+                            question["answer_type"],
+                        ),
+                        recomputed_answer,
+                    )
+                    answer_type_consistent = (
+                        validator_answer_type == question["answer_type"]
+                    )
+                    audit = {
+                        "status": (
+                            "passed"
+                            if verification_passed
+                            and substitution_passed
+                            and equivalence["equivalent"]
+                            and answer_type_consistent
+                            else "failed"
+                        ),
+                        "recomputed_answer": recomputed_answer,
+                        "answer_type": validator_answer_type,
+                        "answer_type_consistent": answer_type_consistent,
+                        "verification_passed": verification_passed,
+                        "substitution_passed": substitution_passed,
+                        "verification_method": str(
+                            validation.get(
+                                "verification_method",
+                                "",
+                            )
+                        ).strip(),
+                        "failure_reason": validation.get("failure_reason"),
+                        "answer_equivalent": bool(
+                            equivalence["equivalent"]
+                        ),
+                    }
                 question["gold_answer_validation"] = audit
                 audit_records.append(
                     {
@@ -931,6 +1437,34 @@ def _ask_question_v3(
     question_json_full = []
     normalized_question_texts = set()
     hard_pool = HardSamplePool(hard_pool_file) if hard_pool_file else None
+    repair_limit = (
+        int(
+            research_config["generation"][
+                "max_quota_repair_rounds"
+            ]
+        )
+        if research_config
+        else 3
+    )
+    allow_partial_budget = (
+        bool(
+            research_config["generation"][
+                "allow_partial_question_budget"
+            ]
+        )
+        if research_config
+        else True
+    )
+    minimum_verified_questions = (
+        int(
+            research_config["generation"][
+                "minimum_verified_questions"
+            ]
+        )
+        if research_config
+        else 1
+    )
+    subcategory_shortfalls = []
     generation_total = (
         int(generation_plan["question_budget"])
         if generation_plan is not None
@@ -995,12 +1529,11 @@ def _ask_question_v3(
             )
 
             repair_round = 0
-            while len(question_json) < target_count:
+            while (
+                len(question_json) < target_count
+                and repair_round < repair_limit
+            ):
                 repair_round += 1
-                if repair_round > 3:
-                    raise RuntimeError(
-                        f"Generation quota repair failed for {plan_line['sub_category']}"
-                    )
                 question_json_new = _generate_question_from_description(
                     plan_line,
                     agent_lm,
@@ -1023,14 +1556,73 @@ def _ask_question_v3(
                 question_json.extend(unique_new)
             accepted = question_json[:target_count]
             question_json_full.extend(accepted)
+            verified_count = len(accepted)
+            shortfall = max(0, target_count - verified_count)
+            plan_line["verified_question_count"] = verified_count
+            plan_line["question_shortfall"] = shortfall
+            plan_line["quota_repair_rounds_used"] = repair_round
+            if shortfall:
+                subcategory_shortfalls.append(
+                    {
+                        "category": plan_line["category"],
+                        "sub_category": plan_line["sub_category"],
+                        "requested": target_count,
+                        "verified": verified_count,
+                        "shortfall": shortfall,
+                        "repair_rounds": repair_round,
+                        "reason": (
+                            "insufficient_unique_gold_verified_questions"
+                        ),
+                    }
+                )
+                print(
+                    "[Generate] quota_repair_exhausted "
+                    f"sub_category={plan_line['sub_category']!r} "
+                    f"verified={verified_count}/{target_count} "
+                    f"repair_rounds={repair_round}"
+                )
             if progress is not None:
                 progress.update(len(accepted))
+                progress.set_postfix(
+                    verified=len(question_json_full),
+                    shortfall=sum(
+                        item["shortfall"]
+                        for item in subcategory_shortfalls
+                    ),
+                )
     if generation_plan is not None:
         expected = int(generation_plan["question_budget"])
-        if len(question_json_full) != expected:
+        verified_total = len(question_json_full)
+        generation_result = {
+            "requested_questions": expected,
+            "verified_questions": verified_total,
+            "question_shortfall": max(0, expected - verified_total),
+            "partial_iteration": verified_total != expected,
+            "subcategory_shortfalls": subcategory_shortfalls,
+        }
+        generation_plan["generation_result"] = generation_result
+        dump_standard_json(generation_result, (
+            f"{outfile_prefix}.generation_quota_summary.json"
+        ))
+        if verified_total < minimum_verified_questions:
             raise RuntimeError(
-                f"Generated question count mismatch: {len(question_json_full)}/{expected}"
+                "No usable verified question set was generated: "
+                f"{verified_total}/{minimum_verified_questions}"
             )
+        if verified_total != expected and not allow_partial_budget:
+            raise RuntimeError(
+                "Generated question count mismatch: "
+                f"{verified_total}/{expected}"
+            )
+        if verified_total != expected:
+            print(
+                "[Generate] partial_verified_iteration "
+                f"verified={verified_total}/{expected} "
+                "coverage_target=cumulative"
+            )
+        # [MODIFIED] Persist the realized verified counts alongside the
+        # original plan without requiring all subcategories in one iteration.
+        dump_standard_json(plan_json, plan_outfile)
         for index, question in enumerate(question_json_full, start=1):
             question["id"] = index
             question["question_id"] = (
@@ -1526,6 +2118,57 @@ def _clean_legacy_redundant_files(paths):
     return removed
 
 
+# [ADDED] Cleanup is idempotent and is invoked from an iteration finally block,
+# so generation, inference, or evaluation failures cannot leave attempt caches.
+def _cleanup_iteration_cache(args, cycle_number, iter_number):
+    if not bool(getattr(args, "clean_cycle_cache", True)):
+        return []
+    cycle_layer = (
+        cycle_number
+        if getattr(args, "mode", "eval") == "data_flywheel"
+        else None
+    )
+    paths = _build_iteration_paths(
+        args.outfile_prefix1,
+        iter_number,
+        cycle_number=cycle_layer,
+    )
+    try:
+        removed = clean_redundant_files(paths["iteration_dir"])
+        if getattr(args, "mode", "eval") == "eval":
+            removed.extend(_clean_legacy_redundant_files(paths))
+    except OSError as exc:
+        research_run = getattr(args, "research_run", None)
+        if research_run:
+            research_run.logger.event(
+                "WARNING",
+                "Cleanup",
+                "iteration_cache_cleanup_failed",
+                f"{type(exc).__name__}: {exc}",
+                cycle=cycle_number,
+                iteration=iter_number,
+            )
+        else:
+            print(
+                "[Cleanup] iteration_cache_cleanup_failed "
+                f"error={type(exc).__name__}: {exc}"
+            )
+        return []
+    research_run = getattr(args, "research_run", None)
+    if research_run:
+        research_run.logger.event(
+            "INFO",
+            "Cleanup",
+            "iteration_cache_cleaned",
+            f"removed={len(removed)}",
+            cycle=cycle_number,
+            iteration=iter_number,
+        )
+    elif removed:
+        print(f"[Cleanup] removed_redundant_files={len(removed)}")
+    return removed
+
+
 def _relative_json_path(path, output_root):
     return os.path.relpath(path, output_root).replace("\\", "/")
 
@@ -1954,11 +2597,32 @@ def _run_math_iteration(
                 research_config=research_config,
             )
             if research_run:
+                generation_result = (
+                    generation_plan.get("generation_result", {})
+                    if generation_plan
+                    else {}
+                )
+                if generation_result.get("partial_iteration"):
+                    research_run.logger.event(
+                        "WARNING",
+                        "Generate",
+                        "verified_question_shortfall",
+                        (
+                            f"verified={len(json_category)}/"
+                            f"{generation_result.get('requested_questions')}"
+                        ),
+                        cycle=cycle_number,
+                        iteration=iter_number,
+                        metrics=generation_result,
+                    )
                 research_run.logger.event(
                     "INFO",
                     "Generate",
                     "stage_completed",
-                    f"completed={len(json_category)}",
+                    (
+                        f"completed={len(json_category)} "
+                        "gold_verified=true"
+                    ),
                     cycle=cycle_number,
                     iteration=iter_number,
                 )
@@ -2189,13 +2853,6 @@ def _run_math_iteration(
             iteration=iter_number,
             metrics=compare_summary,
         )
-    if args.clean_cycle_cache:
-        removed = clean_redundant_files(paths["iteration_dir"])
-        if args.mode == "eval":
-            removed.extend(_clean_legacy_redundant_files(paths))
-        if removed:
-            print(f"[MathFlywheel] removed_redundant_files={len(removed)}")
-
     cumulative_records = [
         record
         for iteration_records in history_dict
@@ -2321,16 +2978,25 @@ def _run_autobencher(args, agent_info, evaluator_info):
             stage = "evaluation"
             last_iteration = None
             for iter_number in range(1, args.num_iters + 1):
-                last_iteration = _run_math_iteration(
-                    args,
-                    current_test_taker_model,
-                    test_taker_info,
-                    agent_info,
-                    evaluator_info,
-                    history_dict,
-                    cycle_number,
-                    iter_number,
-                )
+                try:
+                    last_iteration = _run_math_iteration(
+                        args,
+                        current_test_taker_model,
+                        test_taker_info,
+                        agent_info,
+                        evaluator_info,
+                        history_dict,
+                        cycle_number,
+                        iter_number,
+                    )
+                finally:
+                    # [ADDED] Always clean the just-finished iteration,
+                    # including partial generation and exception paths.
+                    _cleanup_iteration_cache(
+                        args,
+                        cycle_number,
+                        iter_number,
+                    )
                 cycle_entry["iterations_completed"] = iter_number
                 cycle_entry["last_global_accuracy"] = last_iteration[
                     "global_accuracy"

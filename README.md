@@ -632,6 +632,12 @@ runs are never overwritten. Every artifact produced by that invocation stays
 inside the allocated test directory. All `cycle_<N>` directories are grouped
 under its `cycle/` directory.
 
+When `experiment.clean_cycle_cache` is enabled, redundant fragments, malformed
+or empty JSON, attempt logs, and temporary inference files are cleaned in an
+iteration-level `finally` block. Cleanup therefore runs after every iteration,
+including generation, inference, and evaluation failure paths. Gold-validation
+audit files and core iteration outputs are preserved.
+
 Global compatibility files remain available inside the active `test_<N>` root:
 `hard_pool.json`, `meta_summary.json`, and `cycle_record.json`. Iteration
 compatibility files retain `test_taker_inference.json`,
@@ -734,12 +740,28 @@ A question enters test-taker inference only when all of the following hold:
 - the recomputed answer is deterministically equivalent to the proposed gold;
 - the validator answer type matches the generated-question answer type.
 
+For `ordered_tuple` systems of equations, evaluator self-reported validation
+flags are never trusted. SymPy parses the exact original `question` string,
+solves the system independently, and then substitutes the proposed tuple into
+every parsed equality. The audit records the original equation, substituted
+left value, substituted right value, difference, and pass/fail result for each
+equation. Source hashes prove that independent solving and substitution used
+the same original question. Parse failures, timeouts, no-solution systems,
+non-unique systems, and underdetermined systems fail closed.
+
 Rejected questions are removed before inference and the existing quota-repair
 loop generates replacements. Every accepted or rejected check is recorded in
 `*.subcat<N>.gold_answer_validation.json`; accepted question records also carry
 the `gold_answer_validation` object. This behavior is controlled by
 `generation.require_gold_answer_validation` and the related validation retry,
 temperature, and token settings in YAML.
+
+If one subcategory still has no verified replacement after
+`generation.max_quota_repair_rounds`, AutoBencher records the shortfall and
+continues with the verified questions from that iteration. Coverage remains a
+cumulative multi-iteration target. A partial iteration fails only when fewer
+than `generation.minimum_verified_questions` survive, or when
+`generation.allow_partial_question_budget` is disabled.
 
 ## Test-taker isolation and evaluation
 

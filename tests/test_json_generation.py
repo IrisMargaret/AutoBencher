@@ -261,6 +261,177 @@ class GoldAnswerValidationTests(unittest.TestCase):
             self.assertEqual(generate.call_count, 2)
             self.assertEqual(len(accepted), 1)
 
+    def test_wrong_tuple_system_gold_cannot_be_model_approved(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        question_text = (
+            "Solve the following system of equations for (x, y, z): "
+            "x + 2y - z = 5, 2x - y + 3z = 4, "
+            "-x + 3y + 2z = 7."
+        )
+        question = {
+            "question_id": "q_1",
+            "question": question_text,
+            "answer_type": "ordered_tuple",
+            "canonical_answer": "(2, 1, -1)",
+            "unit": None,
+            "tolerance": None,
+        }
+        # Simulate the exact faulty evaluator response: every model-reported
+        # field claims success and simply repeats the proposed answer.
+        claimed_pass = [
+            {
+                "validation_id": 0,
+                "recomputed_answer": "(2, 1, -1)",
+                "answer_type": "ordered_tuple",
+                "verification_passed": True,
+                "substitution_passed": True,
+                "verification_method": (
+                    "independent recomputation and substitution"
+                ),
+                "failure_reason": None,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration.subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                return_value=self._result(claimed_pass),
+            ):
+                accepted = (
+                    math_autobencher._validate_generated_gold_answers(
+                        [question],
+                        "model",
+                        None,
+                        object(),
+                        config,
+                        prefix,
+                    )
+                )
+
+            self.assertEqual(accepted, [])
+            audits = json.loads(
+                Path(
+                    f"{prefix}.gold_answer_validation.json"
+                ).read_text(encoding="utf-8")
+            )
+            validation = audits[0]["validation"]
+            self.assertFalse(validation["verification_passed"])
+            self.assertFalse(validation["substitution_passed"])
+            self.assertEqual(
+                validation["recomputed_answer"],
+                "(8/5, 11/5, 1)",
+            )
+            self.assertEqual(
+                [
+                    item["difference"]
+                    for item in validation["substitution_details"]
+                ],
+                ["0", "-4", "-8"],
+            )
+            self.assertEqual(
+                validation["source_question_sha256"],
+                validation["solve_question_sha256"],
+            )
+            self.assertEqual(
+                validation["source_question_sha256"],
+                validation["substitution_question_sha256"],
+            )
+
+
+class GenerationQuotaRepairTests(unittest.TestCase):
+    @staticmethod
+    def _verified_question():
+        return {
+            "id": "q2",
+            "question_id": "q2",
+            "category": "Arithmetic",
+            "subcategory": "Integer Operations",
+            "sub_category": "Integer Operations",
+            "difficulty": 2,
+            "question": "What is 1 + 1?",
+            "answer_type": "integer",
+            "canonical_answer": "2",
+            "display_answer": "2",
+            "answer": "2",
+            "gold_answer": "2",
+            "unit": None,
+            "tolerance": None,
+            "order_sensitive": False,
+            "generation_source": "coverage_deficit",
+            "reference_hard_sample_ids": [],
+            "target_error_type": None,
+            "generation_strategy": "quota_repair",
+            "gold_answer_validation": {
+                "status": "passed",
+                "verification_passed": True,
+                "substitution_passed": True,
+            },
+        }
+
+    def test_one_subcategory_shortfall_does_not_fail_iteration(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        plan = {
+            "question_budget": 2,
+            "cycle": 1,
+            "global_iteration": 1,
+            "allocations": [
+                {
+                    "category": "Algebra",
+                    "sub_category": "Polynomials and Inequalities",
+                    "question_count": 1,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 4,
+                },
+                {
+                    "category": "Arithmetic",
+                    "sub_category": "Integer Operations",
+                    "question_count": 1,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 2,
+                },
+            ],
+        }
+
+        def generate(description, *args, **kwargs):
+            del args, kwargs
+            if description["sub_category"] == (
+                "Polynomials and Inequalities"
+            ):
+                return [[]]
+            return [[self._verified_question()]]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration"))
+            with patch.object(
+                math_autobencher,
+                "_generate_question_from_description",
+                side_effect=generate,
+            ) as generator:
+                questions, _ = math_autobencher._ask_question_v3(
+                    ("model", None, object()),
+                    [],
+                    1,
+                    prefix,
+                    generation_plan=plan,
+                    research_config=config,
+                )
+            self.assertEqual(len(questions), 1)
+            self.assertEqual(generator.call_count, 5)
+            self.assertTrue(
+                plan["generation_result"]["partial_iteration"]
+            )
+            self.assertEqual(
+                plan["generation_result"]["question_shortfall"],
+                1,
+            )
+
 
 class InferenceResumeTests(unittest.TestCase):
     @staticmethod
@@ -409,6 +580,44 @@ class MathJsonGovernanceTests(unittest.TestCase):
             self.assertEqual(len(removed), 3)
             self.assertTrue(core.exists())
             self.assertEqual(list(temp_log.iterdir()), [])
+
+    def test_iteration_cleanup_helper_removes_failed_attempt_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = type(
+                "Args",
+                (),
+                {
+                    "clean_cycle_cache": True,
+                    "mode": "data_flywheel",
+                    "outfile_prefix1": str(Path(temp_dir, "run.")),
+                    "research_run": None,
+                },
+            )()
+            paths = math_autobencher._build_iteration_paths(
+                args.outfile_prefix1,
+                1,
+                cycle_number=1,
+            )
+            attempt = Path(
+                paths["temp_log_dir"],
+                "generation.attempt1.txt",
+            )
+            attempt.write_text("invalid response", encoding="utf-8")
+            audit = Path(
+                paths["iteration_dir"],
+                "run.gold_answer_validation.json",
+            )
+            dump_standard_json([{"status": "failed"}], audit)
+
+            removed = math_autobencher._cleanup_iteration_cache(
+                args,
+                1,
+                1,
+            )
+
+            self.assertIn(str(attempt), removed)
+            self.assertFalse(attempt.exists())
+            self.assertTrue(audit.exists())
 
 
 if __name__ == "__main__":

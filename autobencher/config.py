@@ -263,10 +263,14 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "generation": {
         "max_questions_per_prompt": 50,
+        "max_quota_repair_rounds": 3,
+        "allow_partial_question_budget": True,
+        "minimum_verified_questions": 1,
         "require_gold_answer_validation": True,
         "gold_validation_attempts": 2,
         "gold_validation_temperature": 0.0,
         "gold_validation_max_tokens": 4096,
+        "gold_validation_timeout_seconds": 10,
     },
     "hard_pool": {
         "enabled": True,
@@ -762,19 +766,43 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             prompt_batch,
         )
     for path in (
+        "generation.max_quota_repair_rounds",
+        "generation.minimum_verified_questions",
         "generation.gold_validation_attempts",
         "generation.gold_validation_max_tokens",
     ):
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ConfigurationError(path, "must be a positive integer", value)
-    if not isinstance(
-        _get(config, "generation.require_gold_answer_validation"),
-        bool,
+    validation_timeout = _get(
+        config,
+        "generation.gold_validation_timeout_seconds",
+    )
+    if (
+        not isinstance(validation_timeout, (int, float))
+        or isinstance(validation_timeout, bool)
+        or validation_timeout <= 0
     ):
         raise ConfigurationError(
-            "generation.require_gold_answer_validation",
-            "must be a Boolean",
+            "generation.gold_validation_timeout_seconds",
+            "must be a positive number",
+            validation_timeout,
+        )
+    for path in (
+        "generation.allow_partial_question_budget",
+        "generation.require_gold_answer_validation",
+    ):
+        if not isinstance(_get(config, path), bool):
+            raise ConfigurationError(path, "must be a Boolean")
+    minimum_verified = _get(
+        config,
+        "generation.minimum_verified_questions",
+    )
+    if minimum_verified > budget:
+        raise ConfigurationError(
+            "generation.minimum_verified_questions",
+            "must not exceed experiment.questions_per_iteration",
+            minimum_verified,
         )
     test_taker_tools = _get(config, "models.test_taker.use_external_tools")
     if not isinstance(test_taker_tools, bool):
