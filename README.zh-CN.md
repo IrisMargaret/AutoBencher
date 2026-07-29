@@ -222,6 +222,19 @@ python run_scripts.py math \
   --num-iters 2
 ```
 
+27 道题的完整快速飞轮（1 个 Iteration、1 个 Cycle、1 个 Epoch）：
+
+```bash
+python run_scripts.py math \
+  --config configs/experiments/quick_flywheel_27.yaml \
+  --environment configs/environments/server.private.yaml \
+  --run-id quick-flywheel-27
+```
+
+该配置先用 27 道固定测试题评测原始模型，再生成 27 道自适应训练候选；如果能组成
+完整的 25/75 训练数据块，就执行一轮 QLoRA 和模型合并，最后再次用固定测试集评测
+合并后的模型。
+
 完整数据飞轮：
 
 ```bash

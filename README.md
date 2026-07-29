@@ -239,6 +239,20 @@ python run_scripts.py math \
   --num-iters 2
 ```
 
+Complete 27-question quick flywheel (one iteration, one cycle, one epoch):
+
+```bash
+python run_scripts.py math \
+  --config configs/experiments/quick_flywheel_27.yaml \
+  --environment configs/environments/server.private.yaml \
+  --run-id quick-flywheel-27
+```
+
+This profile evaluates the original model on the 27-question fixed set,
+generates 27 adaptive training candidates, performs one QLoRA cycle when a
+complete 25/75 training block is available, and evaluates the merged model on
+the fixed set again.
+
 Complete data flywheel:
 
 ```bash

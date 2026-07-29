@@ -1,0 +1,45 @@
+extends: ../math_flywheel_smoke_test.yaml
+
+schema_version: "1.0"
+
+experiment:
+  name: quick_math_flywheel_27
+  mode: data_flywheel
+  num_iterations: 1
+  max_cycles: 1
+  questions_per_iteration: 27
+  export_interval: 1
+  clean_cycle_cache: true
+  resume: true
+
+# Re-enable every fail-closed production leakage backend disabled by the
+# evaluation-only smoke profile.
+dataset:
+  datasketch_enabled: true
+  datasketch_required: true
+  datasketch_lsh_enabled: true
+  sentence_transformers_enabled: true
+  sentence_transformers_required: true
+
+fixed_test:
+  enabled: true
+  evaluate_baseline: true
+  evaluate_after_each_training_cycle: true
+  fail_on_training_leakage: true
+
+finetune:
+  enabled: true
+  gpu: "0"
+  epochs: 1
+  batch_size: 4
+  lora_rank: 4
+  max_seq_length: 1024
+  learning_rate: 2.0e-4
+  save_step_metrics: true
+  merge_adapter: true
+
+tracking:
+  wandb:
+    enabled: false
+    mode: disabled
+    log_model: false

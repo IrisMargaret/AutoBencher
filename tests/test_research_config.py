@@ -16,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "configs" / "math_flywheel.yaml"
 SMOKE_CONFIG = ROOT / "configs" / "math_flywheel_smoke_test.yaml"
 EXPERIMENT_CONFIG = ROOT / "configs" / "experiments" / "math_flywheel.yaml"
+QUICK_FLYWHEEL_CONFIG = (
+    ROOT / "configs" / "experiments" / "quick_flywheel_27.yaml"
+)
 VOLCENGINE_CONFIG = ROOT / "configs" / "environments" / "volcengine.yaml"
 
 
@@ -30,6 +33,20 @@ def test_yaml_inheritance_overrides_parent():
     assert config["experiment"]["questions_per_iteration"] == 27
     assert config["finetune"]["enabled"] is False
     assert config["models"]["evaluator"]["model_name"] == "deepseek-v4-pro"
+
+
+def test_quick_flywheel_profile_runs_one_complete_27_question_cycle():
+    config, _ = load_resolved_config(QUICK_FLYWHEEL_CONFIG)
+    assert config["experiment"]["mode"] == "data_flywheel"
+    assert config["experiment"]["questions_per_iteration"] == 27
+    assert config["experiment"]["num_iterations"] == 1
+    assert config["experiment"]["max_cycles"] == 1
+    assert config["finetune"]["enabled"] is True
+    assert config["finetune"]["epochs"] == 1
+    assert config["fixed_test"]["evaluate_baseline"] is True
+    assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
+    assert config["dataset"]["datasketch_required"] is True
+    assert config["dataset"]["sentence_transformers_required"] is True
 
 
 def test_precedence_is_defaults_then_yaml_then_cli_then_temporary():
