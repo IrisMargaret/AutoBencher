@@ -197,6 +197,9 @@ generation:
 
 evaluator_pipeline:
   enabled: true
+  # Parallelize independent questions only. Each question still retains the
+  # full primary-solver, blind-solver, and postcheck chain.
+  max_parallel_questions: 4
   solver_prompt_path: prompts/evaluator_python_solver.txt
   solver_strategy_path: prompts/tora_evaluator_strategy.txt
   independent_solver_prompt_path: prompts/evaluator_independent_solver.txt

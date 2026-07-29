@@ -43,3 +43,8 @@ tracking:
     enabled: false
     mode: disabled
     log_model: false
+
+logging:
+  progress_enabled: true
+  progress_leave: false
+  progress_dynamic_ncols: true

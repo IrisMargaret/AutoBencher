@@ -1,7 +1,9 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+import autobencher.evaluator as evaluator_module
 import numpy as np
 import pytest
 
@@ -38,6 +40,25 @@ CONFIG_PATH = ROOT / "configs" / "math_flywheel_smoke_test.yaml"
 @pytest.fixture
 def config():
     return load_resolved_config(CONFIG_PATH)[0]
+
+
+def test_parallel_evaluator_cache_writes_preserve_every_entry(tmp_path):
+    cache_path = tmp_path / "parallel-cache.json"
+
+    def store(index):
+        evaluator_module._cache_store_entry(
+            cache_path,
+            f"question-{index}",
+            {"status": "passed", "answer": str(index)},
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(store, range(32)))
+
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert len(cache) == 32
+    assert cache["question-0"]["answer"] == "0"
+    assert cache["question-31"]["answer"] == "31"
 
 
 def _training_record(index, correct):

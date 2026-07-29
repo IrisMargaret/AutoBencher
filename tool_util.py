@@ -576,6 +576,25 @@ def generate_math_inference(
                 use_helm=use_helm,
                 auth=auth,
                 verbose=False,
+                request_timeout_seconds=(
+                    float(
+                        research_config["models"]["test_taker"][
+                            "request_timeout_seconds"
+                        ]
+                    )
+                    if research_config
+                    else None
+                ),
+                max_num_retries=(
+                    int(
+                        research_config["models"]["test_taker"][
+                            "max_retries"
+                        ]
+                    )
+                    if research_config
+                    else 5
+                ),
+                retry_delay_seconds=5,
                 structured_schema=(
                     TestTakerOutput
                     if research_config

@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -33,6 +34,9 @@ SOLVER_PROMPT_VERSION = "evaluator_python_solver_v3_blind_consensus"
 INDEPENDENT_SOLVER_PROMPT_VERSION = "evaluator_independent_solver_v1"
 POSTCHECK_PROMPT_VERSION = "evaluator_python_postcheck_v3_training_derivation"
 SEMANTIC_JUDGE_PROMPT_VERSION = "semantic_answer_judge_v2_cross_format"
+
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
 
 _FORBIDDEN_AST_NODES = (
     ast.AsyncFor,
@@ -304,6 +308,11 @@ def _model_json(
         and structured.get("enabled")
         and structured.get("use_for_evaluator")
     )
+    evaluator_model_config = (
+        config.get("models", {}).get("evaluator", {})
+        if isinstance(config, Mapping)
+        else {}
+    )
     request_result = gen_from_prompt(
         model=model,
         tokenizer=tokenizer,
@@ -322,6 +331,15 @@ def _model_json(
             "none",
         ),
         structured_required=bool(structured.get("required", False)),
+        request_timeout_seconds=evaluator_model_config.get(
+            "request_timeout_seconds"
+        ),
+        max_num_retries=int(
+            evaluator_model_config.get("max_retries", 3)
+        ),
+        retry_delay_seconds=float(
+            evaluator_model_config.get("retry_delay_seconds", 5)
+        ),
     )
     if not request_result.completions:
         raise EvaluatorProtocolError("evaluator returned no completion")
@@ -679,6 +697,23 @@ def _cache_write(
     temporary.replace(target)
 
 
+def _cache_store_entry(
+    path: str | os.PathLike[str] | None,
+    key: str,
+    value: Mapping[str, Any],
+) -> None:
+    """Merge one cache entry atomically across parallel question workers."""
+    if not path:
+        return
+    normalized_path = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.setdefault(normalized_path, threading.Lock())
+    with lock:
+        latest = _cache_read(path)
+        latest[key] = dict(value)
+        _cache_write(path, latest)
+
+
 def solve_with_privileged_python(
     question: str,
     evaluator_info: tuple[Any, Any, Any],
@@ -1020,8 +1055,7 @@ def solve_with_privileged_python(
                     else "post-execution verification rejected the answer"
                 ),
             }
-            cache[cache_key] = result
-            _cache_write(cache_path, cache)
+            _cache_store_entry(cache_path, cache_key, result)
             return result
         except (
             EvaluatorProtocolError,
@@ -1050,8 +1084,7 @@ def solve_with_privileged_python(
             else "evaluator solver failed"
         ),
     }
-    cache[cache_key] = failed
-    _cache_write(cache_path, cache)
+    _cache_store_entry(cache_path, cache_key, failed)
     return failed
 
 

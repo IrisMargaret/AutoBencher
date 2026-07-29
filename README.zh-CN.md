@@ -281,6 +281,18 @@ python run_scripts.py math \
 DeepSeek 兼容请求不会设置 `max_tokens`，因此 evaluator 不会被应用层输出 token
 上限截断；本地模型仍保留进程安全所需的生成长度限制。
 
+规划、出题、gold 求解、复核、语义判定以及 API 型 test-taker 推理都会使用配置中的
+`request_timeout_seconds`、`max_retries` 和 evaluator 的
+`retry_delay_seconds`。运行日志会输出 `[API] request_start`、
+`request_done`、`request_retry`，出题阶段会输出
+`[Generate] subcategory_start` 和 `subcategory_done`。因此服务端请求卡住时会按配置
+超时并重试，不会让进程在没有任何日志的情况下无限等待。
+
+gold 校验仍完整保留三阶段 evaluator 链，但对彼此独立的题目使用 OpenAI 兼容 API
+并发处理。`evaluator_pipeline.max_parallel_questions` 控制并发数，默认是 `4`；
+本地 Hugging Face 和 Ollama evaluator 保持串行，避免不安全地共享模型状态。如果
+API 账号限流严格，可调低该值。
+
 ## test-taker 隔离与判分
 
 test-taker 每次只接收一道题，并且没有任何外部工具。输出必须是单个 JSON 对象：
@@ -352,6 +364,11 @@ QLoRA 使用 Hugging Face TRL 的 `SFTConfig`/`SFTTrainer`。当
 
 每次运行会保留解析后的配置、配置来源、校验结果、配置哈希、环境快照、运行
 manifest、日志、全局错题池、训练产物、模型产物和固定测试结果。
+
+配置的输出根目录会为每次启动自动创建一个 `test_<N>` 目录。使用
+`configs/environments/server.yaml` 且仓库位于 `/root/code/AutoBencher` 时，实际
+路径是 `/root/code/AutoBencher/output/math_flywheel/test_<N>/`。可执行
+`ls -dt output/math_flywheel/test_* | head -1` 找到最新一次运行目录。
 
 当 `experiment.clean_cycle_cache: true` 时，每个迭代目录在 `finally` 清理后严格只
 保留以下三个 JSON：

@@ -1,7 +1,10 @@
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import math_autobencher
@@ -822,6 +825,83 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
         self.assertEqual(generate.call_count, 1)
         self.assertEqual(len(result[0]), 1)
         self.assertEqual(result[0][0]["canonical_answer"], "5")
+
+    def test_gold_evaluator_parallelizes_independent_questions(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=[
+                "evaluator_pipeline.max_parallel_questions=3",
+            ],
+        )
+        questions = [
+            {"question": "Solve for x: x + 4 = 9."},
+            {"question": "Solve for x: x + 8 = 10."},
+            {"question": "Solve for x: x + 2 = 5."},
+        ]
+        answers = {"9": "5", "10": "2", "5": "3"}
+        state = {"active": 0, "maximum": 0}
+        lock = threading.Lock()
+
+        def solve(question, *_args, **_kwargs):
+            with lock:
+                state["active"] += 1
+                state["maximum"] = max(
+                    state["maximum"],
+                    state["active"],
+                )
+            time.sleep(0.03)
+            with lock:
+                state["active"] -= 1
+            right_hand_side = question.rsplit("=", 1)[1].strip(" .")
+            answer = answers[right_hand_side]
+            return {
+                "status": "passed",
+                "canonical_answer": answer,
+                "answer_type": "integer",
+                "verification_passed": True,
+                "substitution_passed": True,
+                "training_reasoning_summary": [
+                    f"Rearrange the equation to obtain x = {answer}.",
+                    f"Substitute x = {answer} into the original equation.",
+                ],
+                "estimated_difficulty": 2,
+                "difficulty_acceptable": True,
+            }
+
+        api_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=object())
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "subcat0"))
+            with (
+                patch.object(
+                    math_autobencher,
+                    "gen_from_prompt",
+                    return_value=self._result(questions),
+                ),
+                patch.object(
+                    math_autobencher,
+                    "solve_with_privileged_python",
+                    side_effect=solve,
+                ),
+            ):
+                result = (
+                    math_autobencher._generate_question_text_with_truth(
+                        self._description(),
+                        "model",
+                        None,
+                        api_client,
+                        prefix,
+                        question_count=3,
+                        research_config=config,
+                    )
+                )
+
+        self.assertGreater(state["maximum"], 1)
+        self.assertEqual(
+            [item["canonical_answer"] for item in result[0]],
+            ["5", "2", "3"],
+        )
 
 
 class InferenceResumeTests(unittest.TestCase):

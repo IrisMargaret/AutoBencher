@@ -47,6 +47,7 @@ def test_quick_flywheel_profile_runs_one_complete_27_question_cycle():
     assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
     assert config["dataset"]["datasketch_required"] is True
     assert config["dataset"]["sentence_transformers_required"] is True
+    assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
 
 
 def test_precedence_is_defaults_then_yaml_then_cli_then_temporary():
@@ -125,6 +126,25 @@ def test_math_generator_sampling_contract_is_fixed():
         load_resolved_config(
             SMOKE_CONFIG,
             temporary_overrides=["generation.top_p=0.9"],
+        )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "models.evaluator.request_timeout_seconds=0",
+        "models.test_taker.request_timeout_seconds=-1",
+        "models.evaluator.max_retries=0",
+        "models.test_taker.max_retries=0",
+        "models.evaluator.retry_delay_seconds=-0.1",
+        "evaluator_pipeline.max_parallel_questions=0",
+    ],
+)
+def test_invalid_model_request_controls_fail_fast(override):
+    with pytest.raises(ConfigurationError):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=[override],
         )
 
 

@@ -285,6 +285,7 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "evaluator_pipeline": {
         "enabled": True,
+        "max_parallel_questions": 4,
         "solver_prompt_path": "prompts/evaluator_python_solver.txt",
         "solver_strategy_path": "prompts/tora_evaluator_strategy.txt",
         "independent_solver_prompt_path": (
@@ -883,6 +884,9 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "generation.subcategory_cooldown_iterations",
         "generation.gold_validation_attempts",
         "generation.gold_validation_max_tokens",
+        "models.evaluator.max_retries",
+        "models.test_taker.max_retries",
+        "evaluator_pipeline.max_parallel_questions",
     ):
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -964,6 +968,35 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "generation.truth_solver_timeout_seconds",
             "must be a positive number",
             validation_timeout,
+        )
+    for path in (
+        "models.evaluator.request_timeout_seconds",
+        "models.test_taker.request_timeout_seconds",
+    ):
+        request_timeout = _get(config, path)
+        if (
+            not isinstance(request_timeout, (int, float))
+            or isinstance(request_timeout, bool)
+            or request_timeout <= 0
+        ):
+            raise ConfigurationError(
+                path,
+                "must be a positive number",
+                request_timeout,
+            )
+    evaluator_retry_delay = _get(
+        config,
+        "models.evaluator.retry_delay_seconds",
+    )
+    if (
+        not isinstance(evaluator_retry_delay, (int, float))
+        or isinstance(evaluator_retry_delay, bool)
+        or evaluator_retry_delay < 0
+    ):
+        raise ConfigurationError(
+            "models.evaluator.retry_delay_seconds",
+            "must be a non-negative number",
+            evaluator_retry_delay,
         )
     generation_temperature = _get(config, "generation.temperature")
     generation_top_p = _get(config, "generation.top_p")

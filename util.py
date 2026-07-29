@@ -401,6 +401,9 @@ def gen_from_prompt(
     structured_backend="none",
     structured_fallback_backend="none",
     structured_required=False,
+    request_timeout_seconds=None,
+    max_num_retries=5,
+    retry_delay_seconds=10,
 ):
     del output_scores
     if service is None:
@@ -558,6 +561,9 @@ def gen_from_prompt(
             num_completions=num_completions,
             verbose=verbose,
             stop_sequences=stop_sequences,
+            request_timeout_seconds=request_timeout_seconds,
+            max_num_retries=max_num_retries,
+            retry_delay_seconds=retry_delay_seconds,
         )
         return _as_request_result(texts)
 
@@ -638,11 +644,33 @@ def query_openai_compatible(
     stop_sequences=None,
     max_num_retries=5,
     top_p=1.0,
+    request_timeout_seconds=None,
+    retry_delay_seconds=10,
 ):
     results = []
-    for prompt in prompt_lst:
+    retry_count = max(1, int(max_num_retries))
+    retry_delay = max(0.0, float(retry_delay_seconds))
+    timeout_seconds = (
+        None
+        if request_timeout_seconds is None
+        else float(request_timeout_seconds)
+    )
+    for prompt_index, prompt in enumerate(prompt_lst, start=1):
         completion = None
-        for retry in range(max_num_retries):
+        for retry in range(retry_count):
+            started = time.monotonic()
+            timeout_label = (
+                "sdk_default"
+                if timeout_seconds is None
+                else f"{timeout_seconds:g}s"
+            )
+            print(
+                "[API] request_start "
+                f"model={model} prompt={prompt_index}/{len(prompt_lst)} "
+                f"attempt={retry + 1}/{retry_count} "
+                f"timeout={timeout_label}",
+                flush=True,
+            )
             try:
                 request_kwargs = dict(
                     model=model,
@@ -661,18 +689,36 @@ def query_openai_compatible(
                     request_kwargs["max_tokens"] = max_tokens
                 if stop_sequences:
                     request_kwargs["stop"] = list(stop_sequences)
+                if timeout_seconds is not None:
+                    request_kwargs["timeout"] = timeout_seconds
                 completion = client.chat.completions.create(**request_kwargs)
                 content = completion.choices[0].message.content
                 if not content or not content.strip():
                     raise ValueError("API returned an empty completion")
+                print(
+                    "[API] request_done "
+                    f"model={model} prompt={prompt_index}/{len(prompt_lst)} "
+                    f"attempt={retry + 1}/{retry_count} "
+                    f"elapsed={time.monotonic() - started:.1f}s",
+                    flush=True,
+                )
                 break
             except Exception as exc:
-                if retry == max_num_retries - 1:
+                elapsed = time.monotonic() - started
+                if retry == retry_count - 1:
                     raise RuntimeError(
-                        f"API request failed after {max_num_retries} attempts: {exc}"
+                        f"API request failed after {retry_count} attempts "
+                        f"(last attempt {elapsed:.1f}s): {exc}"
                     ) from exc
-                print(f"API request failed ({type(exc).__name__}); retrying...")
-                time.sleep(10)
+                print(
+                    "[API] request_retry "
+                    f"model={model} attempt={retry + 1}/{retry_count} "
+                    f"elapsed={elapsed:.1f}s "
+                    f"error={type(exc).__name__} "
+                    f"sleep={retry_delay:g}s",
+                    flush=True,
+                )
+                time.sleep(retry_delay)
         text = content.strip()
         if verbose:
             print(text)

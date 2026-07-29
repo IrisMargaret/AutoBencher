@@ -64,11 +64,39 @@ class OllamaRoutingTests(unittest.TestCase):
             prompt=["Return JSON."],
             service=client,
             max_tokens=12,
+            request_timeout_seconds=17,
+            max_num_retries=2,
+            retry_delay_seconds=0,
         )
 
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertNotIn("max_tokens", kwargs)
         self.assertNotIn("extra_body", kwargs)
+        self.assertEqual(kwargs["timeout"], 17)
+
+    def test_openai_compatible_timeout_is_retried(self):
+        client = Mock()
+        completion = Mock()
+        completion.choices = [Mock(message=Mock(content="4"))]
+        client.chat.completions.create.side_effect = [
+            TimeoutError("stalled"),
+            completion,
+        ]
+
+        with patch("util.time.sleep") as sleep:
+            result = util.gen_from_prompt(
+                model="deepseek-v4-pro",
+                tokenizer=None,
+                prompt=["Return 4."],
+                service=client,
+                request_timeout_seconds=3,
+                max_num_retries=2,
+                retry_delay_seconds=0.25,
+            )
+
+        self.assertEqual(result.completions[0].text, "4")
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+        sleep.assert_called_once_with(0.25)
 
     def test_non_deepseek_request_keeps_output_token_limit(self):
         client = Mock()

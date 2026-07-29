@@ -309,6 +309,22 @@ DeepSeek-compatible requests intentionally omit `max_tokens`; the evaluator
 therefore is not truncated by an application output-token cap. Local model
 generation remains bounded for process safety.
 
+API calls in planning, question generation, gold solving, postchecking,
+semantic judging, and API-backed test-taker inference all honor the configured
+`request_timeout_seconds`, `max_retries`, and evaluator
+`retry_delay_seconds`. Runtime logs emit `[API] request_start`,
+`request_done`, and `request_retry`, while generation emits
+`[Generate] subcategory_start` and `subcategory_done`. A provider stall
+therefore times out and retries instead of leaving the process silently
+blocked.
+
+Gold verification keeps the full three-stage evaluator chain but processes
+independent questions concurrently for OpenAI-compatible API clients.
+`evaluator_pipeline.max_parallel_questions` controls the worker count and
+defaults to `4`; local Hugging Face and Ollama evaluator paths remain serial
+to avoid unsafe shared-model access. Lower this value when the API account has
+a strict request-rate limit.
+
 ## Test-taker isolation and grading
 
 The test taker receives one question at a time and no external tools. Its
@@ -398,6 +414,12 @@ is an explicit configuration choice.
 Each run stores resolved configuration, source provenance, validation results,
 configuration hash, environment snapshot, manifests, logs, global hard pool,
 training artifacts, model artifacts, and fixed-test results.
+
+The configured output root contains one automatically allocated `test_<N>`
+directory per invocation. With `configs/environments/server.yaml` and a
+repository working directory of `/root/code/AutoBencher`, the concrete path is
+`/root/code/AutoBencher/output/math_flywheel/test_<N>/`. The newest run can be
+located with `ls -dt output/math_flywheel/test_* | head -1`.
 
 With `experiment.clean_cycle_cache: true`, every iteration directory contains
 exactly these JSON files after its `finally` cleanup:

@@ -7,6 +7,7 @@ import sys
 import threading
 import contextlib
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -85,6 +86,22 @@ Solve tasks using your reasoning and language skills.
 Solve the task step by step if you need to. If a plan is not provided, explain your plan first. Be clear which step uses code, and which step uses your language skill.
 Reply "TERMINATE" in the end when everything is done.
 """
+
+
+def _request_control_kwargs(research_config, model_role="evaluator"):
+    """Route configured API timeouts/retries into shared model calls."""
+    if not research_config:
+        return {}
+    model_config = research_config["models"][model_role]
+    return {
+        "request_timeout_seconds": float(
+            model_config["request_timeout_seconds"]
+        ),
+        "max_num_retries": int(model_config["max_retries"]),
+        "retry_delay_seconds": float(
+            model_config.get("retry_delay_seconds", 5)
+        ),
+    }
 
 
 def _generate_python_answers(problem_json, agent_lm, agent_tokenizer, agent_client, outfile_prefix='att1'):
@@ -389,6 +406,7 @@ def _generate_cat_with_aim(
     enable_hard_sample_guidance=False,
     coverage_summary="",
     hard_pool_file=None,
+    research_config=None,
 ):
     # [MODIFIED] Enforce the fixed two-level, nine-category taxonomy.
     taxonomy_json = json.dumps(
@@ -492,6 +510,7 @@ Train-eligible historical hard-sample context:
             process_func=None,
             service=agent_client,
             terminate_by_linebreak='no',
+            **_request_control_kwargs(research_config),
         )
         response = request_result.completions[0].text
         try:
@@ -1117,6 +1136,7 @@ Problems:
                 process_func=None,
                 service=agent_client,
                 terminate_by_linebreak="no",
+                **_request_control_kwargs(research_config),
             )
             response = request_result.completions[0].text
             extracted = extract_json_v2(response, None)
@@ -1357,7 +1377,8 @@ Train-eligible examples:
         request_result = gen_from_prompt(model=agent_lm, tokenizer=agent_tokenizer, prompt=[context + retry_instruction],
                                          echo_prompt=False, temperature=0.0, max_tokens=8192,
                                          process_func=None, service=agent_client,
-                                         terminate_by_linebreak='no', )
+                                         terminate_by_linebreak='no',
+                                         **_request_control_kwargs(research_config), )
         response = request_result.completions[0].text
         try:
             extracted_json = extract_json_v2(response, None)
@@ -1563,6 +1584,7 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 process_func=None,
                 service=agent_client,
                 terminate_by_linebreak="no",
+                **_request_control_kwargs(research_config),
             )
             response = request_result.completions[0].text
             extracted = extract_json_v2(response, None)
@@ -1700,22 +1722,84 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
             }
         )
 
+    evaluator_enabled = bool(
+        research_config["evaluator_pipeline"]["enabled"]
+    )
+    evaluator_truths = [None] * len(accepted_questions)
+    evaluator_cache_path = (
+        f"{outfile_prefix}.evaluator_python_solutions.json"
+    )
+    configured_workers = int(
+        research_config["evaluator_pipeline"]["max_parallel_questions"]
+    )
+    is_thread_safe_api_client = bool(
+        agent_client is not None
+        and hasattr(agent_client, "chat")
+        and hasattr(agent_client.chat, "completions")
+    )
+    evaluator_workers = (
+        min(configured_workers, len(accepted_questions))
+        if evaluator_enabled and is_thread_safe_api_client
+        else 1
+    )
+    if evaluator_enabled and accepted_questions:
+        print(
+            "[Generate] gold_verification_start "
+            f"questions={len(accepted_questions)} "
+            f"parallel_workers={evaluator_workers}",
+            flush=True,
+        )
+
+        def solve_candidate(candidate_index):
+            try:
+                return solve_with_privileged_python(
+                    accepted_questions[candidate_index]["question"],
+                    (agent_lm, agent_tokenizer, agent_client),
+                    research_config,
+                    cache_path=evaluator_cache_path,
+                )
+            except Exception as exc:
+                # One provider/client failure rejects only this candidate.
+                # The remaining quota continues through the normal repair loop.
+                return {
+                    "status": "failed",
+                    "failure_reason": (
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                }
+
+        if evaluator_workers > 1:
+            with ThreadPoolExecutor(
+                max_workers=evaluator_workers,
+                thread_name_prefix="gold-evaluator",
+            ) as executor:
+                futures = {
+                    executor.submit(solve_candidate, index): index
+                    for index in range(len(accepted_questions))
+                }
+                completed = 0
+                for future in as_completed(futures):
+                    candidate_index = futures[future]
+                    evaluator_truths[candidate_index] = future.result()
+                    completed += 1
+                    print(
+                        "[Generate] gold_verification_progress "
+                        f"completed={completed}/{len(accepted_questions)}",
+                        flush=True,
+                    )
+        else:
+            for index in range(len(accepted_questions)):
+                evaluator_truths[index] = solve_candidate(index)
+                print(
+                    "[Generate] gold_verification_progress "
+                    f"completed={index + 1}/{len(accepted_questions)}",
+                    flush=True,
+                )
+
     solved_questions = []
     for index, item in enumerate(accepted_questions):
         question_text = item["question"]
-        evaluator_truth = None
-        evaluator_enabled = bool(
-            research_config["evaluator_pipeline"]["enabled"]
-        )
-        if evaluator_enabled:
-            evaluator_truth = solve_with_privileged_python(
-                question_text,
-                (agent_lm, agent_tokenizer, agent_client),
-                research_config,
-                cache_path=(
-                    f"{outfile_prefix}.evaluator_python_solutions.json"
-                ),
-            )
+        evaluator_truth = evaluator_truths[index]
         deterministic_truth = truth_solver.solve(question_text)
         if evaluator_truth is None:
             if not deterministic_truth.success:
@@ -2006,6 +2090,7 @@ def _ask_question_v3(
             enable_hard_sample_guidance=enable_hard_sample_guidance,
             coverage_summary=coverage_summary,
             hard_pool_file=hard_pool_file,
+            research_config=research_config,
         )
 
     else:
@@ -2113,6 +2198,15 @@ def _ask_question_v3(
                 health_state.get("cooldown_until_iteration", 0)
             )
             target_count = int(plan_line.get("question_count", 50))
+            subcategory_started_at = time.monotonic()
+            print(
+                "[Generate] subcategory_start "
+                f"index={idx + 1}/{len(plan_json)} "
+                f"category={plan_line['category']!r} "
+                f"sub_category={plan_line['sub_category']!r} "
+                f"requested={target_count}",
+                flush=True,
+            )
             if current_global_iteration <= cooldown_until:
                 cooldown_failure = {
                     "category": plan_line["category"],
@@ -2142,7 +2236,8 @@ def _ask_question_v3(
                 print(
                     "[Generate] subcategory_cooldown "
                     f"sub_category={plan_line['sub_category']!r} "
-                    f"until_iteration={cooldown_until}"
+                    f"until_iteration={cooldown_until}",
+                    flush=True,
                 )
                 continue
             is_hard_variant = (
@@ -2265,6 +2360,15 @@ def _ask_question_v3(
             question_json_full.extend(accepted)
             verified_count = len(accepted)
             shortfall = max(0, target_count - verified_count)
+            print(
+                "[Generate] subcategory_done "
+                f"index={idx + 1}/{len(plan_json)} "
+                f"sub_category={plan_line['sub_category']!r} "
+                f"verified={verified_count}/{target_count} "
+                f"repair_rounds={repair_round} "
+                f"elapsed={time.monotonic() - subcategory_started_at:.1f}s",
+                flush=True,
+            )
             plan_line["verified_question_count"] = verified_count
             plan_line["question_shortfall"] = shortfall
             plan_line["quota_repair_rounds_used"] = repair_round
