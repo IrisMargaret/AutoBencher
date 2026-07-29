@@ -122,6 +122,13 @@ def environment_snapshot() -> dict[str, Any]:
         "trl",
         "bitsandbytes",
         "datasets",
+        "sympy",
+        "math-verify",
+        "sentence-transformers",
+        "datasketch",
+        "outlines",
+        "guidance",
+        "wandb",
     ):
         try:
             packages[name] = importlib.metadata.version(name)

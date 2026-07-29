@@ -119,6 +119,28 @@ def test_test_taker_tools_cannot_be_enabled():
         )
 
 
+def test_global_accuracy_bounds_must_be_ordered():
+    with pytest.raises(ConfigurationError, match="global accuracy bounds"):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=[
+                "adaptive_sampling.global_accuracy_low=0.8",
+                "adaptive_sampling.global_accuracy_high=0.4",
+            ],
+        )
+
+
+def test_data_flywheel_requires_semantic_leakage_backend():
+    with pytest.raises(
+        ConfigurationError,
+        match="fail-closed holdout leakage protection",
+    ):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=["experiment.mode=data_flywheel"],
+        )
+
+
 def test_config_hash_is_deterministic():
     left, _ = load_resolved_config(SMOKE_CONFIG)
     right, _ = load_resolved_config(SMOKE_CONFIG)

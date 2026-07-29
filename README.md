@@ -1,1047 +1,460 @@
-<!-- [MODIFIED] Paper-grade math evaluation and local LoRA flywheel guide. -->
+# AutoBencher Math Data Flywheel
 
-# AutoBencher
+[简体中文](README.zh-CN.md) | English
 
-[Simplified Chinese](README.zh-CN.md) | English
+AutoBencher is an adaptive mathematics benchmark and local training-data
+flywheel. It keeps the original AutoBencher loop—plan, generate, evaluate,
+collect hard examples, train, and repeat—while making gold-answer generation,
+answer judging, holdout evaluation, and cache retention explicit and auditable.
 
-AutoBencher automatically builds and evaluates benchmark questions. The math
-pipeline now supports reproducible adaptive evaluation and an end-to-end local
-QLoRA data flywheel. Wiki and Multilingual entry points remain compatible.
+The maintained entry point is `math_autobencher.py`. The former Wiki and
+Multilingual entry points have been removed from this math-only repository.
 
-## Table of contents
+## What the pipeline does
 
-- [Overview](#overview)
-- [System architecture](#system-architecture)
-- [Project layout](#project-layout)
-- [Environment requirements](#environment-requirements)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Quick start](#quick-start)
-- [Local and API model routing](#local-and-api-model-routing)
-- [Volcengine remote GPU operation](#volcengine-remote-gpu-operation)
-- [PyCharm remote development](#pycharm-remote-development)
-- [Outputs and data contracts](#outputs-and-data-contracts)
-- [Coverage and adaptive sampling](#coverage-and-adaptive-sampling)
-- [Test-taker isolation and evaluation](#test-taker-isolation-and-evaluation)
-- [Training dataset and LoRA](#training-dataset-and-lora)
-- [Cache recovery, logs, and progress](#cache-recovery-logs-and-progress)
-- [Experiment reproduction](#experiment-reproduction)
-- [Troubleshooting](#troubleshooting)
-- [Tests](#tests)
-- [Citation, license, and contribution](#citation-license-and-contribution)
+- Covers a fixed taxonomy of 9 categories and 27 subcategories.
+- Generates moderate questions within configurable difficulty bounds.
+- Gives the test taker no tool schema or external-tool access; it answers with
+  its own reasoning under a strict JSON contract.
+- Makes a primary and a blind independent evaluator each propose
+  problem-specific Python, executes both in isolated subprocesses, requires
+  their answers to agree, and then asks a fresh adjudicator context to
+  recompute/substitute the result.
+- Normalizes numeric, rational, symbolic, set, interval, tuple, matrix, Boolean,
+  and textual answers before comparison.
+- Uses a separate LLM semantic judge to decide whether differently formatted
+  answers mean the same thing. Deterministic checks and the semantic decision
+  are both retained for audit.
+- Builds every cycle's training set only from that cycle: exactly 25% correctly
+  answered examples and 75% incorrectly answered examples. Every exported
+  sample contains a verified gold answer and safe, non-empty solution steps.
+- Evaluates the original model and every trained cycle on one immutable,
+  all-subcategory holdout and reports the accuracy delta.
+- Rejects training questions that are identical or highly similar to the fixed
+  test set using exact/template checks, datasketch MinHash/LSH informed by
+  Text-Dedup, and Sentence-Transformers semantic similarity.
+- Supports Outlines with Guidance fallback for token-constrained JSON from
+  directly loaded local models, and W&B tracking in configurable offline,
+  online, or disabled mode.
+- Cleans each completed iteration to exactly three JSON caches: the target
+  question plan, test-taker answers, and comparison results.
 
-## Overview
-
-Two math modes are available:
-
-- `eval` generates and evaluates a benchmark without training.
-- `data_flywheel` evaluates, updates the hard pool, builds a mixed training
-  dataset, invokes the repository-local `train_llm.py`, merges the LoRA adapter,
-  switches to the merged model, and starts the next cycle.
-
-Core capabilities include:
-
-- a fixed nine-category, 27-subcategory math taxonomy;
-- exact per-iteration question-budget allocation;
-- raw and quota-aware effective coverage metrics;
-- Beta-Binomial adaptive sampling by subcategory and difficulty;
-- a no-tool, strict JSON contract for the test taker;
-- deterministic normalization for numeric and non-numeric answers;
-- auditable evaluator-only symbolic checks and error attribution;
-- hard-pool injection only from iteration 3 onward;
-- a 45% hard-variant, 40% coverage-repair, 15% retention mix after warmup;
-- mixed correct/incorrect training data with exact, near, semantic, and template
-  deduplication;
-- atomic artifacts, configuration hashes, manifests, structured logs, and
-  resumable caches.
-
-## System architecture
+## End-to-end architecture
 
 ```text
-YAML configuration + explicit CLI overrides
-  -> taxonomy quota and adaptive-priority scheduler
-  -> question-only LLM generator (temperature=0.0, top_p=0.1)
-  -> expression preprocessing and syntax normalization
-  -> TruthSolver route (equation/system/integral/limit/expression)
-  -> canonical gold plus deterministic truth substitution
-  -> failed-truth discard, failure accounting, and subcategory cooldown
-  -> no-tool test-taker structured inference
-  -> JSON parsing and controlled format repair
-  -> canonical-gold answer normalization and deterministic equivalence
-  -> hierarchical error attribution
-  -> hard-pool update and coverage state
-  -> mixed dataset construction and deduplication
-  -> built-in 4-bit QLoRA training
-  -> adapter merge and next-cycle model switch
+YAML config + explicit CLI overrides
+  -> original AutoBencher quota/adaptive scheduler
+  -> moderate question-only generator
+  -> evaluator solver prompt (question treated as untrusted data)
+  -> primary + blind-independent Python programs
+  -> AST validation + two isolated executions
+  -> answer consensus + runtime verification and substitution
+  -> fresh-context evaluator adjudication
+  -> accepted canonical gold answer
+  -> no-tool test-taker reasoning
+  -> deterministic normalization / Math-Verify fallback
+  -> isolated LLM semantic-equivalence judge
+  -> error attribution + hard pool + coverage update
+  -> current-cycle 25% correct / 75% wrong training set
+  -> holdout leakage filtering
+  -> local 4-bit QLoRA, adapter merge, model switch
+  -> fixed-test re-evaluation and accuracy delta
 ```
 
-The evaluator and test taker are intentionally different roles. The test taker
-receives no tool schema and must answer from model reasoning only. The evaluator
-may use deterministic Python/SymPy-side checks; every such use is stored in
-`evaluator_tool_calls`.
-
-An iteration is one generate/infer/evaluate/update pass. A cycle contains
-`num_iterations` iterations and, in `data_flywheel` mode, may end in one
-fine-tuning job.
+The generator, evaluator solver, evaluator post-check, semantic judge, and test
+taker have separate prompts and model calls. A question is serialized into a
+named JSON data block; its text is never interpolated as an instruction. This
+limits cross-question context contamination and prompt injection.
 
 ## Project layout
 
 ```text
 AutoBencher/
 ├── autobencher/
-│   ├── attribution_eval.py
 │   ├── config.py
 │   ├── coverage.py
 │   ├── dataset.py
-│   ├── experiment.py
+│   ├── evaluator.py
+│   ├── fixed_benchmark.py
+│   ├── output_schemas.py
+│   ├── similarity.py
 │   ├── structured.py
 │   └── truth_solver.py
+├── benchmarks/
+│   └── fixed_math_test_set.json
 ├── configs/
-│   ├── environments/
-│   │   ├── local.yaml
-│   │   ├── server.yaml
-│   │   └── volcengine.yaml
-│   ├── experiments/
-│   │   ├── math_flywheel.yaml
-│   │   └── smoke_test.yaml
 │   ├── math_flywheel.yaml
-│   └── math_flywheel_smoke_test.yaml
-├── schemas/
-│   ├── error_attribution.schema.json
-│   ├── evaluation_result.schema.json
-│   ├── finetune_manifest.schema.json
-│   ├── generated_question.schema.json
-│   ├── iteration_manifest.schema.json
-│   └── test_taker_output.schema.json
+│   ├── environments/
+│   └── experiments/
+├── prompts/
+│   ├── evaluator_python_solver.txt
+│   ├── evaluator_independent_solver.txt
+│   ├── evaluator_postcheck.txt
+│   ├── semantic_answer_judge.txt
+│   └── tora_evaluator_strategy.txt
 ├── tests/
 ├── math_autobencher.py
-├── multilingual_autobencher.py
 ├── run_scripts.py
-├── tool_util.py
 ├── train_llm.py
-├── util.py
-├── wiki_autobencher.py
-├── .env.example
+├── tool_util.py
+├── THIRD_PARTY_NOTICES.md
 ├── requirements.txt
 └── requirements-lock.txt
 ```
 
-## Environment requirements
+## Requirements
 
 - Python 3.10 or later.
-- A DeepSeek/OpenAI-compatible endpoint for the generation agent and evaluator.
-- A local Transformers directory, vLLM endpoint, or Ollama model for the test
-  taker.
-- An NVIDIA CUDA GPU for `data_flywheel` training.
-- Local Hugging Face-compatible Qwen weights for offline QLoRA.
-- Sufficient persistent disk space for base weights, temporary adapters, merged
-  weights, and run artifacts.
+- A DeepSeek/OpenAI-compatible model for question generation and evaluation.
+- A local Transformers model directory, vLLM endpoint, or Ollama model for the
+  test taker.
+- An NVIDIA CUDA GPU for `data_flywheel` training with bitsandbytes QLoRA.
+- Enough persistent storage for base weights, adapters, merged weights, and run
+  artifacts.
 
-Evaluation can run without a training GPU when the test taker is served
-separately. `train_llm.py` deliberately fails on CPU because bitsandbytes 4-bit
-QLoRA requires CUDA.
+Evaluation may run without a training GPU when the test taker is served
+separately. `train_llm.py` intentionally fails on CPU for 4-bit QLoRA.
 
 ## Installation
-
-### Virtual environment
 
 Windows PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-If activation is blocked:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-Windows Command Prompt:
-
-```bat
-python -m venv .venv
-.\.venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -r requirements-lock.txt
 ```
 
 Linux or macOS:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### Dependencies
-
-For the pinned environment:
-
-```bash
+source /root/.virtualenvs/AutoBencher/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
 ```
 
-Use `requirements.txt` only when compatible newer versions are intentional:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-On a managed CUDA image, inspect the existing PyTorch build before installing
-anything. Do not unconditionally replace a working CUDA-specific PyTorch build
-with an incompatible wheel:
+`requirements-lock.txt` is the reproducible environment. Use
+`requirements.txt` only when compatible newer versions are intentional.
+Inspect an existing CUDA installation before changing its PyTorch build:
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 nvidia-smi
 ```
 
-### API environment
-
-Copy `.env.example` to `.env`, then supply credentials locally:
+Create `.env` from `.env.example` or configure secrets in the job platform:
 
 ```dotenv
 DEEPSEEK_API_KEY=replace-me
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-pro
+VLLM_BASE_URL=http://127.0.0.1:8000/v1
+VLLM_API_KEY=EMPTY
 ```
 
-Never commit `.env`, an API key, an SSH password, or a private key.
+Do not commit `.env`, access keys, private endpoints, or SSH credentials.
 
 ## Configuration
 
-The math entry point loads configuration exactly once and passes one recursively
-immutable `ProjectConfig` to runtime modules. New experiments should be created
-by copying an experiment YAML; do not edit Python constants to tune an
-experiment.
-
-Configuration profiles:
-
-| File | Purpose |
-| --- | --- |
-| `configs/math_flywheel.yaml` | Full default research flywheel. |
-| `configs/math_flywheel_smoke_test.yaml` | One CPU/mock-sized 27-question scheduling profile. |
-| `configs/experiments/math_flywheel.yaml` | Recommended full experiment entry point. |
-| `configs/experiments/smoke_test.yaml` | Recommended smoke experiment entry point. |
-| `configs/environments/local.yaml` | Local workstation paths and model route. |
-| `configs/environments/server.yaml` | Generic persistent server paths. |
-| `configs/environments/volcengine.yaml` | Volcengine model and persistent paths. |
-
-Resolution precedence is:
-
-```text
-security invariants
-  < schema defaults
-  < inherited base YAML
-  < environment YAML
-  < experiment YAML
-  < explicitly typed legacy CLI
-  < --override
-  < sensitive environment variables
-```
-
-Environment variables are used only for credentials and private service
-addresses declared under `sensitive_environment`. Their values are never
-written to snapshots. Launcher defaults are stripped when `run_scripts.py
---config` is used, so they do not silently replace YAML values.
-
-Recommended launch:
+All tunable behavior is declared in YAML. Python code contains validated safe
+defaults, not experiment-specific paths or credentials.
 
 ```bash
 python run_scripts.py math \
   --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/volcengine.yaml
+  --environment configs/environments/local.yaml
 ```
 
-Use temporary dotted-path overrides without editing a profile:
+Temporary overrides do not require source changes:
+
+```bash
+python run_scripts.py math \
+  --config configs/experiments/math_flywheel.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --override experiment.seed=43 finetune.gpu=1
+```
+
+The precedence order is safe defaults, inherited base YAML, environment YAML,
+experiment YAML, explicit compatibility CLI arguments, then `--override`.
+Unknown fields and unsafe values fail validation before model loading.
+
+Important sections in `configs/math_flywheel.yaml`:
+
+| Section | Purpose |
+| --- | --- |
+| `generation` | Difficulty 2–6 by default, reasoning limit, retries, quota repair. |
+| `evaluator_pipeline` | Prompt paths, Python timeout/size limits, retries, semantic-judge threshold. |
+| `test_taker_prompt` | No-tool, strict-JSON, reasoning and output-injection limits. |
+| `answer_normalization` | Numeric tolerances, symbolic rules, Math-Verify switch. |
+| `adaptive_sampling` | Previous-round global bands plus per-subcategory Beta-Binomial sampling. |
+| `dataset` | Deduplication and fixed-test similarity thresholds. |
+| `training_mix` | Exact 25/75 ratio and `current_cycle` scope. |
+| `fixed_test` | Dataset path, taxonomy coverage, baseline and post-cycle runs. |
+| `finetune` | GPU, epochs, batch, LoRA rank, sequence length, learning rate. |
+| `structured_output` | Outlines/Guidance local JSON backends and fail policy. |
+| `tracking.wandb` | W&B mode, project, group, tags, and model logging. |
+
+The evaluator and generation difficulty bounds must match. The validated
+defaults prohibit competition-level questions.
+
+### Adaptive difficulty and question allocation
+
+The next round uses the immediately previous test-taker round—not the fixed
+holdout score—as a coarse global difficulty guardrail:
+
+| Previous-round overall accuracy | Default next-round bias |
+| --- | --- |
+| Below `0.35` | Decrease difficulty by 1 |
+| `0.35` through `0.70` | Keep difficulty |
+| Above `0.70` | Increase difficulty by 1 |
+
+The global rule starts after
+`adaptive_sampling.global_accuracy_min_observations: 10`. Configure the two
+bounds with `global_accuracy_low` and `global_accuracy_high`, the step with
+`global_difficulty_step`, and the safety cap with
+`max_difficulty_change_per_iteration`. Difficulty is always clamped to
+`generation.minimum_difficulty` and `generation.maximum_difficulty` (2–6 by
+default).
+
+This does not replace AutoBencher's adaptive framework. The global bias is
+combined with the original per-subcategory and per-difficulty Beta-Binomial
+posterior, coverage quota deficits, uncertainty, persistent errors, retention
+probes, and eligible hard-pool variants. The local posterior target remains
+separately configurable as `target_accuracy_low/mid/high` (0.10/0.20/0.30 by
+default). A subcategory also resumes from its most recently sampled difficulty
+instead of resetting every round.
+
+## Running
+
+Evaluation only:
 
 ```bash
 python run_scripts.py math \
   --config configs/experiments/math_flywheel.yaml \
   --environment configs/environments/local.yaml \
-  --override experiment.seed=43 finetune.gpu=1
+  --mode eval \
+  --num-iters 2
 ```
 
-Boolean overrides accept `true/false`, `yes/no`, `on/off`, and `1/0`.
-Configuration validation fails before model loading for invalid ratios, quotas,
-thresholds, unknown fields, test-taker tool access, model paths, or output
-permissions. Legacy YAML fields such as `finetune_epoch` are migrated with a
-`DeprecationWarning`; unsupported schema versions are rejected.
-
-To create an experiment, copy the nearest profile, keep `extends`, and override
-only changed fields. Taxonomy quotas live under `taxonomy`, generation ratios
-under `generation_mix`, dataset ratios under `training_mix`, and progress
-settings under `logging`.
-
-Every run writes these configuration audit files inside its allocated
-`test_<N>` directory:
-
-```text
-resolved_config.yaml
-resolved_config.json
-config_sources.json
-config_validation.json
-config_hash.txt
-```
-
-`config_sources.json` records the winning source and value for each leaf field.
-Sensitive values are redacted. Compare `resolved_config.json` or
-`config_hash.txt` between two `test_<N>` directories to reproduce or audit
-experiments. A result-affecting configuration change changes the hash and
-invalidates incompatible caches.
-
-Backward-compatible options remain supported and are mapped centrally:
-
-| Legacy CLI | Configuration field |
-| --- | --- |
-| `--agent_modelname` | `models.evaluator.model_name` |
-| `--test_taker_modelname` | `models.test_taker.model_path` |
-| `--num_iters` | `experiment.num_iterations` |
-| `--max_cycle` | `experiment.max_cycles` |
-| `--acc_target` | `adaptive_sampling.target_accuracy_low/high/mid` |
-| `--finetune_gpu` | `finetune.gpu` |
-| `--finetune_epoch` | `finetune.epochs` |
-| `--finetune_batch` | `finetune.batch_size` |
-| `--lora_rank` | `finetune.lora_rank` |
-| `--clean_cycle_cache` | `experiment.clean_cycle_cache` |
-
-## Quick start
-
-### Verify the checkout
-
-```bash
-python smoke_test.py
-python math_autobencher.py --help
-python run_scripts.py --help
-python train_llm.py --help
-```
-
-`smoke_test.py` can make a small API request when credentials are present. The
-pytest suite described below is the API-free default validation.
-
-### Evaluation only
-
-This compatibility command builds benchmarks and hard-pool evidence but never
-starts training:
+Complete data flywheel:
 
 ```bash
 python run_scripts.py math \
-  --agent_modelname deepseek-v4-pro \
-  --test_taker_modelname qwen2.5:7b-instruct \
-  --exp_mode autobencher \
-  --use_helm no \
-  --num_iters 2 \
-  --outfile_prefix1 math_test/qwen7b_dsagent.0.3. \
-  --acc_target 0.1--0.3 \
-  --mode eval
-```
-
-PowerShell equivalent:
-
-```powershell
-python run_scripts.py math `
-  --agent_modelname deepseek-v4-pro `
-  --test_taker_modelname qwen2.5:7b-instruct `
-  --exp_mode autobencher `
-  --use_helm no `
-  --num_iters 2 `
-  --outfile_prefix1 math_test/qwen7b_dsagent.0.3. `
-  --acc_target 0.1--0.3 `
-  --mode eval
-```
-
-### Configuration-driven flywheel
-
-```bash
-python math_autobencher.py \
-  --config configs/math_flywheel_local.yaml
-```
-
-No external training-script path is accepted. The main process calls the root
-`train_llm.py` automatically.
-
-### Complete compatibility command
-
-The following existing long-form command remains supported. Explicit values
-override their YAML equivalents:
-
-```bash
-python math_autobencher.py \
-  --exp_mode autobencher \
-  --agent_modelname deepseek-v4-pro \
-  --test_taker_modelname /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct \
-  --use_helm no \
-  --num_iters 5 \
-  --outfile_prefix1 /vepfs-mlp2/queue010/20262202597/math_flywheel/qwen7b_dsagent. \
-  --acc_target 0.1,0.3 \
+  --config configs/experiments/math_flywheel.yaml \
+  --environment configs/environments/volcengine.yaml \
   --mode data_flywheel \
-  --export_interval 1 \
-  --max_cycle 3 \
-  --finetune_gpu 0 \
-  --finetune_epoch 3 \
-  --finetune_batch 8 \
-  --lora_rank 6 \
-  --new_local_model_suffix math_lora \
-  --clean_cycle_cache false
+  --num-iters 5 \
+  --max-cycle 3 \
+  --finetune-gpu 0 \
+  --finetune-epoch 3 \
+  --finetune-batch 8 \
+  --lora-rank 8
 ```
 
-### Other benchmark modules
+The legacy long-form arguments accepted by `math_autobencher.py` remain
+available for existing math workflows. Explicit CLI values override YAML.
 
-The original launcher workflows remain:
+## Evaluator answer pipeline
 
-```bash
-python run_scripts.py wiki
-python run_scripts.py multilingual
-python run_scripts.py math --num-iters 1
-```
+For every generated question:
 
-Wiki direct example:
+1. `evaluator_python_solver.txt` asks the primary evaluator to analyze the
+   problem and return only `analysis_summary` and problem-specific
+   `python_code`. Its
+   configurable `tora_evaluator_strategy.txt` policy adapts ToRA's
+   plan–program–output–answer pattern to a single fail-closed round.
+2. `evaluator_independent_solver.txt` gives a second solver only the original
+   question. It cannot see the first solver's reasoning, code, or answer.
+3. Both programs are parsed with `ast`; imports, file/network access, dynamic
+   execution, private attributes, definitions, and unsupported calls are
+   rejected.
+4. Each validated program runs with `python -I`, a temporary working directory, a
+   minimal environment, restricted built-ins, output limits, and a hard
+   timeout. It must return a canonical answer and pass its own verification and
+   substitution checks. The two runtime answers must be equivalent.
+5. `evaluator_postcheck.txt` runs in a fresh model call and sees only the
+   question plus the two verified runtime results. It independently
+   adjudicates the answer and rejects out-of-band difficulty.
+6. Both runtime answers and the adjudicated answer must be deterministically
+   equivalent and have compatible answer types.
 
-```bash
-python wiki_autobencher.py \
-  --exp_mode autobencher \
-  --test_taker_modelname deepseek-v4-pro \
-  --use_helm no \
-  --agent_modelname deepseek-v4-pro \
-  --theme history \
-  --outfile_prefix1 KI/history.
-```
+The existing deterministic `TruthSolver` remains as an independent
+cross-check where it supports the question. A disagreement rejects the
+question rather than silently choosing one answer.
 
-HELM and optional SDK modes require their own dependencies and credentials.
+Generated Python and raw evaluator analysis exist only in disposable evaluator
+cache fragments and never enter the test-taker prompt. A bounded, role-free
+`analysis_summary` is retained separately as the verified gold solution steps
+for training; code, prompt fragments, and the independent solver transcript are
+excluded.
 
-### Important CLI parameters
+DeepSeek-compatible requests intentionally omit `max_tokens`; the evaluator
+therefore is not truncated by an application output-token cap. Local model
+generation remains bounded for process safety.
 
-| Parameter | Default | Effect |
-| --- | --- | --- |
-| `--config` | none | YAML profile. |
-| `--run_id` | name plus config hash | Stable run identity for resume. |
-| `--resume` | YAML value | Reuse completed compatible caches. |
-| `--override PATH=VALUE` | none | Highest-priority temporary settings. |
-| `--mode` | `eval` in legacy CLI | `eval` or `data_flywheel`. |
-| `--num_iters` | `8` in legacy CLI | Iterations per cycle. |
-| `--max_cycle` | `1` | Maximum flywheel cycles. |
-| `--export_interval` | `1` | Completed-cycle boundary for dataset export. |
-| `--finetune_gpu` | `0` | CUDA device exposed to the trainer. |
-| `--finetune_epoch` | `3` | QLoRA epochs. |
-| `--finetune_batch` | `8` | Effective batch via gradient accumulation. |
-| `--lora_rank` | `8` in legacy CLI | LoRA rank; YAML default is `6`. |
-| `--new_local_model_suffix` | `finetuned` | Merged-model directory suffix. |
-| `--disk_warning_threshold` | `10` | Minimum free GB before training. |
-| `--clean_cycle_cache` | `true` | Remove redundant temporary fragments. |
+## Test-taker isolation and grading
 
-## Local and API model routing
-
-The common mixed deployment is:
-
-```text
-agent/evaluator: DeepSeek API
-test taker: local vLLM, Ollama, or Transformers
-trainer: local Transformers-compatible Qwen weights
-```
-
-### vLLM
-
-```dotenv
-VLLM_BASE_URL=http://127.0.0.1:8000/v1
-VLLM_API_KEY=EMPTY
-```
-
-When `VLLM_BASE_URL` is present, a tagged test-taker name such as
-`qwen2.5:7b-instruct` is sent to that OpenAI-compatible endpoint.
-
-### Ollama
-
-Without `VLLM_BASE_URL`, tagged identifiers use the native Ollama service:
-
-```dotenv
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_KEEP_ALIVE=30m
-OLLAMA_MAX_RETRIES=10
-OLLAMA_RETRY_DELAY_SECONDS=5
-OLLAMA_REQUEST_TIMEOUT=300
-```
-
-### Transformers
-
-Pass a local Hugging Face-compatible model directory. It must contain model
-configuration, tokenizer files, and weights.
-
-An Ollama/vLLM alias does not expose trainable source weights. Map it before a
-flywheel:
-
-```dotenv
-AUTOBENCHER_MODEL_MAP={"qwen2.5:7b-instruct":"/models/Qwen2.5-7B-Instruct"}
-```
-
-Alternatives are `AUTOBENCHER_LOCAL_MODEL_PATH` and
-`AUTOBENCHER_LOCAL_MODEL_ROOT`. Training uses `local_files_only=True`; it does
-not download model weights.
-
-## Volcengine remote GPU operation
-
-Volcengine image availability, CUDA versions, and console labels can change.
-Inspect the currently available preset Python images in the
-[Volcengine ML Platform console](https://console.volcengine.com/ml-platform/region:ml-platform+cn-beijing/mirror/detail?Id=vemlp-cn-beijing.cr.volces.com/preset-images/python)
-and choose an image compatible with the selected GPU and PyTorch build.
-
-### Persistent layout
-
-Use persistent storage rather than a temporary system root:
-
-```text
-/vepfs-mlp2/queue010/20262202597/
-├── AutoBencher/
-├── Qwen2.5-7B-Instruct/
-├── .cache/
-└── math_flywheel/
-```
-
-Do not keep the only checkpoint on ephemeral storage. Back up any non-persistent
-path before rebuilding a development machine or changing images.
-
-### Environment checks
-
-```bash
-nvidia-smi
-python --version
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-df -h /vepfs-mlp2/queue010/20262202597
-```
-
-Run artifacts also save package, platform, CUDA, device, image, driver, and Git
-metadata to `test_<N>/environment.json`.
-
-### Install and run
-
-```bash
-cd /vepfs-mlp2/queue010/20262202597/AutoBencher
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-lock.txt
-python math_autobencher.py \
-  --config configs/math_flywheel_volcengine.yaml
-```
-
-Set secrets through the platform environment or a protected `.env`; never put
-real credentials in the configuration file.
-
-### Interactive, tmux, nohup, and platform jobs
-
-Interactive development:
-
-```bash
-python math_autobencher.py \
-  --config configs/math_flywheel_volcengine.yaml
-```
-
-`tmux`:
-
-```bash
-tmux new -s math_flywheel
-cd /vepfs-mlp2/queue010/20262202597/AutoBencher
-source .venv/bin/activate
-python math_autobencher.py \
-  --config configs/math_flywheel_volcengine.yaml
-```
-
-Detach with `Ctrl+B`, then `D`; reconnect with:
-
-```bash
-tmux attach -t math_flywheel
-```
-
-`nohup`:
-
-```bash
-nohup python math_autobencher.py \
-  --config configs/math_flywheel_volcengine.yaml \
-  > /vepfs-mlp2/queue010/20262202597/math_flywheel/launcher.log \
-  2>&1 &
-tail -f /vepfs-mlp2/queue010/20262202597/math_flywheel/launcher.log
-```
-
-For a managed training or remote task: select a verified Python/CUDA image and
-GPU, mount persistent storage, set the project working directory and protected
-environment variables, use the configuration command above as the entry point,
-and point every output path to persistent storage. Platform UI field names are
-intentionally not assumed here.
-
-## PyCharm remote development
-
-1. Create and verify the remote Volcengine development machine.
-2. Configure SSH access without placing passwords or keys in the repository.
-3. In PyCharm, select Remote Development or configure an SSH interpreter.
-4. Open the remote `AutoBencher` directory.
-5. Select the remote `.venv` interpreter.
-6. Mark the repository root as the working directory.
-7. Configure API variables in a protected remote run configuration or `.env`.
-8. Verify `nvidia-smi` and the PyTorch CUDA probe in the PyCharm terminal.
-9. Run the smoke profile before a full experiment.
-10. Use `tmux`, `nohup`, or a platform job for long runs; do not depend on the
-    local PyCharm process remaining connected.
-
-## Outputs and data contracts
-
-Configuration-driven output:
-
-```text
-<output_root>/
-├── test_1/
-│   ├── resolved_config.yaml
-│   ├── resolved_config.json
-│   ├── config_sources.json
-│   ├── config_validation.json
-│   ├── config_hash.txt
-│   ├── environment.json
-│   ├── run_manifest.json
-│   ├── taxonomy_snapshot.json
-│   ├── experiment_summary.json
-│   ├── hard_pool.json
-│   ├── meta_summary.json
-│   ├── cycle_record.json
-│   ├── logs/
-│   │   ├── run.log
-│   │   └── events.jsonl
-│   └── cycle/
-│       └── cycle_1/
-│           ├── cycle_manifest.json
-│           ├── iter_1/
-│           │   ├── generation_plan.json
-│           │   ├── generated_questions.json
-│           │   ├── test_taker_outputs.json
-│           │   ├── normalized_answers.json
-│           │   ├── evaluation_results.json
-│           │   ├── error_attributions.json
-│           │   ├── coverage_metrics.json
-│           │   ├── adaptive_sampler_state.json
-│           │   ├── hard_pool_snapshot.json
-│           │   └── iteration_summary.json
-│           └── training/
-│               ├── dataset_candidates.json
-│               ├── dataset_selected.jsonl
-│               ├── dataset_manifest.json
-│               ├── dedup_report.json
-│               ├── diversity_report.json
-│               ├── finetune_config.json
-│               ├── finetune_metrics.jsonl
-│               ├── finetune_summary.json
-│               └── checkpoint_manifest.json
-├── test_2/
-└── test_3/
-```
-
-At startup, AutoBencher scans sibling directories matching `test_<number>` and
-atomically creates `test_<maximum+1>`. Unrelated names are ignored and existing
-runs are never overwritten. Every artifact produced by that invocation stays
-inside the allocated test directory. All `cycle_<N>` directories are grouped
-under its `cycle/` directory.
-
-When `experiment.clean_cycle_cache` is enabled, redundant fragments, malformed
-or empty JSON, attempt logs, and temporary inference files are cleaned in an
-iteration-level `finally` block. Cleanup therefore runs after every iteration,
-including generation, inference, and evaluation failure paths. Gold-validation
-audit files and core iteration outputs are preserved.
-
-Global compatibility files remain available inside the active `test_<N>` root:
-`hard_pool.json`, `meta_summary.json`, and `cycle_record.json`. Iteration
-compatibility files retain `test_taker_inference.json`,
-`compare_answers.json`, and `question_plan_with_aim.json`.
-
-JSON artifacts are UTF-8, two-space indented, newline terminated, and written
-through temporary files plus atomic replacement. JSONL is one complete UTF-8
-object per line. Every research envelope includes schema version, `run_id`,
-timestamp, Git commit, and `config_hash`.
-
-Representative hard-pool sample:
+The test taker receives one question at a time and no external tools. Its
+response must be one JSON object:
 
 ```json
 {
-  "source_iter": 3,
-  "source_cycle": 1,
-  "last_seen_iter": 3,
-  "last_seen_cycle": 1,
-  "category": "Algebra",
-  "sub_category": "Linear Equations",
-  "question": "Solve 3x + 5 = 20.",
-  "gold_answer": "5",
-  "test_taker_response": "4",
-  "error_tags": [
-    "calculation_error"
-  ],
-  "difficulty": 4,
-  "unique_key": "sha256-record-key",
-  "sample_grade": "train_eligible",
-  "accuracy_bucket": "0.1-0.4",
-  "sub_category_accuracy": 0.24,
-  "occurrences": 1
-}
-```
-
-Representative evaluation and attribution fields:
-
-```json
-{
-  "question_id": "c1_i3_q00001",
-  "status": "incorrect",
-  "is_correct": false,
-  "deterministic_checks": {
-    "answer_parse_success": true,
-    "numeric_equivalence": false,
-    "symbolic_equivalence": false,
-    "unit_consistent": true,
-    "format_valid": true
-  },
-  "evaluator_tool_calls": [],
-  "primary_error_tag": "calculation_error",
-  "secondary_error_tags": [],
-  "attribution_confidence": 0.72,
-  "needs_review": false
-}
-```
-
-Temporary `subcat` fragments, `all_questions.json`, `*.attempt*.txt`, empty
-JSON, and damaged JSON are removed when cleanup is enabled. Research manifests,
-final iteration artifacts, hard-pool state, and training exports are retained.
-
-## Coverage and adaptive sampling
-
-The taxonomy contains nine categories and three subcategories per category.
-Each subcategory defines `min_quota` and `base_weight`.
-
-- `subcategory_coverage` is the backward-compatible raw coverage:
-  subcategories with at least one sample divided by all subcategories.
-- `effective_subcategory_coverage` counts only subcategories meeting their
-  configured minimum quota.
-
-Balance metrics include normalized Shannon entropy, Jensen-Shannon divergence
-from uniform, count coefficient of variation, and max/min nonzero count ratio.
-
-The scheduler uses largest-remainder allocation, so integer allocations always
-sum exactly to `questions_per_iteration`. Minimum quotas are cumulative across
-iterations; one iteration is not required to cover every subcategory. The
-generation plan reports `multi_iteration_progress`, `scheduled_this_iteration`,
-or `complete`, and records remaining subcategories without treating incomplete
-single-iteration coverage as a runtime error. The compatibility field
-`quota_feasible` means that the current integer budget was allocated correctly.
-
-Per `(subcategory, difficulty)` accuracy is estimated with a Beta-Binomial
-posterior. Boundary proximity, coverage deficit, uncertainty, persistent error,
-and retention are combined into an auditable priority. Difficulty changes only
-after the minimum observation count.
-
-## Authoritative truth generation
-
-The LLM generator returns only objects shaped as `{"question": "..."}`. Answer,
-solution, answer-type, and metadata keys are forbidden. AutoBencher then strips
-natural-language wrappers, normalizes syntax such as `x^2` to `x**2`, and sends
-the extracted expression to `TruthSolver`. Only `TruthSolver` may populate
-`canonical_answer`, `gold_answer`, `display_answer`, and `answer_type`.
-
-`TruthSolver` routes single equations, linear systems, polynomial systems,
-integrals, limits, and direct expressions to separate SymPy branches. A truth
-is admitted only after deterministic verification against the original
-question. Parse errors, absent closed forms, infinite solutions, and timeouts
-are discarded before test-taker inference and receive structured failure
-labels.
-
-A question enters test-taker inference only when all of the following hold:
-
-- independent recomputation succeeds;
-- constraint/substitution verification succeeds;
-- the recomputed answer is deterministically equivalent to the proposed gold;
-- the validator answer type matches the generated-question answer type.
-
-For `ordered_tuple` systems of equations, no evaluator-reported answer exists
-or is trusted. SymPy parses the exact original `question` string,
-solves the system independently, and then substitutes the proposed tuple into
-every parsed equality. The audit records the original equation, substituted
-left value, substituted right value, difference, and pass/fail result for each
-equation. Source hashes prove that independent solving and substitution used
-the same original question. Parse failures, timeouts, no-solution systems,
-non-unique systems, and underdetermined systems fail closed.
-
-Truth failures are discarded and are never sent back to the LLM for blind
-repair. Generator-format failures alone may be repaired, and every retry
-includes the previous structured failure summary. A leaked candidate that
-satisfies only some system equations is labeled `partial_solution`; feedback
-includes the passed/total equation count. Accepted records preserve
-`truth_validation_details`, `canonical_answer`, and `failure_type`.
-
-If one subcategory still has no valid sample after configured retries,
-AutoBencher records the shortfall and continues the Cycle, including when an
-iteration has zero survivors. Coverage remains a cumulative multi-iteration
-target. Repeated zero-valid batches trigger a temporary subcategory cooldown.
-Cycle-level `generation_statistics.json` reports generated totals, valid
-samples, failure counts, and coverage gaps by category and subcategory.
-
-Stable truth-pipeline failure labels are:
-
-```text
-truth_parse_fail
-no_closed_solution
-infinite_solutions
-solve_timeout
-partial_solution
-repair_exhausted
-generator_format_error
-```
-
-Generation behavior is centralized under `generation` in YAML:
-
-```yaml
-generation:
-  temperature: 0.0
-  top_p: 0.1
-  generator_max_retry: 3
-  max_quota_repair_rounds: 3
-  truth_solver_timeout_seconds: 10
-  truth_solver_max_retry: 1
-  subcategory_failure_cooldown_threshold: 3
-  subcategory_cooldown_iterations: 2
-```
-
-## Test-taker isolation and evaluation
-
-The test taker receives no external tools and must return exactly:
-
-```json
-{
-  "reasoning_summary": [
-    "Compute the required intermediate value."
-  ],
-  "final_answer": "8",
+  "reasoning_summary": ["short reasoning step", "self-check step"],
+  "final_answer": "canonical answer text",
   "answer_type": "integer",
-  "confidence": 0.95
+  "confidence": 0.9
 }
 ```
 
-The parser records raw response, parsed response, repair count, parse status,
-prompt echo, irrelevant content, and tool violation. Output statuses are
-separate from mathematical correctness.
+Tool traces, prompt echo, irrelevant output, malformed JSON, or unapproved
+fields fail closed. Formatting is normalized before grading so equivalent
+fractions, decimals, symbolic forms, sets, intervals, tuples, and matrices are
+not rejected merely because they are written differently.
 
-Local Transformers inference applies the model chat template, uses the
-tokenizer EOS ID, forwards configured role stop sequences, and stops as soon as
-the first complete structured-answer JSON object closes. If a model still adds
-an explanation before the JSON or leaks another dialogue after it, the parser
-accepts the unique valid structured object and records
-`extraneous_content_discarded`, `discarded_prefix_chars`, and
-`discarded_suffix_chars`. Multiple structured answers, prompt echo, and tool
-calls remain hard failures.
+Every otherwise valid answer also goes through the isolated semantic judge. It
+compares only the question, canonical gold, answer type, normalized forms, and
+test-taker answer. The final record retains both deterministic evidence and the
+LLM decision, including confidence and disagreement flags.
 
-An otherwise valid answer is not discarded only because the model emitted more
-reasoning steps than requested. Excess steps and overlong step text are safely
-truncated while `reasoning_steps_truncated`,
-`original_reasoning_step_count`, `reasoning_steps_dropped`, and
-`reasoning_step_chars_truncated` preserve the audit trail. Generated questions
-containing CJK text or the Unicode replacement character are rejected before
-inference so encoding-corrupted math notation cannot enter evaluation or
-training data.
+## Fixed test and leakage protection
 
-Supported answer types include integer, decimal, rational, percentage, Boolean,
-symbolic expression, equation, inequality, set, interval, tuple, collection,
-vector, matrix, unit value, multiple choice, and text. Numeric tolerance and
-unit rules come from YAML. Common model aliases are canonicalized before Schema
-validation, including `fraction` to `rational`, `percent` to `percentage`, and
-`bool` to `boolean`. Mixed-number aliases such as `mixed_number` and
-`mixed_fraction` also map to `rational`; unknown labels fall back to
-deterministic inference from the canonical answer.
+`benchmarks/fixed_math_test_set.json` is immutable input to the training loop and
+contains one moderate question for every configured subcategory.
 
-Before numeric type parsing, both the canonical gold answer and the extracted
-test-taker answer are compared through a temporary cleaned copy. The cleanup
-removes surrounding whitespace, a leading scalar assignment such as `x = `,
-`y=`, or `z =`, and a trailing degree symbol. Raw responses and the persisted
-`parsed_response.final_answer` are never rewritten. Equation, symbolic, unit,
-and structured answer types retain their original syntax.
+- At startup, the original test taker is evaluated and its baseline accuracy is
+  stored.
+- After every successful training cycle, the merged model is evaluated on the
+  same dataset.
+- Each cycle summary records baseline accuracy, current accuracy, and delta.
+- Fixed-test questions never enter the hard-example training candidates.
+- Training candidates are rejected on exact question match, normalized
+  template match, token overlap, TF-IDF cosine similarity, datasketch
+  MinHash/LSH, or Sentence-Transformers cosine similarity above configurable
+  holdout thresholds.
 
-Error attribution follows output validity, answer equivalence, then
-mathematical evidence. Fixed tags are:
+The default semantic backend is
+`sentence-transformers/all-MiniLM-L6-v2`. Its model name, revision, device,
+cache directory, batch size, and `local_files_only` behavior are configurable
+under `dataset`. In data-flywheel mode this guard is required and fails closed:
+if the embedding model cannot load, training export stops instead of silently
+allowing possible test leakage. The first online run may download the selected
+model; provision its cache in advance and enable
+`sentence_transformers_local_files_only` for an offline deployment.
 
-```text
-concept_confusion
-formula_memory_error
-calculation_error
-multi_step_logic_error
-condition_missing
-format_output_error
-tool_violation
-irrelevant_output
-prompt_echo
-parse_failed
-unknown_error
-```
+Keep the test-set file under version control. Changing it changes its SHA-256
+and creates a different benchmark; do not compare the resulting scores as if
+they came from the same holdout.
 
-Low-confidence cases become `unknown_error` and set `needs_review=true`.
-`autobencher/attribution_eval.py` can export a review CSV and compute precision,
-recall, F1, confusion matrices, and Cohen's kappa from reviewed labels.
+## Training dataset contract
 
-## Training dataset and LoRA
+Only records from the current cycle are eligible. After quality filtering,
+holdout filtering, and deduplication, selection uses complete four-example
+blocks:
 
-The mixed target distribution is configurable and defaults to:
+- 1 correct retention example (25%);
+- 3 wrong examples from the cycle's wrong pool (75%).
 
-- 55% incorrect boundary samples;
-- 25% correct retention samples;
-- 15% coverage repair samples;
-- 5% format-instruction samples.
+The wrong portion is distributed among boundary errors, coverage repair, and
+format/instruction errors according to `training_mix`. If a source is short,
+other wrong records may fill its share, but correct records never fill a wrong
+slot. Incomplete four-example blocks are not exported. The manifest records the
+selected counts and asserts the exact ratio before fine-tuning.
 
-Noise filtering rejects ambiguous questions, invalid answers, low evaluator
-confidence, tool violations, irrelevant output, prompt echo, and empty fields.
-Deduplication applies exact signatures, token-shingle Jaccard, dependency-free
-TF-IDF cosine similarity, and numeric/template clustering. Rejection reasons
-and source counts are exported.
+Every eligible record must also contain a non-empty `gold_reasoning_summary`
+within the configured step and character limits. The summary comes from the
+runtime-verified evaluator solution; missing, role-injected, tool-seeking,
+Markdown-fenced, or oversized steps are rejected. Alpaca output always contains
+the verified steps, `final_answer`, `answer_type`, and confidence—there is no
+generic placeholder solution.
 
-The selected file uses strict Alpaca JSONL:
+QLoRA is implemented with Hugging Face TRL's `SFTConfig`/`SFTTrainer`. When
+`tracking.wandb.enabled` is true, Trainer reports metrics to W&B. The default
+`offline` mode writes local run data without uploading; switching to `online`
+is an explicit configuration choice.
 
-```json
-{
-  "instruction": "Solve the math problem and return a JSON object with reasoning_summary, final_answer, answer_type, and confidence.",
-  "input": "What is 5 + 3?",
-  "output": "{\"reasoning_summary\":[\"Add the integers.\"],\"final_answer\":\"8\",\"answer_type\":\"integer\",\"confidence\":1.0}"
-}
-```
+## Outputs and cache retention
 
-`train_llm.py` uses Transformers, PEFT, bitsandbytes, TRL, and Datasets to:
+Each run stores resolved configuration, source provenance, validation results,
+configuration hash, environment snapshot, manifests, logs, global hard pool,
+training artifacts, model artifacts, and fixed-test results.
 
-1. load offline local weights;
-2. quantize the base model to NF4 4-bit;
-3. prepare Qwen projection modules for LoRA;
-4. train with gradient checkpointing and gradient accumulation;
-5. save per-step metrics;
-6. reload the base model and merge the adapter;
-7. atomically publish a full local model directory.
-
-Direct trainer help:
-
-```bash
-python train_llm.py --help
-```
-
-The main flywheel passes model, dataset, GPU, epoch, batch, rank, sequence
-length, learning rate, run ID, config hash, metrics path, and output directory.
-
-## Cache recovery, logs, and progress
-
-Rerun the same `run_id` and compatible configuration to resume. Completed
-inference records and iterations are reused, completed cycles are skipped, and
-the active merged model is restored from `cycle_record.json`. A cache carrying a
-different `config_hash` is rejected. The compound identity
-`run_id + cycle_id + iteration_id + question_id` prevents repeated statistics,
-and replaying one iteration does not increment hard-pool occurrences.
-
-Each stage owns at most one dynamic progress bar. Nested bars raise an error.
-Non-TTY profiles disable the bar, and Transformers/Datasets advisory bars are
-disabled during evaluation. In an interactive terminal, Generate, Infer, and
-Evaluate each reuse one in-place bar and close it before the next stage starts.
-The trainer keeps its single Trainer progress bar. Redirected `nohup` output is
-non-TTY, so it uses stage log messages instead of emitting repeated pseudo-bars.
-
-Human-readable and machine-readable logs are:
+With `experiment.clean_cycle_cache: true`, every iteration directory contains
+exactly these JSON files after its `finally` cleanup:
 
 ```text
-test_<N>/logs/run.log
-test_<N>/logs/events.jsonl
+cycle/cycle_<N>/iter_<M>/
+├── <prefix>.question_plan_with_aim.json
+├── <prefix>.test_taker_inference.json
+└── <prefix>.compare_answers.json
 ```
 
-Events include timestamp, level, run ID, cycle, iteration, stage, event,
-message, and metrics. Failures such as model loading, fine-tuning OOM, disk
-shortage, timeout, and JSON errors are stored before exit.
+All `subcat*.json`, generator attempts, evaluator Python caches, temporary
+judgments, malformed/empty JSON, and redundant iteration summaries are removed.
+Cleanup is idempotent and runs after success or failure. Cycle-level training,
+metrics, hard-pool, and fixed-test artifacts are retained because they are
+results, not iteration caches.
 
-## Experiment reproduction
+Fixed-test outputs are kept separately:
 
-Archive the run directory together with:
-
-- the Git commit in each manifest;
-- resolved YAML and JSON plus config hash;
-- taxonomy and prompt version/hash;
-- model name/path and active merged checkpoint;
-- environment and CUDA snapshot;
-- seeds, run/cycle/iteration/question identities;
-- generated questions and raw structured outputs;
-- deterministic checks and error attributions;
-- hard-pool snapshots and adaptive sampler state;
-- selected/rejected dataset manifests;
-- fine-tuning configuration and step metrics.
-
-For an exact resume, keep the same `run_id`, configuration, model files, and
-output root. Use `--resume false` to generate a timestamped new run ID when one
-is not provided.
-
-## Troubleshooting
-
-### Local model loading
-
-Confirm the directory contains `config.json`, tokenizer files, and weights.
-Check read permissions, available VRAM, `VLLM_BASE_URL` including `/v1`, and the
-served model alias. For training an alias, set `AUTOBENCHER_MODEL_MAP`.
-
-### Fine-tuning OOM
-
-Reduce `finetune.batch_size`, `finetune.lora_rank`, or
-`finetune.max_seq_length`; use a smaller model; and ensure vLLM is not retaining
-the selected training GPU. Evaluation data and manifests are preserved on
-failure.
-
-### Disk threshold
-
-Free persistent space or adjust `--disk_warning_threshold` only after verifying
-that both temporary adapter and merged model will fit.
-
-### API timeout
-
-Check endpoint, credentials, account access, network, and service status. Rerun
-the same run ID to reuse completed work.
-
-### Structured JSON failure
-
-Inspect `raw_response`, `parse_status`, and iteration logs. The parser can
-repair fenced JSON, smart quotes, unquoted English keys, and trailing commas,
-but rejects multiple objects, role-prefixed text, prompt echo, and tool calls.
-
-### Missing training packages
-
-```bash
-python -m pip install -r requirements-lock.txt
-python -c "import torch, transformers, peft, bitsandbytes, trl, datasets; print('ready')"
+```text
+fixed_test/
+├── dataset_snapshot.json
+├── baseline/
+│   ├── fixed_math.test_taker_inference.json
+│   ├── fixed_math.compare_answers.json
+│   └── summary.json
+└── cycle_<N>/
+    ├── fixed_math.test_taker_inference.json
+    ├── fixed_math.compare_answers.json
+    └── summary.json
 ```
 
-## Tests
+## Open-source foundations
 
-Default CPU and mock suite:
+The benchmark loop retains the planning, generation, evaluation, and feedback
+topology of [XiangLi1999/AutoBencher](https://github.com/XiangLi1999/AutoBencher).
+The evaluator strategy adapts the MIT-licensed
+[Microsoft ToRA](https://github.com/microsoft/ToRA) tool-integrated reasoning
+pattern, while replacing free-form tool execution with the restricted local
+runtime described above.
+
+The project also uses Hugging Face
+[Math-Verify](https://github.com/huggingface/Math-Verify) as a maintained,
+Apache-2.0-licensed fallback for parsing and comparing mathematical answer
+forms. AutoBencher's own typed normalization and SymPy checks run first, and
+the isolated LLM semantic judge remains mandatory by default.
+
+Training/holdout leakage prevention uses an Apache-2.0-compatible, clean-room
+MinHash adaptation informed by
+[ChenghaoMou/text-dedup](https://github.com/ChenghaoMou/text-dedup) and the
+MIT-licensed [datasketch](https://github.com/ekzhu/datasketch) MinHash/LSH
+implementation, followed by the Apache-2.0-licensed
+[Hugging Face Sentence Transformers](https://github.com/huggingface/sentence-transformers).
+Local constrained JSON uses
+[Outlines](https://github.com/dottxt-ai/outlines) with
+[Guidance](https://github.com/guidance-ai/guidance) fallback. Fine-tuning uses
+[TRL](https://github.com/huggingface/trl), and configurable experiment tracking
+uses [Weights & Biases](https://github.com/wandb/wandb).
+See `THIRD_PARTY_NOTICES.md` for the precise reuse boundary and license notes.
+
+## Verification
+
+Run the CPU test suite:
 
 ```bash
 python -m pytest -q
 ```
 
-GPU and real API tests are opt-in and skipped by default:
+Syntax and CLI checks:
 
 ```bash
-AUTOBENCHER_RUN_GPU_TESTS=1 python -m pytest -m gpu
-AUTOBENCHER_RUN_API_TESTS=1 python -m pytest -m api
+python -m py_compile math_autobencher.py run_scripts.py tool_util.py autobencher/*.py
+python math_autobencher.py --help
+python run_scripts.py --help
 ```
 
-Windows PowerShell:
-
-```powershell
-$env:AUTOBENCHER_RUN_GPU_TESTS = "1"
-python -m pytest -m gpu
-```
-
-The CPU mock covers configuration, quota scheduling, structured inference,
-answer normalization, evaluation, dataset construction, atomic exports, and
-research manifests without a real API or GPU. Real DeepSeek-v4-pro behavior,
-full local Qwen inference, CUDA QLoRA, and Volcengine scheduling must be
-validated in the target environment; offline unit success is not evidence that
-those external systems ran.
-
-## Citation, license, and contribution
-
-This checkout does not currently include a `CITATION.cff` or a repository
-license file. Do not infer a license from package availability. Add the
-upstream project citation and license before redistributing modified code.
-
-Contributions should include:
-
-- a focused change with backward-compatible migration notes;
-- updated YAML/schema/README documentation;
-- CPU tests for deterministic behavior;
-- `gpu` or `api` markers for external-system tests;
-- no credentials, private model paths, caches, or generated checkpoints.
+Real API inference, local model loading, CUDA QLoRA, and remote scheduling
+require their respective credentials, model files, and hardware; unit tests do
+not claim those external integrations passed.

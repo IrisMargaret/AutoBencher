@@ -474,6 +474,77 @@ class GenerationQuotaRepairTests(unittest.TestCase):
             1,
         )
 
+    def test_truth_failure_does_not_block_replacement_candidate(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        plan = {
+            "question_budget": 2,
+            "cycle": 1,
+            "global_iteration": 1,
+            "allocations": [
+                {
+                    "category": "Arithmetic",
+                    "sub_category": "Integer Operations",
+                    "question_count": 2,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 2,
+                }
+            ],
+        }
+        first = self._verified_question()
+        second = {
+            **self._verified_question(),
+            "question": "What is 2 + 2?",
+            "canonical_answer": "4",
+            "display_answer": "4",
+            "answer": "4",
+            "gold_answer": "4",
+        }
+        calls = []
+
+        def generate(*args, **kwargs):
+            calls.append(kwargs["question_count"])
+            prefix = args[4]
+            if len(calls) == 1:
+                dump_standard_json(
+                    {
+                        "generator_output_questions": 2,
+                        "failure_counts": {
+                            FailureType.TRUTH_PARSE_FAIL.value: 1
+                        },
+                    },
+                    f"{prefix}.generation_batch_summary.json",
+                )
+                return [[first]]
+            dump_standard_json(
+                {
+                    "generator_output_questions": 1,
+                    "failure_counts": {},
+                },
+                f"{prefix}.generation_batch_summary.json",
+            )
+            return [[second]]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(
+                math_autobencher,
+                "_generate_question_text_with_truth",
+                side_effect=generate,
+            ):
+                questions, _ = math_autobencher._ask_question_v3(
+                    ("model", None, object()),
+                    [],
+                    1,
+                    str(Path(temp_dir, "iteration")),
+                    generation_plan=plan,
+                    research_config=config,
+                )
+        self.assertEqual(calls, [2, 1])
+        self.assertEqual(len(questions), 2)
+        self.assertFalse(plan["generation_result"]["partial_iteration"])
+
     def test_repeated_subcategory_failure_triggers_temporary_cooldown(self):
         config, _ = load_project_config(
             ROOT / "configs" / "math_flywheel_smoke_test.yaml"
@@ -592,7 +663,8 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
 
     def test_llm_question_only_output_receives_truth_solver_gold(self):
         config, _ = load_project_config(
-            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             prefix = str(Path(temp_dir, "subcat0"))
@@ -630,7 +702,8 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
 
     def test_leaked_partial_gold_adds_feedback_before_retry(self):
         config, _ = load_project_config(
-            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
         )
         faulty_question = (
             "Solve the system for (x, y, z): "
@@ -683,7 +756,8 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
 
     def test_truth_solver_failure_is_discarded_without_llm_repair(self):
         config, _ = load_project_config(
-            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             prefix = str(Path(temp_dir, "subcat0"))
@@ -716,6 +790,38 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
                 summary["failure_counts"]["truth_parse_fail"],
                 1,
             )
+
+    def test_invalid_candidate_is_skipped_while_valid_sibling_continues(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
+        )
+        mixed_batch = [
+            {"question": "Solve for x: x + 4 = 9."},
+            {
+                "question": "Solve for x: x + 8 = 10.",
+                "answer": "2",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "subcat0"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                return_value=self._result(mixed_batch),
+            ) as generate:
+                result = math_autobencher._generate_question_text_with_truth(
+                    self._description(),
+                    "model",
+                    None,
+                    object(),
+                    prefix,
+                    question_count=2,
+                    research_config=config,
+                )
+        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(len(result[0]), 1)
+        self.assertEqual(result[0][0]["canonical_answer"], "5")
 
 
 class InferenceResumeTests(unittest.TestCase):
@@ -893,6 +999,18 @@ class MathJsonGovernanceTests(unittest.TestCase):
                 "run.gold_answer_validation.json",
             )
             dump_standard_json([{"status": "failed"}], audit)
+            core_paths = {
+                Path(paths["plan_file"]),
+                Path(paths["inference_file"]),
+                Path(paths["compare_file"]),
+            }
+            for core_path in core_paths:
+                dump_standard_json([{"status": "core"}], core_path)
+            subcat = Path(
+                paths["iteration_dir"],
+                "run.cycle1.iter1.subcat0.questions.json",
+            )
+            dump_standard_json([{"status": "temporary"}], subcat)
 
             removed = math_autobencher._cleanup_iteration_cache(
                 args,
@@ -902,7 +1020,15 @@ class MathJsonGovernanceTests(unittest.TestCase):
 
             self.assertIn(str(attempt), removed)
             self.assertFalse(attempt.exists())
-            self.assertTrue(audit.exists())
+            self.assertFalse(audit.exists())
+            self.assertFalse(subcat.exists())
+            self.assertEqual(
+                {
+                    path
+                    for path in Path(paths["iteration_dir"]).glob("*.json")
+                },
+                core_paths,
+            )
 
 
 if __name__ == "__main__":

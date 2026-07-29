@@ -58,6 +58,9 @@ def record(question, answer, *, correct=False, accuracy=0.2, **extra):
         "evaluator_confidence": 0.95,
         "question_parse_success": True,
         "answer_validation_success": True,
+        "gold_reasoning_summary": [
+            "Apply the stated arithmetic operation and verify the result."
+        ],
         **extra,
     }
 
@@ -76,6 +79,7 @@ def test_similarity_metrics_detect_close_text():
 
 
 def test_dataset_exact_dedup_and_noise_filter(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
     records = [
         record("What is 2 + 2?", "4"),
         record("What is 2 + 2?", "4"),
@@ -88,7 +92,43 @@ def test_dataset_exact_dedup_and_noise_filter(config):
     assert len(rejected) == 2
 
 
+def test_training_sample_requires_verified_answer_and_solution_steps(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    missing_steps = record(
+        "Compute 91 minus 17.",
+        "74",
+        gold_reasoning_summary=None,
+    )
+    selected, manifest, rejected = build_training_dataset(
+        [missing_steps],
+        config,
+    )
+    assert selected == []
+    assert manifest["rejection_reasons"][
+        "missing_gold_reasoning_steps"
+    ] == 1
+    assert rejected[0]["reasons"] == ["missing_gold_reasoning_steps"]
+
+
+def test_alpaca_output_contains_verified_steps_and_answer(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    source = record(
+        "Compute 12 times 7.",
+        "84",
+        gold_reasoning_summary=[
+            "Multiply twelve by seven.",
+            "Check that 84 divided by seven equals twelve.",
+        ],
+    )
+    selected, _, _ = build_training_dataset([source], config)
+    payload = json.loads(selected[0]["output"])
+    assert payload["reasoning_summary"] == source["gold_reasoning_summary"]
+    assert payload["final_answer"] == "84"
+    assert payload["answer_type"] == "integer"
+
+
 def test_dataset_template_cluster_limit(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
     config["dataset"]["near_duplicate_threshold"] = 1.0
     config["dataset"]["semantic_dedup"] = False
     config["dataset"]["max_samples_per_template_cluster"] = 1

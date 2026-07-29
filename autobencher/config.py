@@ -265,6 +265,10 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "max_questions_per_prompt": 50,
         "temperature": 0.0,
         "top_p": 0.1,
+        "minimum_difficulty": 2,
+        "maximum_difficulty": 6,
+        "maximum_reasoning_steps": 6,
+        "prohibit_competition_level": True,
         "generator_max_retry": 3,
         "max_quota_repair_rounds": 3,
         "allow_partial_question_budget": True,
@@ -279,6 +283,36 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "gold_validation_max_tokens": 4096,
         "gold_validation_timeout_seconds": 10,
     },
+    "evaluator_pipeline": {
+        "enabled": True,
+        "solver_prompt_path": "prompts/evaluator_python_solver.txt",
+        "solver_strategy_path": "prompts/tora_evaluator_strategy.txt",
+        "independent_solver_prompt_path": (
+            "prompts/evaluator_independent_solver.txt"
+        ),
+        "postcheck_prompt_path": "prompts/evaluator_postcheck.txt",
+        "semantic_judge_prompt_path": "prompts/semantic_answer_judge.txt",
+        "temperature": 0.0,
+        "solver_max_tokens": 4096,
+        "independent_solver_max_tokens": 4096,
+        "postcheck_max_tokens": 1024,
+        "semantic_judge_max_tokens": 768,
+        "code_generation_attempts": 2,
+        "independent_solver_attempts": 2,
+        "postcheck_attempts": 2,
+        "semantic_judge_attempts": 2,
+        "code_execution_timeout_seconds": 10,
+        "max_code_chars": 12000,
+        "max_ast_nodes": 4000,
+        "max_integer_literal": 1000000,
+        "max_output_chars": 16000,
+        "max_answer_chars": 512,
+        "minimum_difficulty": 2,
+        "maximum_difficulty": 6,
+        "semantic_judge_confidence_threshold": 0.80,
+        "require_runtime_verification": True,
+        "require_semantic_judge": True,
+    },
     "hard_pool": {
         "enabled": True,
         "injection_start_iteration": 3,
@@ -291,6 +325,13 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "adaptive_sampling": {
         "enabled": True,
+        "initial_difficulty": 4,
+        "global_accuracy_enabled": True,
+        "global_accuracy_low": 0.35,
+        "global_accuracy_high": 0.70,
+        "global_accuracy_min_observations": 10,
+        "global_difficulty_step": 1,
+        "max_difficulty_change_per_iteration": 1,
         "target_accuracy_low": 0.10,
         "target_accuracy_high": 0.30,
         "target_accuracy_mid": 0.20,
@@ -335,6 +376,7 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "normalize_boolean_text": True,
         "symbolic_equivalence": True,
         "set_order_sensitive": False,
+        "math_verify_enabled": True,
     },
     "error_attribution": {
         "enabled": True,
@@ -355,13 +397,50 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "filter_ambiguous_samples": True,
         "filter_invalid_answers": True,
         "filter_tool_violations": True,
+        "require_gold_reasoning_steps": True,
+        "min_gold_reasoning_steps": 1,
+        "max_gold_reasoning_steps": 6,
+        "max_gold_reasoning_chars_per_step": 300,
         "max_samples_per_template_cluster": 5,
+        "holdout_exact_template_rejection": True,
+        "holdout_near_duplicate_threshold": 0.85,
+        "holdout_semantic_similarity_threshold": 0.82,
+        "text_dedup_enabled": True,
+        "text_dedup_num_perm": 128,
+        "text_dedup_ngram_size": 2,
+        "text_dedup_seed": 42,
+        "text_dedup_similarity_threshold": 0.78,
+        "holdout_text_dedup_similarity_threshold": 0.72,
+        "datasketch_enabled": True,
+        "datasketch_required": True,
+        "datasketch_lsh_enabled": True,
+        "sentence_transformers_enabled": True,
+        "sentence_transformers_required": True,
+        "sentence_transformers_model": (
+            "sentence-transformers/all-MiniLM-L6-v2"
+        ),
+        "sentence_transformers_revision": None,
+        "sentence_transformers_device": "cpu",
+        "sentence_transformers_cache_dir": None,
+        "sentence_transformers_local_files_only": False,
+        "sentence_transformers_batch_size": 64,
     },
     "training_mix": {
         "incorrect_boundary_samples": 0.55,
         "correct_retention_samples": 0.25,
         "coverage_repair_samples": 0.15,
         "format_instruction_samples": 0.05,
+        "strict_correct_incorrect_ratio": True,
+        "scope": "current_cycle",
+        "minimum_samples": 4,
+    },
+    "fixed_test": {
+        "enabled": True,
+        "dataset_path": "benchmarks/fixed_math_test_set.json",
+        "require_all_subcategories": True,
+        "evaluate_baseline": True,
+        "evaluate_after_each_training_cycle": True,
+        "fail_on_training_leakage": True,
     },
     "finetune": {
         "enabled": True,
@@ -374,6 +453,25 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "learning_rate": 2.0e-4,
         "save_step_metrics": True,
         "merge_adapter": True,
+    },
+    "structured_output": {
+        "enabled": True,
+        "local_backend": "outlines",
+        "fallback_backend": "guidance",
+        "required": False,
+        "use_for_evaluator": True,
+        "use_for_test_taker": True,
+    },
+    "tracking": {
+        "wandb": {
+            "enabled": True,
+            "mode": "offline",
+            "project": "autobencher-math-flywheel",
+            "entity": None,
+            "group": "adaptive-math-flywheel",
+            "tags": ["autobencher", "math", "data-flywheel"],
+            "log_model": False,
+        },
     },
     "export": {
         "save_iteration_json": True,
@@ -785,6 +883,69 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ConfigurationError(path, "must be a positive integer", value)
+    for path in (
+        "generation.minimum_difficulty",
+        "generation.maximum_difficulty",
+        "generation.maximum_reasoning_steps",
+        "evaluator_pipeline.solver_max_tokens",
+        "evaluator_pipeline.independent_solver_max_tokens",
+        "evaluator_pipeline.postcheck_max_tokens",
+        "evaluator_pipeline.semantic_judge_max_tokens",
+        "evaluator_pipeline.code_generation_attempts",
+        "evaluator_pipeline.independent_solver_attempts",
+        "evaluator_pipeline.postcheck_attempts",
+        "evaluator_pipeline.semantic_judge_attempts",
+        "evaluator_pipeline.max_code_chars",
+        "evaluator_pipeline.max_ast_nodes",
+        "evaluator_pipeline.max_integer_literal",
+        "evaluator_pipeline.max_output_chars",
+        "evaluator_pipeline.max_answer_chars",
+        "dataset.text_dedup_num_perm",
+        "dataset.text_dedup_ngram_size",
+        "dataset.min_gold_reasoning_steps",
+        "dataset.max_gold_reasoning_steps",
+        "dataset.max_gold_reasoning_chars_per_step",
+        "dataset.sentence_transformers_batch_size",
+        "adaptive_sampling.initial_difficulty",
+        "adaptive_sampling.global_accuracy_min_observations",
+        "adaptive_sampling.global_difficulty_step",
+        "adaptive_sampling.max_difficulty_change_per_iteration",
+        "evaluator_pipeline.minimum_difficulty",
+        "evaluator_pipeline.maximum_difficulty",
+        "training_mix.minimum_samples",
+    ):
+        value = _get(config, path)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigurationError(path, "must be a positive integer", value)
+    text_dedup_seed = _get(config, "dataset.text_dedup_seed")
+    if (
+        not isinstance(text_dedup_seed, int)
+        or isinstance(text_dedup_seed, bool)
+        or text_dedup_seed < 0
+    ):
+        raise ConfigurationError(
+            "dataset.text_dedup_seed",
+            "must be a non-negative integer",
+            text_dedup_seed,
+        )
+    generation_difficulty = (
+        int(_get(config, "generation.minimum_difficulty")),
+        int(_get(config, "generation.maximum_difficulty")),
+    )
+    evaluator_difficulty = (
+        int(_get(config, "evaluator_pipeline.minimum_difficulty")),
+        int(_get(config, "evaluator_pipeline.maximum_difficulty")),
+    )
+    for path, (minimum, maximum) in (
+        ("generation", generation_difficulty),
+        ("evaluator_pipeline", evaluator_difficulty),
+    ):
+        if not 1 <= minimum <= maximum <= 10:
+            raise ConfigurationError(
+                f"{path}.minimum_difficulty",
+                "difficulty bounds must satisfy 1 <= minimum <= maximum <= 10",
+                [minimum, maximum],
+            )
     validation_timeout = _get(
         config,
         "generation.truth_solver_timeout_seconds",
@@ -826,6 +987,34 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
     for path in (
         "generation.allow_partial_question_budget",
         "generation.require_gold_answer_validation",
+        "generation.prohibit_competition_level",
+        "evaluator_pipeline.enabled",
+        "evaluator_pipeline.require_runtime_verification",
+        "evaluator_pipeline.require_semantic_judge",
+        "answer_normalization.math_verify_enabled",
+        "dataset.holdout_exact_template_rejection",
+        "dataset.require_gold_reasoning_steps",
+        "dataset.text_dedup_enabled",
+        "dataset.datasketch_enabled",
+        "dataset.datasketch_required",
+        "dataset.datasketch_lsh_enabled",
+        "dataset.sentence_transformers_enabled",
+        "dataset.sentence_transformers_required",
+        "dataset.sentence_transformers_local_files_only",
+        "structured_output.enabled",
+        "structured_output.required",
+        "structured_output.use_for_evaluator",
+        "structured_output.use_for_test_taker",
+        "tracking.wandb.enabled",
+        "tracking.wandb.log_model",
+        "adaptive_sampling.enabled",
+        "adaptive_sampling.global_accuracy_enabled",
+        "training_mix.strict_correct_incorrect_ratio",
+        "fixed_test.enabled",
+        "fixed_test.require_all_subcategories",
+        "fixed_test.evaluate_baseline",
+        "fixed_test.evaluate_after_each_training_cycle",
+        "fixed_test.fail_on_training_leakage",
     ):
         if not isinstance(_get(config, path), bool):
             raise ConfigurationError(path, "must be a Boolean")
@@ -838,6 +1027,14 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "generation.minimum_verified_questions",
             "must not exceed experiment.questions_per_iteration",
             minimum_verified,
+        )
+    reasoning_min = int(_get(config, "dataset.min_gold_reasoning_steps"))
+    reasoning_max = int(_get(config, "dataset.max_gold_reasoning_steps"))
+    if reasoning_min > reasoning_max:
+        raise ConfigurationError(
+            "dataset.min_gold_reasoning_steps",
+            "must not exceed dataset.max_gold_reasoning_steps",
+            reasoning_min,
         )
     test_taker_tools = _get(config, "models.test_taker.use_external_tools")
     if not isinstance(test_taker_tools, bool):
@@ -872,6 +1069,21 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "format_instruction_samples",
         ],
     )
+    correct_fraction = float(
+        _get(config, "training_mix.correct_retention_samples")
+    )
+    if abs(correct_fraction - 0.25) > 1e-9:
+        raise ConfigurationError(
+            "training_mix.correct_retention_samples",
+            "must be exactly 0.25 for the fixed 25% correct / 75% wrong mix",
+            correct_fraction,
+        )
+    if _get(config, "training_mix.scope") != "current_cycle":
+        raise ConfigurationError(
+            "training_mix.scope",
+            "must be current_cycle to prevent prior-cycle sampling drift",
+            _get(config, "training_mix.scope"),
+        )
     _validate_ratio_group(
         config,
         "adaptive_sampling",
@@ -892,19 +1104,175 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "target accuracies must satisfy 0 <= low <= mid <= high <= 1",
             [accuracy_low, accuracy_mid, accuracy_high],
         )
+    global_accuracy_low = float(
+        _get(config, "adaptive_sampling.global_accuracy_low")
+    )
+    global_accuracy_high = float(
+        _get(config, "adaptive_sampling.global_accuracy_high")
+    )
+    if not 0 <= global_accuracy_low <= global_accuracy_high <= 1:
+        raise ConfigurationError(
+            "adaptive_sampling.global_accuracy_low",
+            "global accuracy bounds must satisfy 0 <= low <= high <= 1",
+            [global_accuracy_low, global_accuracy_high],
+        )
+    initial_difficulty = int(
+        _get(config, "adaptive_sampling.initial_difficulty")
+    )
+    if not generation_difficulty[0] <= initial_difficulty <= generation_difficulty[1]:
+        raise ConfigurationError(
+            "adaptive_sampling.initial_difficulty",
+            "must be within the configured generation difficulty bounds",
+            initial_difficulty,
+        )
     for path in (
         "answer_normalization.absolute_tolerance",
         "answer_normalization.relative_tolerance",
         "dataset.near_duplicate_threshold",
         "dataset.semantic_similarity_threshold",
         "dataset.evaluator_confidence_threshold",
+        "dataset.holdout_near_duplicate_threshold",
+        "dataset.holdout_semantic_similarity_threshold",
+        "dataset.text_dedup_similarity_threshold",
+        "dataset.holdout_text_dedup_similarity_threshold",
         "error_attribution.confidence_threshold",
+        "evaluator_pipeline.semantic_judge_confidence_threshold",
     ):
         value = _get(config, path)
         if not isinstance(value, (int, float)) or float(value) < 0:
             raise ConfigurationError(path, "threshold must be non-negative", value)
-        if path.startswith(("dataset.", "error_attribution.")) and float(value) > 1:
+        if path.startswith(
+            ("dataset.", "error_attribution.", "evaluator_pipeline.")
+        ) and float(value) > 1:
             raise ConfigurationError(path, "threshold must not exceed 1", value)
+    for path in (
+        "evaluator_pipeline.temperature",
+        "evaluator_pipeline.code_execution_timeout_seconds",
+    ):
+        value = _get(config, path)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or (
+                float(value) < 0
+                if path.endswith("temperature")
+                else float(value) <= 0
+            )
+        ):
+            raise ConfigurationError(
+                path,
+                (
+                    "must be a non-negative number"
+                    if path.endswith("temperature")
+                    else "must be a positive number"
+                ),
+                value,
+            )
+    if evaluator_difficulty != generation_difficulty:
+        raise ConfigurationError(
+            "evaluator_pipeline.minimum_difficulty",
+            "evaluator difficulty bounds must match generation bounds",
+            list(evaluator_difficulty),
+        )
+    for path in (
+        "evaluator_pipeline.solver_prompt_path",
+        "evaluator_pipeline.solver_strategy_path",
+        "evaluator_pipeline.independent_solver_prompt_path",
+        "evaluator_pipeline.postcheck_prompt_path",
+        "evaluator_pipeline.semantic_judge_prompt_path",
+        "fixed_test.dataset_path",
+    ):
+        if not str(_get(config, path)).strip():
+            raise ConfigurationError(path, "must be a non-empty path")
+    for path in (
+        "dataset.sentence_transformers_model",
+        "dataset.sentence_transformers_device",
+    ):
+        if not str(_get(config, path)).strip():
+            raise ConfigurationError(path, "must be a non-empty string")
+    if _get(
+        config,
+        "dataset.sentence_transformers_required",
+    ) and not _get(config, "dataset.sentence_transformers_enabled"):
+        raise ConfigurationError(
+            "dataset.sentence_transformers_required",
+            "cannot be true when sentence_transformers_enabled is false",
+            True,
+        )
+    if _get(
+        config,
+        "dataset.datasketch_required",
+    ) and not _get(config, "dataset.datasketch_enabled"):
+        raise ConfigurationError(
+            "dataset.datasketch_required",
+            "cannot be true when datasketch_enabled is false",
+            True,
+        )
+    if (
+        mode == "data_flywheel"
+        and _get(config, "fixed_test.enabled")
+        and _get(config, "fixed_test.fail_on_training_leakage")
+        and not _get(config, "dataset.sentence_transformers_required")
+    ):
+        raise ConfigurationError(
+            "dataset.sentence_transformers_required",
+            "must be true for fail-closed holdout leakage protection in "
+            "data_flywheel mode",
+            False,
+        )
+    if (
+        mode == "data_flywheel"
+        and _get(config, "dataset.text_dedup_enabled")
+        and not _get(config, "dataset.datasketch_required")
+    ):
+        raise ConfigurationError(
+            "dataset.datasketch_required",
+            "must be true for the production data-flywheel MinHash backend",
+            False,
+        )
+    structured_backends = {"none", "outlines", "guidance"}
+    for path in (
+        "structured_output.local_backend",
+        "structured_output.fallback_backend",
+    ):
+        value = str(_get(config, path)).strip().lower()
+        if value not in structured_backends:
+            raise ConfigurationError(
+                path,
+                "must be one of: none, outlines, guidance",
+                value,
+            )
+    if (
+        _get(config, "structured_output.required")
+        and not _get(config, "structured_output.enabled")
+    ):
+        raise ConfigurationError(
+            "structured_output.required",
+            "cannot be true when structured_output.enabled is false",
+            True,
+        )
+    wandb_mode = str(_get(config, "tracking.wandb.mode")).strip().lower()
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        raise ConfigurationError(
+            "tracking.wandb.mode",
+            "must be one of: online, offline, disabled",
+            wandb_mode,
+        )
+    if not str(_get(config, "tracking.wandb.project")).strip():
+        raise ConfigurationError(
+            "tracking.wandb.project",
+            "must be a non-empty string",
+        )
+    wandb_tags = _get(config, "tracking.wandb.tags")
+    if (
+        not isinstance(wandb_tags, list)
+        or any(not str(tag).strip() for tag in wandb_tags)
+    ):
+        raise ConfigurationError(
+            "tracking.wandb.tags",
+            "must be a list of non-empty strings",
+            wandb_tags,
+        )
     for path in ("finetune.epochs", "finetune.batch_size", "finetune.lora_rank"):
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -977,6 +1345,27 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
                 f"directory is not writable: {exc}",
                 str(output_root),
             ) from exc
+        project_root = Path(__file__).resolve().parents[1]
+        for path in (
+            "evaluator_pipeline.solver_prompt_path",
+            "evaluator_pipeline.solver_strategy_path",
+            "evaluator_pipeline.independent_solver_prompt_path",
+            "evaluator_pipeline.postcheck_prompt_path",
+            "evaluator_pipeline.semantic_judge_prompt_path",
+            "fixed_test.dataset_path",
+        ):
+            configured = Path(str(_get(config, path))).expanduser()
+            candidates = (
+                [configured]
+                if configured.is_absolute()
+                else [Path.cwd() / configured, project_root / configured]
+            )
+            if not any(candidate.is_file() for candidate in candidates):
+                raise ConfigurationError(
+                    path,
+                    "configured file does not exist",
+                    str(configured),
+                )
 
 
 def config_hash(config: Mapping[str, Any]) -> str:

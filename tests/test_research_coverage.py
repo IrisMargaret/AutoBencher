@@ -9,6 +9,7 @@ from autobencher.coverage import (
     coverage_metrics,
     generation_schedule,
     largest_remainder,
+    previous_round_accuracy_state,
 )
 
 
@@ -148,6 +149,88 @@ def test_adaptive_sampler_increases_easy_bucket_difficulty(config):
     )
     assert priority["selected_difficulty"] == 6
     assert "above_target_accuracy_increase_difficulty" in priority["sampling_reason"]
+
+
+def test_previous_round_low_global_accuracy_reduces_next_difficulty(config):
+    previous_round = [{"is_correct": index < 2} for index in range(10)]
+    state = previous_round_accuracy_state(previous_round, config)
+    assert state["accuracy"] == pytest.approx(0.2)
+    assert state["band"] == "below_target"
+    assert state["difficulty_delta"] == -1
+
+    schedule = generation_schedule(
+        [],
+        config,
+        global_iteration=2,
+        hard_pool_size=0,
+        previous_round_records=previous_round,
+    )
+    assert schedule["previous_round_accuracy_state"]["band"] == "below_target"
+    assert {item["difficulty"] for item in schedule["allocations"]} == {3}
+
+
+def test_previous_round_accuracy_parses_serialized_booleans(config):
+    previous_round = [
+        {"is_correct": "true"},
+        *({"is_correct": "false"} for _ in range(9)),
+    ]
+    state = previous_round_accuracy_state(previous_round, config)
+    assert state["accuracy"] == pytest.approx(0.1)
+    assert state["band"] == "below_target"
+
+
+def test_previous_round_middle_accuracy_keeps_next_difficulty(config):
+    previous_round = [{"is_correct": index < 5} for index in range(10)]
+    schedule = generation_schedule(
+        [],
+        config,
+        global_iteration=2,
+        hard_pool_size=0,
+        previous_round_records=previous_round,
+    )
+    assert schedule["previous_round_accuracy_state"]["band"] == "inside_target"
+    assert {item["difficulty"] for item in schedule["allocations"]} == {4}
+
+
+def test_previous_round_high_global_accuracy_increases_next_difficulty(config):
+    previous_round = [{"is_correct": index < 8} for index in range(10)]
+    schedule = generation_schedule(
+        [],
+        config,
+        global_iteration=2,
+        hard_pool_size=0,
+        previous_round_records=previous_round,
+    )
+    assert schedule["previous_round_accuracy_state"]["band"] == "above_target"
+    assert {item["difficulty"] for item in schedule["allocations"]} == {5}
+
+
+def test_global_and_local_difficulty_changes_are_capped(config):
+    previous_round = [{"is_correct": True} for _ in range(10)]
+    prior_records = [
+        {
+            "sub_category": "Integer Operations",
+            "difficulty": 4,
+            "is_correct": True,
+        }
+        for _ in range(8)
+    ]
+    schedule = generation_schedule(
+        prior_records,
+        config,
+        global_iteration=2,
+        hard_pool_size=0,
+        previous_round_records=previous_round,
+    )
+    state = next(
+        item
+        for item in schedule["adaptive_sampler_state"]
+        if item["subcategory"] == "Integer Operations"
+    )
+    assert state["local_selected_difficulty"] == 5
+    assert state["global_difficulty_delta"] == 1
+    assert state["combined_difficulty_delta"] == 1
+    assert state["selected_difficulty"] == 5
 
 
 def test_lower_accuracy_subcategory_receives_higher_dynamic_priority(config):

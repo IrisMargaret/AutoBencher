@@ -13,6 +13,7 @@ from time import sleep
 from collections import defaultdict
 import numpy as np
 from util import gen_from_prompt
+from autobencher.output_schemas import TestTakerOutput
 from autobencher.structured import parse_test_taker_output, test_taker_prompt
 
 
@@ -428,8 +429,12 @@ def canonicalize_math_record(record, index=0):
         "question_parse_success",
         "answer_validation_success",
         "evaluator_confidence",
+        "semantic_judge",
+        "semantic_judge_reason",
+        "judge_deterministic_agreement",
         "ambiguous",
         "format_only_error",
+        "fixed_test",
         "run_id",
         "cycle_id",
         "iteration_id",
@@ -571,6 +576,30 @@ def generate_math_inference(
                 use_helm=use_helm,
                 auth=auth,
                 verbose=False,
+                structured_schema=(
+                    TestTakerOutput
+                    if research_config
+                    and research_config["structured_output"]["enabled"]
+                    and research_config["structured_output"][
+                        "use_for_test_taker"
+                    ]
+                    else None
+                ),
+                structured_backend=(
+                    research_config["structured_output"]["local_backend"]
+                    if research_config
+                    else "none"
+                ),
+                structured_fallback_backend=(
+                    research_config["structured_output"]["fallback_backend"]
+                    if research_config
+                    else "none"
+                ),
+                structured_required=(
+                    bool(research_config["structured_output"]["required"])
+                    if research_config
+                    else False
+                ),
             )
             for index, completion in zip(batch_indices, request_result.completions):
                 record = canonical_records[index]
@@ -814,6 +843,13 @@ def call_local_finetune(
     config_hash=None,
     max_seq_length=None,
     learning_rate=None,
+    wandb_enabled=False,
+    wandb_mode=None,
+    wandb_project=None,
+    wandb_entity=None,
+    wandb_group=None,
+    wandb_tags=None,
+    wandb_log_model=False,
 ):
     script_path = Path(__file__).resolve().with_name("train_llm.py")
     if not script_path.is_file():
@@ -846,10 +882,26 @@ def call_local_finetune(
         ("--config_hash", config_hash),
         ("--max_seq_length", max_seq_length),
         ("--learning_rate", learning_rate),
+        ("--wandb_mode", wandb_mode),
+        ("--wandb_project", wandb_project),
+        ("--wandb_entity", wandb_entity),
+        ("--wandb_group", wandb_group),
+        (
+            "--wandb_tags",
+            (
+                ",".join(str(tag) for tag in wandb_tags)
+                if isinstance(wandb_tags, (list, tuple))
+                else wandb_tags
+            ),
+        ),
     )
     for option, value in _optional_arguments:
         if value is not None:
             command.extend([option, str(value)])
+    if wandb_enabled:
+        command.append("--wandb_enabled")
+    if wandb_log_model:
+        command.append("--wandb_log_model")
     print("[FineTune] command=" + subprocess.list2cmdline(command))
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -940,9 +992,17 @@ def update_meta_summary(
 
 
 # [ADDED] Remove redundant fragments, attempts, and invalid JSON files.
-def clean_redundant_files(iteration_dir):
+def clean_redundant_files(
+    iteration_dir,
+    preserve_json_paths=None,
+    strict_json_allowlist=False,
+):
     if not os.path.isdir(iteration_dir):
         return []
+    preserved = {
+        os.path.normcase(os.path.abspath(os.fspath(path)))
+        for path in (preserve_json_paths or [])
+    }
     redundant_patterns = (
         "**/*all_questions.json",
         "**/*subcat*.questions.json",
@@ -972,6 +1032,13 @@ def clean_redundant_files(iteration_dir):
             with open(path, "r", encoding="utf-8") as f:
                 json.load(f)
         except (OSError, ValueError, json.JSONDecodeError):
+            os.remove(path)
+            removed.append(path)
+            continue
+        if (
+            strict_json_allowlist
+            and os.path.normcase(os.path.abspath(path)) not in preserved
+        ):
             os.remove(path)
             removed.append(path)
     return removed

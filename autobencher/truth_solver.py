@@ -25,6 +25,10 @@ class FailureType(str, Enum):
     REPAIR_EXHAUSTED = "repair_exhausted"
     GENERATOR_FORMAT_ERROR = "generator_format_error"
     SUBCATEGORY_COOLDOWN = "subcategory_cooldown"
+    EVALUATOR_CODE_FAILURE = "evaluator_code_failure"
+    EVALUATOR_POSTCHECK_FAILURE = "evaluator_postcheck_failure"
+    TRUTH_DISAGREEMENT = "truth_disagreement"
+    DIFFICULTY_REJECTED = "difficulty_rejected"
 
 
 class TruthSolverError(RuntimeError):

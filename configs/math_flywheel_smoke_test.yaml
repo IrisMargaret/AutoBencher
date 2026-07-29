@@ -13,6 +13,13 @@ coverage:
   default_min_quota: 1
   repair_rounds: 1
 
+dataset:
+  datasketch_enabled: false
+  datasketch_required: false
+  datasketch_lsh_enabled: false
+  sentence_transformers_enabled: false
+  sentence_transformers_required: false
+
 taxonomy:
   Arithmetic:
     Integer Operations:
@@ -107,6 +114,15 @@ taxonomy:
 
 finetune:
   enabled: false
+
+structured_output:
+  enabled: false
+  required: false
+
+tracking:
+  wandb:
+    enabled: false
+    mode: disabled
 
 logging:
   progress_enabled: false

@@ -1,16 +1,22 @@
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
 import run_scripts
+import train_llm
 import util
 
 
 class OllamaRoutingTests(unittest.TestCase):
+    def setUp(self):
+        util._OUTLINES_MODEL_CACHE.clear()
+        util._GUIDANCE_MODEL_CACHE.clear()
+
     def test_completion_is_truncated_at_first_stop_sequence(self):
         text = '{"final_answer":"4"}Human: unrelated'
         self.assertEqual(
@@ -46,6 +52,41 @@ class OllamaRoutingTests(unittest.TestCase):
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["stop"], ["Human:", "<|im_end|>"])
 
+    def test_deepseek_request_has_no_output_token_limit(self):
+        client = Mock()
+        completion = Mock()
+        completion.choices = [Mock(message=Mock(content='{"answer":"4"}'))]
+        client.chat.completions.create.return_value = completion
+
+        util.gen_from_prompt(
+            model="deepseek-v4-pro",
+            tokenizer=None,
+            prompt=["Return JSON."],
+            service=client,
+            max_tokens=12,
+        )
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("max_tokens", kwargs)
+        self.assertNotIn("extra_body", kwargs)
+
+    def test_non_deepseek_request_keeps_output_token_limit(self):
+        client = Mock()
+        completion = Mock()
+        completion.choices = [Mock(message=Mock(content="4"))]
+        client.chat.completions.create.return_value = completion
+
+        util.gen_from_prompt(
+            model="local-openai-compatible",
+            tokenizer=None,
+            prompt=["Return 4."],
+            service=client,
+            max_tokens=321,
+        )
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["max_tokens"], 321)
+
     def test_transformers_five_uses_dtype_keyword(self):
         module = Mock(__version__="5.14.1")
         marker = object()
@@ -61,6 +102,77 @@ class OllamaRoutingTests(unittest.TestCase):
             util._transformers_dtype_kwargs(module, marker),
             {"torch_dtype": marker},
         )
+
+    def test_outlines_constrains_local_json_generation(self):
+        calls = []
+
+        class FakeStructuredModel:
+            def __call__(self, prompt, schema, **kwargs):
+                calls.append((prompt, schema, kwargs))
+                return '{"value":4}'
+
+        fake_outlines = types.ModuleType("outlines")
+        fake_outlines.from_transformers = Mock(
+            return_value=FakeStructuredModel()
+        )
+        schema = {"type": "object"}
+        with patch.dict(sys.modules, {"outlines": fake_outlines}):
+            results = util._generate_local_structured_json(
+                object(),
+                object(),
+                ["Return JSON."],
+                schema,
+                backend="outlines",
+                fallback_backend="guidance",
+                required=True,
+                temperature=0.0,
+                max_tokens=128,
+            )
+
+        self.assertEqual(results, ['{"value":4}'])
+        self.assertIs(calls[0][1], schema)
+        self.assertEqual(calls[0][2]["max_new_tokens"], 128)
+
+    def test_guidance_is_used_when_outlines_is_unavailable(self):
+        class FakeState:
+            def __init__(self, value=None):
+                self.value = value
+
+            def __add__(self, other):
+                if isinstance(other, dict):
+                    return FakeState('{"value":6}')
+                return self
+
+            def __getitem__(self, key):
+                self.assert_key = key
+                return self.value
+
+        fake_guidance = types.ModuleType("guidance")
+        fake_guidance.json = lambda **kwargs: {
+            "grammar": "json",
+            **kwargs,
+        }
+        fake_guidance.models = types.SimpleNamespace(
+            Transformers=Mock(return_value=FakeState())
+        )
+        schema = {"type": "object"}
+        with patch.dict(
+            sys.modules,
+            {"outlines": None, "guidance": fake_guidance},
+        ):
+            results = util._generate_local_structured_json(
+                object(),
+                object(),
+                ["Return JSON."],
+                schema,
+                backend="outlines",
+                fallback_backend="guidance",
+                required=True,
+                temperature=0.0,
+                max_tokens=128,
+            )
+
+        self.assertEqual(results, ['{"value":6}'])
 
     def test_ollama_tag_uses_native_local_endpoint(self):
         with patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://localhost:11434"}, clear=False):
@@ -133,6 +245,30 @@ class OllamaRoutingTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_finetune_parser_accepts_offline_wandb_tracking(self):
+        args = train_llm.build_parser().parse_args(
+            [
+                "--model_name_or_path",
+                "model",
+                "--dataset_path",
+                "train.jsonl",
+                "--output_path",
+                "output",
+                "--wandb_enabled",
+                "--wandb_mode",
+                "offline",
+                "--wandb_project",
+                "flywheel",
+                "--wandb_tags",
+                "math,cycle-1",
+            ]
+        )
+
+        self.assertTrue(args.wandb_enabled)
+        self.assertEqual(args.wandb_mode, "offline")
+        self.assertEqual(args.wandb_project, "flywheel")
+        self.assertEqual(args.wandb_tags, "math,cycle-1")
+
     def test_separate_agent_and_test_taker_options_are_forwarded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             prefix = str(Path(temp_dir, "math_test", "result."))

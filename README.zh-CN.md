@@ -1,49 +1,108 @@
-# AutoBencher
+# AutoBencher 数学数据飞轮
 
 简体中文 | [English](README.md)
 
-AutoBencher 是一个可复现的自适应数学评测与本地模型数据飞轮系统。项目支持
-DeepSeek 等在线模型作为出题与评测 Agent，并支持 Qwen2.5 等本地模型通过
-Transformers、vLLM 或 Ollama 作为 test-taker。`data_flywheel` 模式能够自动完成
-评测、错题筛选、训练集构建、4-bit QLoRA 微调、权重合并和下一 Cycle 模型切换。
+AutoBencher 是一个自适应数学评测与本地训练数据飞轮。它保留原 AutoBencher 的
+“规划、出题、评测、收集错题、训练、再评测”框架，同时对标准答案生成、答案判定、
+固定测试集和缓存保留策略进行了可配置、可审计的加强。
 
-Wiki 与 Multilingual 入口继续保持兼容。
+当前维护的入口是 `math_autobencher.py`。本仓库现已专注数学数据飞轮，原 Wiki 和
+Multilingual 入口已移除。
 
-## 功能概览
+## 系统能力
 
-- `eval`：仅生成和评测数学基准，不触发微调。
-- `data_flywheel`：评测后构建训练集，调用项目内置 `train_llm.py` 微调并循环。
-- 固定 9 个数学大类和 27 个细分题型。
-- 多轮累计题型覆盖，不要求单次 Iteration 覆盖全部细分题型。
-- 基于 Beta-Binomial 后验的难度与采样优先级调整。
-- test-taker 无工具隔离和严格 JSON 输出。
-- 数值、分数、方程、不等式、集合、区间、矩阵与单位值规范化。
-- hard pool 去重、分级和训练资格筛选。
-- 训练数据精确去重、文本近似去重、模板去重和语义去重。
-- 统一配置加载、配置来源追踪、配置哈希和原子化输出。
-- 每个阶段只显示一个动态进度条。
+- 固定覆盖 9 个数学大类、27 个细分题型。
+- 在可配置难度范围内生成中等难度题目。
+- test-taker 不接收任何工具 schema，也不能调用外部工具，只能依靠自身推理，并按
+  严格 JSON 协议作答。
+- 主 evaluator 与盲审独立 evaluator 分别分析题目并生成专题 Python 代码；系统
+  隔离执行两份代码，要求答案一致，再由全新裁决上下文重新计算或回代。
+- 对数值、分数、符号表达式、集合、区间、有序元组、矩阵、布尔值和文本答案做
+  规范化。
+- 使用独立的大模型语义判定两个答案是否表达相同含义，同时保留确定性比较证据和
+  语义判定结果，避免仅因格式差异误判。
+- 每个 Cycle 的训练集只使用本 Cycle 数据，严格由 25% 做对题和 75% 本轮错题组成；
+  每条导出样本都包含已验证的正确答案和非空安全解题步骤。
+- 启动时用固定测试集评测原始 test-taker，每轮训练后评测合并后的新模型，并报告
+  正确率变化。
+- 使用精确/模板检查、参考 Text-Dedup 的 datasketch MinHash/LSH 和
+  Sentence-Transformers 语义相似度，拒绝与固定测试集相同或高度相似的训练题。
+- 直接加载的本地模型可使用 Outlines 做 token 级 JSON 约束，并以 Guidance
+  作为后备；W&B 支持离线、在线和关闭三种可配置模式。
+- 每轮迭代结束后只保留目标规划、test-taker 作答和答案比较三类 JSON 缓存。
 
-## 新生成与真值架构
+## 端到端流程
 
 ```text
-动态 Quota 调度
-→ question-only LLM Generator（temperature=0.0, top_p=0.1）
-→ 自然语言剥离与表达式标准化
-→ TruthSolver 分支求解
-→ canonical gold 回代验证
-→ Truth 失败样本丢弃、失败计数与子类目冷却
-→ 无工具 test-taker 作答
-→ 与 canonical gold 确定性比较
-→ hard pool、训练集与下一 Cycle
+YAML 配置 + 显式 CLI 覆盖
+  → 原 AutoBencher Quota / 自适应调度
+  → 中等难度 question-only 出题
+  → evaluator 求解提示词（题目仅作为不可信数据）
+  → 主求解器 + 盲审独立求解器分别生成 Python
+  → AST 安全检查 + 两次隔离 Python 执行
+  → 双路答案一致性、运行时验证与答案回代
+  → 全新上下文 evaluator 裁决
+  → 接受规范标准答案
+  → 无工具 test-taker 独立推理
+  → 确定性规范化 / Math-Verify 兜底
+  → 隔离的大模型语义等价判定
+  → 错误归因 + 错题池 + 覆盖率更新
+  → 本 Cycle 25% 正确 / 75% 错题训练集
+  → 固定测试集泄漏过滤
+  → 本地 4-bit QLoRA、合并权重、切换模型
+  → 固定测试集复测并计算正确率增量
+```
+
+出题器、evaluator 求解器、evaluator 二次复核、语义判定器和 test-taker 使用彼此
+独立的提示词和模型调用。题目被序列化到明确命名的 JSON 数据块中，不会被拼接成
+系统指令，从而限制跨题上下文污染和提示词注入。
+
+## 项目结构
+
+```text
+AutoBencher/
+├── autobencher/
+│   ├── config.py
+│   ├── coverage.py
+│   ├── dataset.py
+│   ├── evaluator.py
+│   ├── fixed_benchmark.py
+│   ├── output_schemas.py
+│   ├── similarity.py
+│   ├── structured.py
+│   └── truth_solver.py
+├── benchmarks/
+│   └── fixed_math_test_set.json
+├── configs/
+│   ├── math_flywheel.yaml
+│   ├── environments/
+│   └── experiments/
+├── prompts/
+│   ├── evaluator_python_solver.txt
+│   ├── evaluator_independent_solver.txt
+│   ├── evaluator_postcheck.txt
+│   ├── semantic_answer_judge.txt
+│   └── tora_evaluator_strategy.txt
+├── tests/
+├── math_autobencher.py
+├── run_scripts.py
+├── train_llm.py
+├── tool_util.py
+├── THIRD_PARTY_NOTICES.md
+├── requirements.txt
+└── requirements-lock.txt
 ```
 
 ## 环境要求
 
 - Python 3.10 或更高版本。
-- 在线 Agent 需要 DeepSeek/OpenAI 兼容 API。
-- 本地 test-taker 可使用 Transformers 模型目录、vLLM 服务或 Ollama。
+- 出题与评测 Agent 使用 DeepSeek/OpenAI 兼容模型。
+- test-taker 可使用本地 Transformers 模型目录、vLLM 服务或 Ollama。
 - `data_flywheel` 的 bitsandbytes 4-bit QLoRA 训练需要 NVIDIA CUDA GPU。
-- 需要足够磁盘空间保存基础模型、LoRA Adapter、合并模型和实验数据。
+- 需要足够持久化空间保存基础模型、Adapter、合并模型和运行产物。
+
+如果 test-taker 由独立服务提供，纯评测可以不使用训练 GPU。`train_llm.py` 会对
+CPU 上的 4-bit QLoRA 明确报错。
 
 ## 安装
 
@@ -65,74 +124,30 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
 ```
 
-在 CUDA 服务器上安装依赖前，建议先确认现有 PyTorch 与 CUDA 是否匹配：
+`requirements-lock.txt` 用于复现实验环境。只有在明确接受兼容的新版本时才使用
+`requirements.txt`。在 CUDA 服务器上修改 PyTorch 前先检查现有环境：
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 nvidia-smi
 ```
 
-## 敏感信息配置
-
-在项目根目录创建 `.env`，或者在作业平台的安全环境变量界面配置：
+从 `.env.example` 创建 `.env`，或在作业平台的安全变量界面配置：
 
 ```dotenv
 DEEPSEEK_API_KEY=replace-me
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-VLLM_BASE_URL=
+DEEPSEEK_MODEL=deepseek-v4-pro
+VLLM_BASE_URL=http://127.0.0.1:8000/v1
 VLLM_API_KEY=EMPTY
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_API_KEY=
 ```
 
-环境变量名称统一声明在配置文件的 `sensitive_environment` 节点。密钥与私有地址
-不会写入正式 YAML，也不会明文写入配置快照。请勿提交 `.env`。
+不要提交 `.env`、访问密钥、私有服务地址或 SSH 凭据。
 
-## 统一配置系统
+## 配置
 
-数学入口只加载一次配置，并向运行模块传递递归只读的 `ProjectConfig`。运行参数不应
-通过修改 Python 源码调整，新实验应复制或继承 YAML 配置。
-
-### 配置目录
-
-```text
-configs/
-├── math_flywheel.yaml
-├── math_flywheel_smoke_test.yaml
-├── environments/
-│   ├── local.yaml
-│   ├── server.yaml
-│   └── volcengine.yaml
-└── experiments/
-    ├── math_flywheel.yaml
-    └── smoke_test.yaml
-```
-
-- `math_flywheel.yaml`：完整基础配置和唯一默认值来源。
-- `environments/*.yaml`：机器、模型路径和持久化目录。
-- `experiments/*.yaml`：实验名称、运行模式及实验差异。
-- `math_flywheel_smoke_test.yaml`：小规模调度与 CPU Mock 测试配置。
-
-### 合并优先级
-
-```text
-代码安全底线
-  < Schema 安全默认值
-  < 继承的基础 YAML
-  < 环境 YAML
-  < 实验 YAML
-  < 用户显式输入的兼容 CLI
-  < --override
-  < 敏感环境变量
-```
-
-安全限制不能通过配置放宽。普通实验参数不应通过环境变量注入。
-
-### 推荐配置启动方式
-
-本地环境：
+所有可调行为都声明在 YAML 中。Python 代码只提供经过验证的安全默认值，不写死
+实验路径或密钥。
 
 ```bash
 python run_scripts.py math \
@@ -140,19 +155,7 @@ python run_scripts.py math \
   --environment configs/environments/local.yaml
 ```
 
-火山引擎环境：
-
-```bash
-python run_scripts.py math \
-  --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/volcengine.yaml
-```
-
-`--experiment` 是 `--config` 的等价别名。
-
-### 临时覆盖
-
-不修改 YAML 即可临时覆盖任意已声明字段：
+临时参数可通过 `--override` 修改，不需要编辑源码：
 
 ```bash
 python run_scripts.py math \
@@ -161,315 +164,247 @@ python run_scripts.py math \
   --override experiment.seed=43 finetune.gpu=1
 ```
 
-布尔值支持 `true/false`、`yes/no`、`on/off` 和 `1/0`。未知字段、错误类型、
-无效比例、非法阈值、可写路径失败或 test-taker 工具开启会在模型加载前报错。
+配置优先级依次为：安全默认值、继承的基础 YAML、环境 YAML、实验 YAML、显式兼容
+CLI、`--override`。未知字段和不安全值会在加载模型前直接报错。
 
-### 兼容 CLI 映射
+`configs/math_flywheel.yaml` 的重要节点：
 
-原有命令仍然支持，显式输入的参数会映射到统一配置：
-
-| 原 CLI | 配置字段 |
+| 节点 | 用途 |
 | --- | --- |
-| `--agent_modelname` | `models.evaluator.model_name` |
-| `--test_taker_modelname` | `models.test_taker.model_path` |
-| `--num_iters` | `experiment.num_iterations` |
-| `--max_cycle` | `experiment.max_cycles` |
-| `--acc_target` | `adaptive_sampling.target_accuracy_low/high/mid` |
-| `--finetune_gpu` | `finetune.gpu` |
-| `--finetune_epoch` | `finetune.epochs` |
-| `--finetune_batch` | `finetune.batch_size` |
-| `--lora_rank` | `finetune.lora_rank` |
-| `--clean_cycle_cache` | `experiment.clean_cycle_cache` |
+| `generation` | 默认难度 2–6、推理步数、重试与 Quota 修复。 |
+| `evaluator_pipeline` | 主求解、盲审、裁决和语义提示词路径，以及 Python 限制与重试。 |
+| `test_taker_prompt` | 无工具、严格 JSON、推理和输出注入限制。 |
+| `answer_normalization` | 数值误差、符号规则和 Math-Verify 开关。 |
+| `adaptive_sampling` | 上一轮整体正确率区间和细分题型 Beta-Binomial 自适应采样。 |
+| `dataset` | 去重和固定测试集相似度阈值。 |
+| `training_mix` | 严格 25/75 比例与 `current_cycle` 范围。 |
+| `fixed_test` | 测试集路径、题型覆盖、基线与训练后复测。 |
+| `finetune` | GPU、Epoch、Batch、LoRA Rank、序列长度和学习率。 |
+| `structured_output` | Outlines/Guidance 本地 JSON 后端与失败策略。 |
+| `tracking.wandb` | W&B 模式、项目、分组、标签与模型记录。 |
 
-YAML 中的旧字段会在可迁移时给出 `DeprecationWarning` 并迁移；未知字段不会静默忽略。
+evaluator 与出题器的难度边界必须一致；默认配置禁止竞赛级题目。
 
-### 配置快照与审计
+### 自适应难度与题目分配
 
-每次运行都会保存：
+下一轮首先读取“紧邻上一轮”的 test-taker 整体正确率（不使用固定测试集分数）作为
+全局难度保护：
 
-```text
-resolved_config.yaml
-resolved_config.json
-config_sources.json
-config_validation.json
-config_hash.txt
-```
+| 上一轮整体正确率 | 默认的下一轮难度偏置 |
+| --- | --- |
+| 低于 `0.35` | 降低 1 级 |
+| `0.35` 到 `0.70`（含边界） | 保持 |
+| 高于 `0.70` | 提高 1 级 |
 
-- `resolved_config.*`：合并后的全部实际生效参数。
-- `config_sources.json`：每个叶子字段的最终值和来源。
-- `config_validation.json`：启动校验状态。
-- `config_hash.txt`：稳定配置哈希，用于缓存兼容和实验比较。
+达到 `adaptive_sampling.global_accuracy_min_observations: 10` 个有效作答后才启用。
+两个区间边界由 `global_accuracy_low` 和 `global_accuracy_high` 配置，调整步长由
+`global_difficulty_step` 配置，单轮安全上限由
+`max_difficulty_change_per_iteration` 配置。最终难度始终受
+`generation.minimum_difficulty` 与 `generation.maximum_difficulty` 限制，默认是
+2–6。
 
-比较两个 `test_<N>/resolved_config.json` 或 `config_hash.txt` 即可定位实验配置差异。
-影响结果的配置发生变化后，不会静默复用不兼容缓存。
+这层规则不会替换 AutoBencher 的自适应框架。全局偏置会与原来的“细分题型 × 难度”
+Beta-Binomial 后验、覆盖 Quota 缺口、不确定性、持续错题、保留探测和合格 hard-pool
+变式共同决定题型与难度。局部目标区间仍由
+`target_accuracy_low/mid/high` 单独配置，默认是 0.10/0.20/0.30。每个细分题型还会
+从最近一次实际采样难度继续调节，不会每轮重置。
 
-## 基础评测
+## 运行
 
-下面的兼容命令只评测，不训练：
-
-```bash
-python run_scripts.py math \
-  --agent_modelname deepseek-v4-pro \
-  --test_taker_modelname qwen2.5:7b-instruct \
-  --exp_mode autobencher \
-  --use_helm no \
-  --num_iters 2 \
-  --outfile_prefix1 math_test/qwen7b_dsagent.0.3. \
-  --acc_target 0.1--0.3 \
-  --mode eval
-```
-
-本地模型目录也可以直接作为 test-taker：
+只评测、不训练：
 
 ```bash
 python run_scripts.py math \
-  --agent_modelname deepseek-v4-pro \
-  --test_taker_modelname /models/Qwen2.5-7B-Instruct \
-  --num_iters 2 \
-  --mode eval
+  --config configs/experiments/math_flywheel.yaml \
+  --environment configs/environments/local.yaml \
+  --mode eval \
+  --num-iters 2
 ```
 
-## 全自动数据飞轮
+完整数据飞轮：
 
 ```bash
 python run_scripts.py math \
   --config configs/experiments/math_flywheel.yaml \
   --environment configs/environments/volcengine.yaml \
   --mode data_flywheel \
-  --num_iters 5 \
-  --max_cycle 3 \
-  --export_interval 1 \
-  --finetune_gpu 0 \
-  --finetune_epoch 3 \
-  --finetune_batch 8 \
-  --lora_rank 8
+  --num-iters 5 \
+  --max-cycle 3 \
+  --finetune-gpu 0 \
+  --finetune-epoch 3 \
+  --finetune-batch 8 \
+  --lora-rank 8
 ```
 
-闭环流程：
+`math_autobencher.py` 仍兼容原数学工作流的长参数形式。显式 CLI 值会覆盖 YAML。
 
-```text
-自适应出题
-→ evaluator 独立重算并回代验证 gold answer
-→ 本地 test-taker 推理
-→ 答案规范化与判分
-→ hard pool 更新
-→ 构建 Alpaca JSONL
-→ 调用项目根目录 train_llm.py
-→ 4-bit QLoRA 训练
-→ 合并完整本地模型
-→ 切换 test-taker
-→ 下一 Cycle
-```
+## evaluator 标准答案流程
 
-无需提供外部微调脚本路径。
+每一道生成题都执行以下步骤：
 
-## 每次运行的统一归档目录
+1. `evaluator_python_solver.txt` 要求主 evaluator 分析题目，并且只返回
+   `analysis_summary` 和本题专用的 `python_code`。可配置的
+   `tora_evaluator_strategy.txt` 将 ToRA 的“规划—程序—输出—答案”方法适配为一轮
+   fail-closed 求解。
+2. `evaluator_independent_solver.txt` 只把原题交给第二个盲审求解器，它看不到
+   第一条路径的推理、代码或答案。
+3. 系统使用 `ast` 检查两份代码；导入、文件/网络访问、动态执行、私有属性、函数定义及
+   未批准调用会被拒绝。
+4. 两份通过检查的代码分别使用 `python -I` 在临时工作目录、最小环境变量和受限
+   built-in 下执行，同时限制输出大小和执行时间。代码必须返回规范答案，通过自身
+   验证和回代检查，并且两条运行时答案必须等价。
+5. `evaluator_postcheck.txt` 在一个全新模型调用中运行，只看到题目和两条已验证运行
+   结果，独立裁决答案并拒绝超出目标难度的题目。
+6. 两条运行时答案与裁决答案必须确定性等价，答案类型必须兼容。
 
-每次启动都会在输出根目录扫描已有 `test_<数字>` 文件夹，并以“当前最大数字加 1”
-原子创建新目录。无关目录不会参与编号，旧实验不会被覆盖。
+原有确定性 `TruthSolver` 没有被丢弃：对它支持的题目继续做独立交叉验证。两条求解
+路径不一致时直接丢弃题目，不会静默选择其中一个答案。
 
-```text
-<output_root>/
-├── test_1/
-├── test_2/
-└── test_3/
-```
+生成的 Python 和原始分析只存在于可清理 evaluator 缓存中，不会进入 test-taker
+提示词。训练数据只保留经过长度、角色注入和无关内容检查的 `analysis_summary`
+作为标准解题步骤；代码、提示词片段和盲审求解器原始记录不会进入训练输入。
 
-一次运行产生的配置、日志、全局状态、迭代结果、训练数据和模型全部归档在同一个
-`test_<N>` 中。所有 `cycle_<N>` 统一放入 `cycle/`：
+DeepSeek 兼容请求不会设置 `max_tokens`，因此 evaluator 不会被应用层输出 token
+上限截断；本地模型仍保留进程安全所需的生成长度限制。
 
-```text
-<output_root>/
-└── test_3/
-    ├── resolved_config.yaml
-    ├── resolved_config.json
-    ├── config_sources.json
-    ├── config_validation.json
-    ├── config_hash.txt
-    ├── environment.json
-    ├── run_manifest.json
-    ├── taxonomy_snapshot.json
-    ├── experiment_summary.json
-    ├── hard_pool.json
-    ├── meta_summary.json
-    ├── cycle_record.json
-    ├── logs/
-    │   ├── run.log
-    │   └── events.jsonl
-    └── cycle/
-        ├── cycle_1/
-        │   ├── cycle_manifest.json
-        │   ├── iter_1/
-        │   └── training/
-        │       ├── dataset_candidates.json
-        │       ├── dataset_selected.jsonl
-        │       ├── dataset_manifest.json
-        │       ├── dedup_report.json
-        │       ├── diversity_report.json
-        │       ├── finetune_config.json
-        │       ├── finetune_metrics.jsonl
-        │       ├── finetune_summary.json
-        │       └── checkpoint_manifest.json
-        └── cycle_2/
-```
+## test-taker 隔离与判分
 
-训练数据集路径为：
-
-```text
-<output_root>/test_<N>/cycle/cycle_<N>/training/dataset_selected.jsonl
-```
-
-只有完成相应评测并存在合格训练样本时才会创建 `training/`。失败于 evaluation
-阶段的运行不会产生训练集，失败信息保存在：
-
-```text
-test_<N>/cycle/cycle_<N>/failure/failure_summary.json
-```
-
-## TruthSolver 权威真值
-
-LLM Generator 只能返回 `{"question": "..."}`。答案、候选答案、答案类型、解题过程
-和元数据字段全部禁止输出。系统先剥离自然语言包装并将 `x^2` 等语法标准化为
-`x**2`，再交给独立的 `TruthSolver`。只有 `TruthSolver` 可以写入
-`canonical_answer`、`gold_answer`、`display_answer` 和 `answer_type`。
-
-`TruthSolver` 分别路由一元方程、线性方程组、多项式系统、积分、极限和直接表达式。
-解析失败、无闭式解、无穷多解和求解超时的样本会在 test-taker 推理前直接丢弃并记录
-结构化 `failure_type`，不会把失败真值送回 LLM 盲目修复。
-
-题目只有同时满足以下条件才会进入 test-taker 推理：
-
-- 独立重算成功；
-- 回代和约束检查成功；
-- 重算答案与候选 gold answer 通过确定性等价比较；
-- validator 返回的答案类型与题目答案类型一致。
-
-对于 `ordered_tuple` 方程组，系统不存在也不信任 evaluator 自报答案。SymPy 会从
-完全一致的原始 `question` 字符串解析方程并独立求解，然后把候选元组逐条代入每一个
-原始等式。审计记录每条原始方程、代入后的左值、右值、差值和通过状态；题干哈希用于
-证明独立求解与回代使用的是同一份原始题干。解析异常、超时、无解、多解和无穷多解均
-按验证失败处理。
-
-只有 Generator 输出格式错误时才允许修复，下一次 Prompt 必须携带上一轮失败摘要。
-如果 Generator 违规泄漏候选答案，且该答案只满足部分方程，则记录
-`partial_solution` 和“通过方程数/总方程数”，并把它作为负面反馈。TruthSolver 失败
-不 repair，直接丢弃。
-
-单条样本或单个细分题型修复耗尽时不再抛出 runtime error。系统记录覆盖率缺口后继续
-当前 Cycle；即使本轮没有任何合格题目也会输出空迭代统计。连续失败达到配置阈值后，
-对应子类目进入临时冷却。Cycle 结束时
-`cycle_<N>/metrics/generation_statistics.json` 输出生成总数、有效样本数、各失败计数和
-category/subcategory 覆盖率缺口。
-
-固定失败标签：
-
-```text
-truth_parse_fail
-no_closed_solution
-infinite_solutions
-solve_timeout
-partial_solution
-repair_exhausted
-generator_format_error
-```
-
-## JSON 与答案规范
-
-所有项目 JSON 使用 UTF-8、两空格缩进、换行结尾和原子替换写入。JSONL 每行一个
-完整 UTF-8 JSON 对象。
-
-test-taker 的首个完整结构化 JSON 会在生成完成后立即解析。JSON 后出现的
-`Human:`、`User:` 等串话会被安全丢弃并留下审计字段。超过配置上限的推理步骤会在
-判定副本中截断，不修改原始响应。
-
-数值答案比较会对 gold answer 和 test-taker answer 使用相同的临时清洗副本：
-
-- 去除首尾空白；
-- 去除数值答案前的 `x =`、`y=` 或 `z =`；
-- 去除数值答案末尾的 `°`。
-
-`raw_response` 和持久化的 `parsed_response.final_answer` 不会被改写。方程、符号、
-单位和结构化答案保留原始语义。
-
-## 日志与进度条
-
-日志位于：
-
-```text
-test_<N>/logs/run.log
-test_<N>/logs/events.jsonl
-```
-
-每个阶段只创建一个动态进度条，完成后关闭，不会为每道题反复创建永久进度条。
-第三方库进度条默认关闭。
-
-`experiment.clean_cycle_cache=true` 时，每轮迭代都在 `finally` 中清理冗余分片、
-attempt 日志、临时推理文件以及空或损坏 JSON。因此生成、推理或评测异常也不会跳过
-清理；正式推理结果和 gold answer 校验审计会保留。
-
-失败记录包含：
+test-taker 每次只接收一道题，并且没有任何外部工具。输出必须是单个 JSON 对象：
 
 ```json
 {
-  "stage": "evaluation",
-  "failure_type": "runtime_error",
-  "error": "AssertionError()",
-  "exception_type": "AssertionError",
-  "traceback": "..."
+  "reasoning_summary": ["简短推理步骤", "自检步骤"],
+  "final_answer": "规范答案文本",
+  "answer_type": "integer",
+  "confidence": 0.9
 }
 ```
 
-即使异常消息为空，也会保存异常类型和 traceback。手动中断记录为 `interrupted`。
+工具痕迹、提示词复述、无关输出、损坏 JSON 或额外字段都会按失败处理。判分前会先
+规范化格式，因此等价的分数、小数、符号表达式、集合、区间、元组和矩阵不会仅因
+写法不同被误判。
 
-## 常见故障
+每个格式有效的答案还会经过隔离的语义判定器。它只能看到题目、规范标准答案、
+答案类型、规范化结果和 test-taker 答案。最终记录同时保留确定性证据和大模型判断，
+包括置信度及两者不一致标记。
 
-### 没有生成训练数据集
+## 固定测试集与泄漏防护
 
-检查 `cycle_record.json`。如果 `iterations_completed=0`、`training_export=null`，
-说明评测尚未完成或已失败。训练目录只在达到导出条件且存在合格样本后创建。
+`benchmarks/fixed_math_test_set.json` 是训练循环的不可变输入，包含每个配置细分题型
+各一道中等难度题目。
 
-### 本地模型加载失败
+- 启动时先评测原始 test-taker 并保存基线正确率。
+- 每轮训练成功后，用同一测试集评测合并后的新模型。
+- 每轮摘要保存基线正确率、当前正确率和增量。
+- 固定测试题不会进入错题训练候选。
+- 训练候选如与测试题文本完全相同、规范模板相同，或者 Token、TF-IDF、
+  datasketch MinHash/LSH、Sentence-Transformers 余弦相似度超过对应阈值，
+  会被拒绝。
 
-- 确认模型目录存在并包含 Transformers 配置、Tokenizer 和权重文件。
-- 检查 CUDA、PyTorch 与 transformers 版本。
-- 确认远程作业能够访问持久化模型目录。
+默认语义模型是 `sentence-transformers/all-MiniLM-L6-v2`。模型名、Revision、
+设备、缓存目录、Batch Size 和 `local_files_only` 均可在 `dataset` 中配置。
+数据飞轮模式默认要求该后端可用并采用 fail-closed：模型加载失败时停止训练数据
+导出，而不是静默放过可能泄漏的题目。首次联网运行可能下载该模型；离线部署应提前
+准备缓存并启用 `sentence_transformers_local_files_only`。
 
-### 微调 OOM
+固定测试集应纳入版本控制。修改它会改变 SHA-256，也就形成了新的测试基准，不能
+再把修改前后的分数当作同一测试集结果直接比较。
 
-- 降低 `finetune.batch_size`。
-- 降低 `finetune.max_seq_length`。
-- 增大梯度累积并保持实际批次。
-- 确认其他进程没有占用 GPU。
+## 训练集协议
 
-### API 超时
+只有本 Cycle 产生的记录才有训练资格。质量过滤、固定测试集过滤和去重后，系统按
+四条一组进行选择：
 
-- 检查 API 地址与凭证。
-- 查看 `logs/events.jsonl` 中的 stage 和 traceback。
-- 在配置中调整已声明的请求超时与重试参数。
+- 1 条做对保留样本（25%）；
+- 3 条来自本轮错题池的错题（75%）。
 
-### JSON 解析失败
+错题部分按 `training_mix` 分配给边界错题、覆盖修复和格式/指令错误。某一错题来源
+不足时可以由其他错题补足，但正确题绝不会占用错题位置。不完整的四条数据块不会
+导出；微调前 manifest 会记录计数并断言比例严格正确。
 
-- 查看 `raw_response`、`parse_status` 和 repair 审计字段。
-- 确认模型输出包含一个完整 JSON 对象。
-- 续跑时，旧失败响应会由当前解析器重新验证。
+每条合格记录还必须包含满足配置步数和单步字符限制的非空
+`gold_reasoning_summary`。这些步骤来自运行时已验证的 evaluator 解答；缺失步骤，
+或者包含角色注入、工具请求、Markdown 代码围栏和超长内容的样本都会被拒绝。
+Alpaca 输出固定包含已验证步骤、`final_answer`、`answer_type` 和置信度，不再用
+泛化占位句冒充解题过程。
 
-### 配置字段报错
+QLoRA 使用 Hugging Face TRL 的 `SFTConfig`/`SFTTrainer`。当
+`tracking.wandb.enabled` 为真时，Trainer 向 W&B 记录指标；默认 `offline` 模式只
+写入本地数据，不会自动上传，切换到 `online` 必须显式修改配置。
 
-错误会包含完整 dotted path，例如：
+## 输出与缓存保留
+
+每次运行会保留解析后的配置、配置来源、校验结果、配置哈希、环境快照、运行
+manifest、日志、全局错题池、训练产物、模型产物和固定测试结果。
+
+当 `experiment.clean_cycle_cache: true` 时，每个迭代目录在 `finally` 清理后严格只
+保留以下三个 JSON：
 
 ```text
-ConfigurationError: dataset.near_duplicate_threshold: threshold must not exceed 1
+cycle/cycle_<N>/iter_<M>/
+├── <prefix>.question_plan_with_aim.json
+├── <prefix>.test_taker_inference.json
+└── <prefix>.compare_answers.json
 ```
 
-修正对应 YAML 或 `--override`。不要在 Python 文件中添加备用默认值。
+所有 `subcat*.json`、生成尝试、evaluator Python 缓存、临时判定、空/损坏 JSON 和
+冗余迭代摘要都会删除。清理操作可重复执行，并且成功或失败路径都会运行。Cycle
+级训练、指标、错题池与固定测试文件属于正式结果，不按迭代缓存清理。
 
-## 测试
+固定测试结果单独保存：
 
-无需 API 或 GPU的完整回归测试：
+```text
+fixed_test/
+├── dataset_snapshot.json
+├── baseline/
+│   ├── fixed_math.test_taker_inference.json
+│   ├── fixed_math.compare_answers.json
+│   └── summary.json
+└── cycle_<N>/
+    ├── fixed_math.test_taker_inference.json
+    ├── fixed_math.compare_answers.json
+    └── summary.json
+```
+
+## 开源项目基础
+
+评测闭环继续保留
+[XiangLi1999/AutoBencher](https://github.com/XiangLi1999/AutoBencher) 的规划、出题、
+评测和反馈拓扑。evaluator 策略适配了 MIT 许可证的
+[Microsoft ToRA](https://github.com/microsoft/ToRA) 工具集成推理方法，但将其自由
+工具执行替换为上文所述的受限本地运行时。
+
+项目还使用 Hugging Face
+[Math-Verify](https://github.com/huggingface/Math-Verify) 作为数学答案解析和表达式
+比较的高质量兜底实现，其许可证为 Apache-2.0。AutoBencher 自己的类型化规范化和
+SymPy 检查优先执行，隔离的大模型语义判断默认仍为必需步骤。精确复用边界和许可
+说明见 `THIRD_PARTY_NOTICES.md`。
+
+训练集与固定测试集的泄漏防护还使用了参考
+[ChenghaoMou/text-dedup](https://github.com/ChenghaoMou/text-dedup) 设计的
+Apache-2.0 兼容 MinHash 独立后备实现、MIT 许可的
+[datasketch](https://github.com/ekzhu/datasketch) MinHash/LSH，以及 Apache-2.0
+许可的 [Hugging Face Sentence Transformers](https://github.com/huggingface/sentence-transformers)。
+本地结构化 JSON 使用 [Outlines](https://github.com/dottxt-ai/outlines)，失败时可
+回退到 [Guidance](https://github.com/guidance-ai/guidance)；微调使用
+[TRL](https://github.com/huggingface/trl)，实验追踪使用可配置的
+[Weights & Biases](https://github.com/wandb/wandb)。
+
+## 检查与验证
+
+运行 CPU 测试：
 
 ```bash
 python -m pytest -q
 ```
 
-可选 GPU/API 测试默认跳过，只有在配置好真实环境后才应显式启用。未执行的真实 API
-或远程 GPU 测试不应声明为已通过。
+语法与 CLI 检查：
+
+```bash
+python -m py_compile math_autobencher.py run_scripts.py tool_util.py autobencher/*.py
+python math_autobencher.py --help
+python run_scripts.py --help
+```
+
+真实 API 推理、本地大模型加载、CUDA QLoRA 和远程调度需要相应密钥、模型文件与
+硬件；单元测试不会把这些未执行的外部集成声明为已通过。

@@ -61,6 +61,9 @@ def test_cpu_mock_research_pipeline_exports_all_core_artifacts(tmp_path):
             "answer_type": "integer",
             "gold_answer": answer,
             "canonical_answer": answer,
+            "gold_reasoning_summary": [
+                "Add one to the given integer and verify the sum."
+            ],
             "difficulty": allocation["difficulty"],
         }
         raw = json.dumps(

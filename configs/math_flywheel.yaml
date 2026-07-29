@@ -9,7 +9,7 @@ experiment:
   max_cycles: 3
   questions_per_iteration: 450
   export_interval: 1
-  clean_cycle_cache: false
+  clean_cycle_cache: true
   resume: true
   disk_warning_threshold_gb: 10
 
@@ -177,6 +177,10 @@ generation:
   max_questions_per_prompt: 50
   temperature: 0.0
   top_p: 0.1
+  minimum_difficulty: 2
+  maximum_difficulty: 6
+  maximum_reasoning_steps: 6
+  prohibit_competition_level: true
   generator_max_retry: 3
   max_quota_repair_rounds: 3
   allow_partial_question_budget: true
@@ -191,6 +195,34 @@ generation:
   gold_validation_max_tokens: 4096
   gold_validation_timeout_seconds: 10
 
+evaluator_pipeline:
+  enabled: true
+  solver_prompt_path: prompts/evaluator_python_solver.txt
+  solver_strategy_path: prompts/tora_evaluator_strategy.txt
+  independent_solver_prompt_path: prompts/evaluator_independent_solver.txt
+  postcheck_prompt_path: prompts/evaluator_postcheck.txt
+  semantic_judge_prompt_path: prompts/semantic_answer_judge.txt
+  temperature: 0.0
+  solver_max_tokens: 4096
+  independent_solver_max_tokens: 4096
+  postcheck_max_tokens: 1024
+  semantic_judge_max_tokens: 768
+  code_generation_attempts: 2
+  independent_solver_attempts: 2
+  postcheck_attempts: 2
+  semantic_judge_attempts: 2
+  code_execution_timeout_seconds: 10
+  max_code_chars: 12000
+  max_ast_nodes: 4000
+  max_integer_literal: 1000000
+  max_output_chars: 16000
+  max_answer_chars: 512
+  minimum_difficulty: 2
+  maximum_difficulty: 6
+  semantic_judge_confidence_threshold: 0.80
+  require_runtime_verification: true
+  require_semantic_judge: true
+
 hard_pool:
   enabled: true
   injection_start_iteration: 3
@@ -203,6 +235,16 @@ hard_pool:
 
 adaptive_sampling:
   enabled: true
+  # Previous-round global accuracy is a coarse difficulty guardrail. It is
+  # applied before the original per-subcategory Beta-Binomial allocation.
+  initial_difficulty: 4
+  global_accuracy_enabled: true
+  global_accuracy_low: 0.35
+  global_accuracy_high: 0.70
+  global_accuracy_min_observations: 10
+  global_difficulty_step: 1
+  max_difficulty_change_per_iteration: 1
+  # The target range below is local: subcategory x difficulty posterior.
   target_accuracy_low: 0.10
   target_accuracy_high: 0.30
   target_accuracy_mid: 0.20
@@ -246,6 +288,7 @@ answer_normalization:
   normalize_boolean_text: true
   symbolic_equivalence: true
   set_order_sensitive: false
+  math_verify_enabled: true
 
 error_attribution:
   enabled: true
@@ -266,13 +309,48 @@ dataset:
   filter_ambiguous_samples: true
   filter_invalid_answers: true
   filter_tool_violations: true
+  require_gold_reasoning_steps: true
+  min_gold_reasoning_steps: 1
+  max_gold_reasoning_steps: 6
+  max_gold_reasoning_chars_per_step: 300
   max_samples_per_template_cluster: 5
+  holdout_exact_template_rejection: true
+  holdout_near_duplicate_threshold: 0.85
+  holdout_semantic_similarity_threshold: 0.82
+  text_dedup_enabled: true
+  text_dedup_num_perm: 128
+  text_dedup_ngram_size: 2
+  text_dedup_seed: 42
+  text_dedup_similarity_threshold: 0.78
+  holdout_text_dedup_similarity_threshold: 0.72
+  datasketch_enabled: true
+  datasketch_required: true
+  datasketch_lsh_enabled: true
+  sentence_transformers_enabled: true
+  sentence_transformers_required: true
+  sentence_transformers_model: sentence-transformers/all-MiniLM-L6-v2
+  sentence_transformers_revision: null
+  sentence_transformers_device: cpu
+  sentence_transformers_cache_dir: null
+  sentence_transformers_local_files_only: false
+  sentence_transformers_batch_size: 64
 
 training_mix:
   incorrect_boundary_samples: 0.55
   correct_retention_samples: 0.25
   coverage_repair_samples: 0.15
   format_instruction_samples: 0.05
+  strict_correct_incorrect_ratio: true
+  scope: current_cycle
+  minimum_samples: 4
+
+fixed_test:
+  enabled: true
+  dataset_path: benchmarks/fixed_math_test_set.json
+  require_all_subcategories: true
+  evaluate_baseline: true
+  evaluate_after_each_training_cycle: true
+  fail_on_training_leakage: true
 
 finetune:
   enabled: true
@@ -285,6 +363,30 @@ finetune:
   learning_rate: 2.0e-4
   save_step_metrics: true
   merge_adapter: true
+
+structured_output:
+  # Token-level JSON constraints apply only to directly loaded local models.
+  # DeepSeek/OpenAI-compatible API calls retain strict parse-and-retry checks.
+  enabled: true
+  local_backend: outlines
+  fallback_backend: guidance
+  required: false
+  use_for_evaluator: true
+  use_for_test_taker: true
+
+tracking:
+  wandb:
+    enabled: true
+    # Offline mode never uploads automatically; switch to online explicitly.
+    mode: offline
+    project: autobencher-math-flywheel
+    entity: null
+    group: adaptive-math-flywheel
+    tags:
+      - autobencher
+      - math
+      - data-flywheel
+    log_model: false
 
 export:
   save_iteration_json: true

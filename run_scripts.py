@@ -122,7 +122,6 @@ def build_command(
     acc_target=None,
     temperature=None,
     pairwise=None,
-    theme=None,
     top_p=None,
     execution_mode="eval",
     export_interval=1,
@@ -142,16 +141,14 @@ def build_command(
 ):
     agent_modelname = agent_modelname or model
     test_taker_modelname = test_taker_modelname or model
-    default_acc_target = "0.1--0.3" if mode in {"wiki", "math"} else "0.3--0.5"
-    acc_target = acc_target or default_acc_target
+    if mode != "math":
+        raise ValueError(
+            "Only the math data-flywheel entry point is supported"
+        )
+    acc_target = acc_target or "0.1--0.3"
 
     if outfile_prefix1 is None:
-        if mode == "wiki":
-            outfile_prefix1 = f"KI/history.{model}.0.1--0.3."
-        elif mode == "multilingual":
-            outfile_prefix1 = f"multilingual/5word_v3_{model}."
-        else:
-            outfile_prefix1 = f"math_v5/{model}.0.1--0.3."
+        outfile_prefix1 = f"math_v5/{model}.0.1--0.3."
 
     output_parent = Path(outfile_prefix1).parent
     if output_parent != Path("."):
@@ -172,15 +169,6 @@ def build_command(
     _append_option(common, "--pairwise", pairwise)
     _append_option(common, "--top_p", top_p)
 
-    if mode == "wiki":
-        _append_option(common, "--theme", theme or "history")
-        return [
-            sys.executable, "wiki_autobencher.py", *common,
-        ]
-    if mode == "multilingual":
-        return [
-            sys.executable, "multilingual_autobencher.py", *common,
-        ]
     # [ADDED] Flywheel options are isolated to the math module.
     math_options = [
         "--mode", execution_mode,
@@ -209,7 +197,7 @@ def build_command(
 
 def main():
     parser = argparse.ArgumentParser(description="Run an AutoBencher benchmark")
-    parser.add_argument("mode", choices=["wiki", "multilingual", "math"])
+    parser.add_argument("mode", choices=["math"])
     parser.add_argument(
         "--model",
         help="shorthand that sets both the agent and test-taker model",
@@ -233,7 +221,6 @@ def main():
     parser.add_argument("--acc-target", "--acc_target", dest="acc_target")
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--pairwise")
-    parser.add_argument("--theme")
     parser.add_argument("--top-p", "--top_p", dest="top_p", type=float)
     # [ADDED] Built-in math data-flywheel controls.
     parser.add_argument(
@@ -314,8 +301,6 @@ def main():
         metavar="PATH=VALUE",
     )
     args = parser.parse_args()
-    if args.mode != "math" and args.execution_mode != "eval":
-        parser.error("--mode data_flywheel is supported only for math")
     for name in (
         "num_iters",
         "export_interval",
@@ -329,11 +314,10 @@ def main():
     if args.disk_warning_threshold < 0:
         parser.error("--disk_warning_threshold cannot be negative")
     # [MODIFIED] Announce the selected math execution mode and core metrics.
-    if args.mode == "math":
-        print(
-            f"[MathFlywheel] mode={args.execution_mode}; metrics: "
-            "global_accuracy, subcategory_coverage, hard_samples"
-        )
+    print(
+        f"[MathFlywheel] mode={args.execution_mode}; metrics: "
+        "global_accuracy, subcategory_coverage, hard_samples"
+    )
     model = args.model or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     command = build_command(
         args.mode,
@@ -349,7 +333,6 @@ def main():
         acc_target=args.acc_target,
         temperature=args.temperature,
         pairwise=args.pairwise,
-        theme=args.theme,
         top_p=args.top_p,
         execution_mode=args.execution_mode,
         export_interval=args.export_interval,

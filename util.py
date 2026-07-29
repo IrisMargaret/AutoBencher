@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from collections import namedtuple
@@ -8,6 +9,101 @@ from openai import OpenAI
 
 
 load_dotenv()
+
+
+_OUTLINES_MODEL_CACHE = {}
+_GUIDANCE_MODEL_CACHE = {}
+
+
+def _structured_value_to_text(value):
+    if isinstance(value, str):
+        return value
+    if hasattr(value, "model_dump_json"):
+        return value.model_dump_json()
+    if hasattr(value, "json"):
+        return value.json()
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _generate_local_structured_json(
+    model,
+    tokenizer,
+    prompts,
+    schema,
+    *,
+    backend,
+    fallback_backend,
+    required,
+    temperature,
+    max_tokens,
+):
+    """Use Outlines/Guidance only for direct local-model constrained decoding."""
+    backends = []
+    for candidate in (backend, fallback_backend):
+        normalized = str(candidate or "none").strip().lower()
+        if normalized != "none" and normalized not in backends:
+            backends.append(normalized)
+    errors = []
+    for candidate in backends:
+        try:
+            if candidate == "outlines":
+                import outlines
+
+                cache_key = (id(model), id(tokenizer))
+                structured_model = _OUTLINES_MODEL_CACHE.get(cache_key)
+                if structured_model is None:
+                    structured_model = outlines.from_transformers(
+                        model,
+                        tokenizer,
+                    )
+                    _OUTLINES_MODEL_CACHE[cache_key] = structured_model
+                call_kwargs = {"max_new_tokens": int(max_tokens)}
+                if float(temperature) > 0:
+                    call_kwargs["temperature"] = float(temperature)
+                return [
+                    _structured_value_to_text(
+                        structured_model(prompt, schema, **call_kwargs)
+                    )
+                    for prompt in prompts
+                ]
+            if candidate == "guidance":
+                from guidance import json as guidance_json
+                from guidance import models as guidance_models
+
+                cache_key = (id(model), id(tokenizer))
+                guidance_model = _GUIDANCE_MODEL_CACHE.get(cache_key)
+                if guidance_model is None:
+                    guidance_model = guidance_models.Transformers(
+                        model,
+                        tokenizer=tokenizer,
+                        echo=False,
+                    )
+                    _GUIDANCE_MODEL_CACHE[cache_key] = guidance_model
+                results = []
+                for prompt in prompts:
+                    state = (
+                        guidance_model
+                        + prompt
+                        + guidance_json(
+                            name="structured_json",
+                            schema=schema,
+                            temperature=float(temperature),
+                            max_tokens=int(max_tokens),
+                        )
+                    )
+                    results.append(str(state["structured_json"]))
+                return results
+            errors.append(f"unsupported backend {candidate!r}")
+        except Exception as exc:
+            errors.append(
+                f"{candidate}: {type(exc).__name__}: {exc}"
+            )
+    if required:
+        raise RuntimeError(
+            "Required local structured generation failed: "
+            + "; ".join(errors or ["no backend configured"])
+        )
+    return None
 
 
 def _transformers_dtype_kwargs(transformers_module, dtype):
@@ -301,6 +397,10 @@ def gen_from_prompt(
     verbose=False,
     use_helm=False,
     auth=None,
+    structured_schema=None,
+    structured_backend="none",
+    structured_fallback_backend="none",
+    structured_required=False,
 ):
     del output_scores
     if service is None:
@@ -322,6 +422,20 @@ def gen_from_prompt(
                 )
                 for item in prompt
             ]
+        if structured_schema is not None:
+            structured_texts = _generate_local_structured_json(
+                model,
+                tokenizer,
+                formatted_prompts,
+                structured_schema,
+                backend=structured_backend,
+                fallback_backend=structured_fallback_backend,
+                required=bool(structured_required),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if structured_texts is not None:
+                return _as_request_result(structured_texts)
         prompt_ids = tokenizer(
             formatted_prompts,
             return_tensors="pt",
@@ -538,16 +652,15 @@ def query_openai_compatible(
                     ],
                     temperature=temperature,
                     top_p=top_p,
-                    max_tokens=max_tokens,
                     n=num_completions,
                 )
+                # DeepSeek API requests intentionally omit an output-token cap.
+                # Local/other providers still use the caller's max_tokens
+                # because they require an explicit generation safety bound.
+                if not model.lower().startswith("deepseek"):
+                    request_kwargs["max_tokens"] = max_tokens
                 if stop_sequences:
                     request_kwargs["stop"] = list(stop_sequences)
-                # V4 models can spend the entire small token budget on hidden
-                # reasoning. AutoBencher expects the original non-thinking
-                # ChatCompletions behavior, especially for 20-token judgments.
-                if model.startswith("deepseek-v4"):
-                    request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
                 completion = client.chat.completions.create(**request_kwargs)
                 content = completion.choices[0].message.content
                 if not content or not content.strip():

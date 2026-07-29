@@ -51,6 +51,15 @@ def _record_subcategory(record: Mapping[str, Any]) -> str:
     )
 
 
+def _record_is_correct(record: Mapping[str, Any]) -> bool:
+    value = record.get("is_correct", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
 def coverage_metrics(
     records: Iterable[Mapping[str, Any]],
     config: Mapping[str, Any],
@@ -134,7 +143,7 @@ def beta_binomial_state(
         grouped[key].append(record)
     state = {}
     for key, group in grouped.items():
-        correct = sum(bool(item.get("is_correct")) for item in group)
+        correct = sum(_record_is_correct(item) for item in group)
         incorrect = len(group) - correct
         alpha = prior_alpha + correct
         beta = prior_beta + incorrect
@@ -151,6 +160,62 @@ def beta_binomial_state(
             "observation_count": len(group),
         }
     return state
+
+
+def previous_round_accuracy_state(
+    records: Iterable[Mapping[str, Any]],
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Translate the immediately previous round's accuracy into a difficulty bias."""
+    adaptive = config["adaptive_sampling"]
+    evaluated = [record for record in records if "is_correct" in record]
+    observations = len(evaluated)
+    enabled = bool(adaptive["global_accuracy_enabled"])
+    minimum = int(adaptive["global_accuracy_min_observations"])
+    if not enabled:
+        return {
+            "enabled": False,
+            "observation_count": observations,
+            "accuracy": None,
+            "band": "disabled",
+            "difficulty_delta": 0,
+            "reason": "global_accuracy_adjustment_disabled",
+        }
+    if observations < minimum:
+        return {
+            "enabled": True,
+            "observation_count": observations,
+            "accuracy": None,
+            "band": "insufficient_observations",
+            "difficulty_delta": 0,
+            "reason": "global_accuracy_insufficient_observations",
+        }
+    accuracy = sum(_record_is_correct(record) for record in evaluated) / observations
+    low = float(adaptive["global_accuracy_low"])
+    high = float(adaptive["global_accuracy_high"])
+    step = int(adaptive["global_difficulty_step"])
+    if accuracy < low:
+        band = "below_target"
+        delta = -step
+        reason = "previous_round_accuracy_low_reduce_difficulty"
+    elif accuracy > high:
+        band = "above_target"
+        delta = step
+        reason = "previous_round_accuracy_high_increase_difficulty"
+    else:
+        band = "inside_target"
+        delta = 0
+        reason = "previous_round_accuracy_inside_target_keep_difficulty"
+    return {
+        "enabled": True,
+        "observation_count": observations,
+        "accuracy": accuracy,
+        "target_low": low,
+        "target_high": high,
+        "band": band,
+        "difficulty_delta": delta,
+        "reason": reason,
+    }
 
 
 def adaptive_priority(
@@ -237,14 +302,33 @@ def generation_schedule(
     global_iteration: int,
     hard_pool_size: int,
     hard_pool_records: Iterable[Mapping[str, Any]] | None = None,
+    previous_round_records: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     records = list(records)
+    previous_round_records = list(previous_round_records or [])
     items = taxonomy_items(config)
     metrics = coverage_metrics(records, config)
     state = beta_binomial_state(records, config)
+    global_accuracy_state = previous_round_accuracy_state(
+        previous_round_records,
+        config,
+    )
+    latest_difficulty: dict[str, int] = {}
+    for record in records:
+        subcategory = _record_subcategory(record)
+        if subcategory:
+            latest_difficulty[subcategory] = int(
+                record.get(
+                    "difficulty",
+                    config["adaptive_sampling"]["initial_difficulty"],
+                )
+            )
     priorities = []
     for category, subcategory, metadata in items:
-        difficulty = int(metadata.get("difficulty", 5))
+        difficulty = latest_difficulty.get(
+            subcategory,
+            int(config["adaptive_sampling"]["initial_difficulty"]),
+        )
         item = adaptive_priority(
             subcategory,
             difficulty,
@@ -252,6 +336,30 @@ def generation_schedule(
             int(metadata["min_quota"]),
             state,
             config,
+        )
+        local_selected_difficulty = int(item["selected_difficulty"])
+        combined_delta = (
+            local_selected_difficulty
+            - difficulty
+            + int(global_accuracy_state["difficulty_delta"])
+        )
+        maximum_change = int(
+            config["adaptive_sampling"]["max_difficulty_change_per_iteration"]
+        )
+        combined_delta = max(-maximum_change, min(maximum_change, combined_delta))
+        item["local_selected_difficulty"] = local_selected_difficulty
+        item["global_difficulty_delta"] = int(
+            global_accuracy_state["difficulty_delta"]
+        )
+        item["combined_difficulty_delta"] = combined_delta
+        item["sampling_reason"].append(global_accuracy_state["reason"])
+        item["selected_difficulty"] = difficulty + combined_delta
+        item["selected_difficulty"] = max(
+            int(config["generation"]["minimum_difficulty"]),
+            min(
+                int(config["generation"]["maximum_difficulty"]),
+                int(item["selected_difficulty"]),
+            ),
         )
         item["category"] = category
         item["base_weight"] = float(metadata.get("base_weight", 1.0))
@@ -407,6 +515,7 @@ def generation_schedule(
         "source_budget": source_budget,
         "allocations": allocations,
         "adaptive_sampler_state": priorities,
+        "previous_round_accuracy_state": global_accuracy_state,
         "coverage_before_generation": metrics,
         "fallbacks": [],
     }

@@ -225,6 +225,11 @@ def test_generated_question_rejects_corrupted_unicode():
         ("[1, 3)", "[1,3)", "interval"),
         ("[[1,2],[3,4]]", "1,2;3,4", "matrix"),
         ("5 meters", "5 m", "unit_value"),
+        ("log(2)", "0.6931471805599453", "symbolic_expression"),
+        ("ln(2)", "0.6931471805599453", "decimal"),
+        ("sqrt(2)", "1.4142135623730951", "symbolic_expression"),
+        ("log(8, 2)", "3.0", "symbolic_expression"),
+        ("(1/2, sqrt(2))", "(0.5, 1.4142135623730951)", "ordered_tuple"),
     ],
 )
 def test_answer_equivalence_types(config, gold, predicted, answer_type):

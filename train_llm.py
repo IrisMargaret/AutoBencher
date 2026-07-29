@@ -69,13 +69,30 @@ def build_parser():
     parser.add_argument("--metrics_path")
     parser.add_argument("--run_id", default="")
     parser.add_argument("--config_hash", default="")
+    parser.add_argument("--wandb_enabled", action="store_true")
+    parser.add_argument(
+        "--wandb_mode",
+        choices=("online", "offline", "disabled"),
+        default="offline",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        default="autobencher-math-flywheel",
+    )
+    parser.add_argument("--wandb_entity", default="")
+    parser.add_argument("--wandb_group", default="")
+    parser.add_argument("--wandb_tags", default="")
+    parser.add_argument("--wandb_log_model", action="store_true")
     return parser
 
 
 # [ADDED] Fail before model loading when an optional training package is absent.
-def validate_dependencies():
+def validate_dependencies(wandb_enabled=False):
     failures = []
-    for package in REQUIRED_PACKAGES:
+    required_packages = list(REQUIRED_PACKAGES)
+    if wandb_enabled:
+        required_packages.append("wandb")
+    for package in required_packages:
         try:
             importlib.import_module(package)
         except Exception as exc:
@@ -248,7 +265,8 @@ def _training_config(args, adapter_output, use_bfloat16):
         "bf16": use_bfloat16,
         "fp16": not use_bfloat16,
         "gradient_checkpointing": True,
-        "report_to": "none",
+        "report_to": "wandb" if args.wandb_enabled else "none",
+        "run_name": args.run_id or Path(adapter_output).name,
         "disable_tqdm": False,
         "remove_unused_columns": False,
         "dataloader_pin_memory": True,
@@ -498,11 +516,23 @@ def main(argv=None):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+    if args.wandb_enabled:
+        os.environ["WANDB_MODE"] = args.wandb_mode
+        os.environ["WANDB_PROJECT"] = args.wandb_project
+        os.environ["WANDB_LOG_MODEL"] = (
+            "checkpoint" if args.wandb_log_model else "false"
+        )
+        if args.wandb_entity:
+            os.environ["WANDB_ENTITY"] = args.wandb_entity
+        if args.wandb_group:
+            os.environ["WANDB_RUN_GROUP"] = args.wandb_group
+        if args.wandb_tags:
+            os.environ["WANDB_TAGS"] = args.wandb_tags
     if _is_complete_model_directory(args.output_path):
         LOGGER.info("stage=resume output_already_complete=%s", args.output_path)
         return 0
     try:
-        validate_dependencies()
+        validate_dependencies(args.wandb_enabled)
     except RuntimeError as exc:
         LOGGER.error("stage=dependency_check error=%s", exc)
         return 3

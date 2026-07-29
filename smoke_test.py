@@ -1,6 +1,5 @@
 """Low-cost end-to-end DeepSeek API and project import check."""
 
-import importlib
 import os
 
 from util import gen_from_prompt, process_args_for_models
@@ -29,9 +28,13 @@ def main():
     if "AUTOBENCHER_OK" not in response:
         raise RuntimeError(f"Unexpected API response: {response!r}")
 
-    for module in ("tool_util", "wiki_autobencher", "multilingual_autobencher", "math_autobencher"):
-        importlib.import_module(module)
-    print(f"Smoke test passed with {model_name}; all benchmark modules import successfully.")
+    import math_autobencher
+
+    del math_autobencher
+    print(
+        f"Smoke test passed with {model_name}; "
+        "the math data-flywheel imports successfully."
+    )
 
 
 if __name__ == "__main__":

@@ -36,6 +36,14 @@ from autobencher.experiment import (
     atomic_json,
     utc_now,
 )
+from autobencher.evaluator import (
+    judge_answer_semantics,
+    solve_with_privileged_python,
+)
+from autobencher.fixed_benchmark import (
+    fixed_benchmark_summary,
+    load_fixed_test_set,
+)
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
@@ -71,7 +79,6 @@ from tool_util import (
     update_meta_summary,
 )
 from run_scripts import log_math_iteration_metrics
-from wiki_autobencher import fast_compare_answers
 
 DEFAULT_JSON_MESSAGE = """You are a helpful AI assistant.
 Solve tasks using your reasoning and language skills.
@@ -1447,8 +1454,10 @@ Train-eligible examples:
     return extracted_json
 
 
-# [ADDED] New question-only generator. LLM output is never used as a truth
-# source; TruthSolver is the only component allowed to create gold fields.
+# [ADDED] New question-only generator. Gold is accepted only after the
+# privileged evaluator has generated isolated Python, executed it, verified the
+# result, and completed a separate post-execution check. TruthSolver remains an
+# independent deterministic agreement layer when it can parse the question.
 def _generate_question_text_with_truth(
     description_json,
     agent_lm,
@@ -1493,6 +1502,14 @@ Mandatory rules:
    - calculations: "Compute EXPR."
 5. Write powers as ^ or ** and use explicit equality signs.
 6. Use English only and never copy an earlier question verbatim.
+7. Keep every problem within difficulty
+   {int(generation_config["minimum_difficulty"])} to
+   {int(generation_config["maximum_difficulty"])} on a 1-10 scale and solvable
+   in at most {int(generation_config["maximum_reasoning_steps"])} concise
+   reasoning steps.
+8. Do not generate olympiad, contest-final, research-level, trick, or
+   intentionally pathological problems. Prefer clear school or early
+   undergraduate exercises with modest arithmetic.
 """
     if "system" in sub_category.lower():
         context += """
@@ -1643,6 +1660,12 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                     attempt,
                     response,
                 )
+                # Keep valid siblings from a mixed batch. Invalid candidates
+                # are skipped individually; the outer quota-repair loop may
+                # request replacements without terminating the iteration.
+                if normalized_items:
+                    accepted_questions = normalized_items
+                    break
                 continue
             accepted_questions = normalized_items
             break
@@ -1680,23 +1703,173 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
     solved_questions = []
     for index, item in enumerate(accepted_questions):
         question_text = item["question"]
-        truth = truth_solver.solve(question_text)
-        if not truth.success:
+        evaluator_truth = None
+        evaluator_enabled = bool(
+            research_config["evaluator_pipeline"]["enabled"]
+        )
+        if evaluator_enabled:
+            evaluator_truth = solve_with_privileged_python(
+                question_text,
+                (agent_lm, agent_tokenizer, agent_client),
+                research_config,
+                cache_path=(
+                    f"{outfile_prefix}.evaluator_python_solutions.json"
+                ),
+            )
+        deterministic_truth = truth_solver.solve(question_text)
+        if evaluator_truth is None:
+            if not deterministic_truth.success:
+                failures.append(
+                    {
+                        "stage": "truth_solver",
+                        "failure_type": deterministic_truth.failure_type,
+                        "item_index": index,
+                        "question": question_text,
+                        "failure_summary": deterministic_truth.failure_summary,
+                        "truth_validation_details": (
+                            deterministic_truth.truth_validation_details
+                        ),
+                    }
+                )
+                continue
+            evaluator_truth = {
+                "status": "passed",
+                "canonical_answer": deterministic_truth.canonical_answer,
+                "answer_type": deterministic_truth.answer_type,
+                "verification_passed": True,
+                "substitution_passed": bool(
+                    deterministic_truth.truth_validation_details.get(
+                        "substitution_passed",
+                        True,
+                    )
+                ),
+                "source_question_sha256": (
+                    deterministic_truth.truth_validation_details.get(
+                        "source_question_sha256"
+                    )
+                ),
+                "solver_question_sha256": (
+                    deterministic_truth.truth_validation_details.get(
+                        "solver_question_sha256"
+                    )
+                ),
+                "solver_prompt_version": "truth_solver_compatibility",
+                "python_code_sha256": None,
+                "verification_details": [],
+                "postcheck": {},
+                "estimated_difficulty": int(
+                    description_json.get("difficulty", 5)
+                ),
+                "difficulty_acceptable": True,
+            }
+        if evaluator_truth.get("status") != "passed":
+            failure_reason = str(
+                evaluator_truth.get(
+                    "failure_reason",
+                    "privileged evaluator rejected the solution",
+                )
+            )
+            failure_type = (
+                FailureType.DIFFICULTY_REJECTED.value
+                if "difficulty" in failure_reason.lower()
+                else FailureType.EVALUATOR_CODE_FAILURE.value
+            )
             failures.append(
                 {
-                    "stage": "truth_solver",
-                    "failure_type": truth.failure_type,
+                    "stage": "privileged_evaluator",
+                    "failure_type": failure_type,
                     "item_index": index,
                     "question": question_text,
-                    "failure_summary": truth.failure_summary,
-                    "truth_validation_details": (
-                        truth.truth_validation_details
-                    ),
+                    "failure_summary": failure_reason,
+                    "truth_validation_details": evaluator_truth,
                 }
             )
             continue
-        canonical_answer = str(truth.canonical_answer)
-        truth_details = dict(truth.truth_validation_details)
+        canonical_answer = str(evaluator_truth["canonical_answer"])
+        answer_type = normalize_answer_type(
+            evaluator_truth["answer_type"],
+            canonical_answer,
+        )
+        deterministic_agreement = None
+        if deterministic_truth.success:
+            deterministic_agreement = answers_equivalent(
+                canonical_answer,
+                deterministic_truth.canonical_answer,
+                answer_type,
+                research_config,
+            )
+            if not deterministic_agreement["equivalent"]:
+                failures.append(
+                    {
+                        "stage": "truth_agreement",
+                        "failure_type": FailureType.TRUTH_DISAGREEMENT.value,
+                        "item_index": index,
+                        "question": question_text,
+                        "failure_summary": (
+                            "Privileged Python answer disagrees with "
+                            "deterministic TruthSolver"
+                        ),
+                        "evaluator_answer": canonical_answer,
+                        "truth_solver_answer": (
+                            deterministic_truth.canonical_answer
+                        ),
+                    }
+                )
+                continue
+        if evaluator_enabled:
+            evaluator_audit_summary = {
+                key: value
+                for key, value in evaluator_truth.items()
+                if key
+                not in {
+                    "python_code",
+                    "analysis_summary",
+                    "independent_python_code",
+                    "independent_analysis_summary",
+                }
+            }
+            truth_details = {
+                "source_question": question_text,
+                "source_question_sha256": evaluator_truth.get(
+                    "source_question_sha256"
+                ),
+                "solver_question_sha256": evaluator_truth.get(
+                    "solver_question_sha256"
+                ),
+                "solver_branch": "isolated_evaluator_python",
+                "solver_prompt_version": evaluator_truth.get(
+                    "solver_prompt_version"
+                ),
+                "python_code_sha256": evaluator_truth.get(
+                    "python_code_sha256"
+                ),
+                "substitution_passed": bool(
+                    evaluator_truth.get("substitution_passed")
+                ),
+                "runtime_verification_passed": bool(
+                    evaluator_truth.get("verification_passed")
+                ),
+                "postcheck": evaluator_truth.get("postcheck", {}),
+                "deterministic_truth_solver": deterministic_truth.to_dict(),
+                "deterministic_agreement": deterministic_agreement,
+                "evaluator_audit": evaluator_audit_summary,
+            }
+        else:
+            truth_details = dict(
+                deterministic_truth.truth_validation_details
+            )
+        estimated_difficulty = max(
+            int(research_config["generation"]["minimum_difficulty"]),
+            min(
+                int(research_config["generation"]["maximum_difficulty"]),
+                int(
+                    evaluator_truth.get(
+                        "estimated_difficulty",
+                        description_json.get("difficulty", 5),
+                    )
+                ),
+            ),
+        )
         solved_questions.append(
             {
                 "id": f"q_{index + 1}",
@@ -1704,22 +1877,19 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "category": description_json["category"],
                 "subcategory": sub_category,
                 "sub_category": sub_category,
-                "difficulty": max(
-                    1,
-                    min(
-                        10,
-                        int(description_json.get("difficulty", 5)),
-                    ),
-                ),
+                "difficulty": estimated_difficulty,
                 "question": question_text,
-                "answer_type": truth.answer_type,
+                "answer_type": answer_type,
                 "canonical_answer": canonical_answer,
                 "display_answer": canonical_answer,
                 "answer": canonical_answer,
                 "gold_answer": canonical_answer,
+                "gold_reasoning_summary": list(
+                    evaluator_truth.get("analysis_summary", [])
+                ),
                 "unit": None,
                 "tolerance": None,
-                "order_sensitive": truth.answer_type == "ordered_tuple",
+                "order_sensitive": answer_type == "ordered_tuple",
                 "generation_source": description_json.get(
                     "generation_source",
                     "coverage_deficit",
@@ -1742,14 +1912,16 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "gold_answer_validation": {
                     "status": "passed",
                     "recomputed_answer": canonical_answer,
-                    "answer_type": truth.answer_type,
+                    "answer_type": answer_type,
                     "answer_type_consistent": True,
                     "verification_passed": True,
                     "substitution_passed": bool(
                         truth_details.get("substitution_passed", True)
                     ),
                     "verification_method": (
-                        "TruthSolver authoritative independent solve"
+                        "isolated evaluator Python execution, runtime "
+                        "verification, postcheck, and optional TruthSolver "
+                        "agreement"
                     ),
                     "failure_reason": None,
                     "answer_equivalent": True,
@@ -2030,31 +2202,13 @@ def _ask_question_v3(
                 {},
             ).items():
                 aggregate_failures[str(key)] += int(value)
-            truth_failure_present = any(
-                aggregate_failures.get(label, 0) > 0
-                for label in (
-                    FailureType.TRUTH_PARSE_FAIL.value,
-                    FailureType.NO_CLOSED_SOLUTION.value,
-                    FailureType.INFINITE_SOLUTIONS.value,
-                    FailureType.SOLVE_TIMEOUT.value,
-                )
-            )
-            generator_repair_exhausted = (
-                aggregate_failures.get(
-                    FailureType.REPAIR_EXHAUSTED.value,
-                    0,
-                )
-                > 0
-            )
-
             repair_round = 0
             while (
                 len(question_json) < target_count
                 and repair_round < repair_limit
-                and not truth_failure_present
-                and not generator_repair_exhausted
             ):
                 repair_round += 1
+                missing_count = target_count - len(question_json)
                 question_json_new = _generate_question_text_with_truth(
                     plan_line,
                     agent_lm,
@@ -2063,12 +2217,15 @@ def _ask_question_v3(
                     outfile_prefix2,
                     questions_old=question_json,
                     hard_sample_context=variant_context,
-                    question_count=target_count,
+                    question_count=missing_count,
                     research_config=research_config,
                     repair_feedback=(
-                        "The previous batch contained duplicate question "
-                        "text. Generate structurally different questions "
-                        "while preserving the assigned subcategory."
+                        f"The previous batch still has {missing_count} "
+                        "unfilled positions because some candidates were "
+                        "duplicate, malformed, ambiguous, or failed gold "
+                        "verification. Skip those failed candidates and "
+                        "generate new structurally different questions while "
+                        "preserving the assigned subcategory."
                     ),
                 )
                 question_json_new = question_json_new[0]
@@ -2092,22 +2249,6 @@ def _ask_question_v3(
                     {},
                 ).items():
                     aggregate_failures[str(key)] += int(value)
-                truth_failure_present = any(
-                    aggregate_failures.get(label, 0) > 0
-                    for label in (
-                        FailureType.TRUTH_PARSE_FAIL.value,
-                        FailureType.NO_CLOSED_SOLUTION.value,
-                        FailureType.INFINITE_SOLUTIONS.value,
-                        FailureType.SOLVE_TIMEOUT.value,
-                    )
-                )
-                generator_repair_exhausted = (
-                    aggregate_failures.get(
-                        FailureType.REPAIR_EXHAUSTED.value,
-                        0,
-                    )
-                    > 0
-                )
                 unique_new = []
                 for item in question_json_new:
                     signature = normalize_question_text(item.get("question"))
@@ -2324,6 +2465,8 @@ def test_and_eval(
             or all(
                 record.get("parse_status") == "success"
                 and record.get("parser_version") == "structured_v2"
+                and record.get("semantic_judge", {}).get("status")
+                == "success"
                 for record in cached_inference
             )
         )
@@ -2405,7 +2548,13 @@ def test_and_eval(
             == str(current.get("question", "")).strip()
             and str(cached.get("test_taker_answer", "")).strip()
             == str(current.get("test_taker_response", "")).strip()
-            for cached, current in zip(judge_cache, test_taker_output)
+            and str(cached.get("gold_answer", "")).strip()
+            == str(gold.get("answer", "")).strip()
+            for cached, current, gold in zip(
+                judge_cache,
+                test_taker_output,
+                gold_records,
+            )
         )
     )
     if judge_cache and not judge_cache_matches:
@@ -2448,15 +2597,73 @@ def test_and_eval(
             tqdm.tqdm = _tracked_evaluator_iterator
         try:
             evaluator_cache_exists = os.path.exists(judge_cache_path)
-            _, judgments = fast_compare_answers(
-                gold_records,
-                test_taker_output,
-                tool_info,
-                outfile_prefix=judge_prefix,
-                gold_ans_key="answer",
-            )
-            if evaluator_cache_exists and evaluator_progress is not None:
-                evaluator_progress.update(len(test_taker_output))
+            if research_config:
+                if evaluator_cache_exists and judge_cache_matches:
+                    judgments = judge_cache
+                    if evaluator_progress is not None:
+                        evaluator_progress.update(len(test_taker_output))
+                else:
+                    judgments = []
+                    for gold, predicted in zip(
+                        gold_records,
+                        test_taker_output,
+                    ):
+                        semantic = judge_answer_semantics(
+                            question=gold["question"],
+                            gold_answer=gold["answer"],
+                            predicted_answer=predicted[
+                                "test_taker_response"
+                            ],
+                            answer_type=predicted.get(
+                                "answer_type",
+                                "text",
+                            ),
+                            evaluator_info=tool_info,
+                            config=research_config,
+                        )
+                        judgments.append(
+                            {
+                                "question": gold["question"],
+                                "gold_answer": gold["answer"],
+                                "test_taker_answer": predicted[
+                                    "test_taker_response"
+                                ],
+                                "is_correct": semantic[
+                                    "semantically_equivalent"
+                                ],
+                                "confidence": semantic["confidence"],
+                                "reasons": semantic["reason"],
+                                "semantic_judge": semantic,
+                            }
+                        )
+                        if evaluator_progress is not None:
+                            evaluator_progress.update(1)
+                    dump_standard_json(judgments, judge_cache_path)
+            else:
+                judgments = [
+                    {
+                        "question": gold["question"],
+                        "gold_answer": gold["answer"],
+                        "test_taker_answer": predicted[
+                            "test_taker_response"
+                        ],
+                        "is_correct": (
+                            str(gold["answer"]).strip()
+                            == str(
+                                predicted["test_taker_response"]
+                            ).strip()
+                        ),
+                        "confidence": 1.0,
+                        "reasons": "legacy exact comparison",
+                    }
+                    for gold, predicted in zip(
+                        gold_records,
+                        test_taker_output,
+                    )
+                ]
+                dump_standard_json(judgments, judge_cache_path)
+                if evaluator_cache_exists and evaluator_progress is not None:
+                    evaluator_progress.update(len(test_taker_output))
         finally:
             tqdm.tqdm = original_tqdm
     if event_logger:
@@ -2529,21 +2736,61 @@ def test_and_eval(
                 evaluation_status = status
                 standardized["is_correct"] = False
             else:
-                standardized["is_correct"] = bool(equivalence["equivalent"])
-                evaluation_status = equivalence["status"]
+                semantic_judge = judgment.get("semantic_judge", {})
+                semantic_judge_valid = (
+                    semantic_judge.get("status") == "success"
+                )
+                semantic_threshold = float(
+                    research_config["evaluator_pipeline"][
+                        "semantic_judge_confidence_threshold"
+                    ]
+                )
+                semantic_accept = bool(
+                    evaluator_is_correct
+                    and float(judgment.get("confidence", 0.0))
+                    >= semantic_threshold
+                )
                 if (
-                    standardized["is_correct"]
-                    and not evaluator_is_correct
+                    research_config["evaluator_pipeline"][
+                        "require_semantic_judge"
+                    ]
+                    and not semantic_judge_valid
                 ):
-                    evaluation_status = "format_only_error"
+                    standardized["is_correct"] = False
+                    evaluation_status = "semantic_judge_failed"
+                else:
+                    standardized["is_correct"] = bool(
+                        equivalence["equivalent"] or semantic_accept
+                    )
+                    if equivalence["equivalent"] and not semantic_accept:
+                        evaluation_status = (
+                            "deterministic_equivalent_judge_disagreement"
+                        )
+                    elif semantic_accept and not equivalence["equivalent"]:
+                        evaluation_status = "semantic_equivalent"
+                    else:
+                        evaluation_status = equivalence["status"]
+                if standardized["is_correct"] and bool(
+                    semantic_judge.get("format_only_difference")
+                ):
                     standardized["format_only_error"] = True
+            attribution_equivalence = dict(equivalence)
+            attribution_equivalence["equivalent"] = bool(
+                standardized["is_correct"]
+            )
             attribution = attribute_error(
                 standardized,
                 parse_result,
-                equivalence,
+                attribution_equivalence,
                 research_config,
             )
-            evaluator_tool_calls = []
+            evaluator_tool_calls = [
+                {
+                    "tool_name": "language_model",
+                    "purpose": "isolated_semantic_answer_equivalence",
+                    "privileged_side": "evaluator",
+                }
+            ]
             if standardized.get("answer_type") in {
                 "symbolic_expression",
                 "equation",
@@ -2569,6 +2816,15 @@ def test_and_eval(
                     "evaluator_tool_calls": evaluator_tool_calls,
                     "evaluator_confidence": float(
                         judgment.get("confidence", 1.0)
+                    ),
+                    "semantic_judge": judgment.get(
+                        "semantic_judge",
+                        {},
+                    ),
+                    "semantic_judge_reason": judgment.get("reasons", ""),
+                    "judge_deterministic_agreement": (
+                        bool(equivalence["equivalent"])
+                        == evaluator_is_correct
                     ),
                     "answer_validation_success": bool(
                         equivalence["gold_normalized"]["success"]
@@ -2756,7 +3012,15 @@ def _cleanup_iteration_cache(args, cycle_number, iter_number):
         cycle_number=cycle_layer,
     )
     try:
-        removed = clean_redundant_files(paths["iteration_dir"])
+        removed = clean_redundant_files(
+            paths["iteration_dir"],
+            preserve_json_paths=(
+                paths["plan_file"],
+                paths["compare_file"],
+                paths["inference_file"],
+            ),
+            strict_json_allowlist=True,
+        )
         if getattr(args, "mode", "eval") == "eval":
             removed.extend(_clean_legacy_redundant_files(paths))
     except OSError as exc:
@@ -3149,6 +3413,11 @@ def _run_math_iteration(
                 for sample in hard_pool.samples
             ),
             hard_pool_records=hard_pool.samples,
+            previous_round_records=(
+                history_dict[-1]
+                if iter_number > 1 and history_dict
+                else []
+            ),
         )
         generation_plan["cycle"] = cycle_number
         should_direct_generation = bool(
@@ -3173,6 +3442,9 @@ def _run_math_iteration(
                 ],
                 "remaining_questions_for_full_quota": generation_plan[
                     "remaining_questions_for_full_quota_before_iteration"
+                ],
+                "previous_round_accuracy_state": generation_plan[
+                    "previous_round_accuracy_state"
                 ],
             },
         )
@@ -3205,6 +3477,8 @@ def _run_math_iteration(
             or all(
                 record.get("parse_status") == "success"
                 and record.get("parser_version") == "structured_v2"
+                and record.get("semantic_judge", {}).get("status")
+                == "success"
                 for record in migrated_records
             )
         )
@@ -3515,10 +3789,11 @@ def _run_math_iteration(
             ),
             "cache_status": "hit" if migrated_records else "generated",
         }
-        research_run.export_iteration(
-            cycle_number,
-            iter_number,
-            {
+        if not bool(args.clean_cycle_cache):
+            research_run.export_iteration(
+                cycle_number,
+                iter_number,
+                {
                 "generation_plan": generation_plan or {},
                 "generated_questions": [
                     {
@@ -3553,8 +3828,8 @@ def _run_math_iteration(
                 ),
                 "hard_pool_snapshot": hard_pool_snapshot,
                 "iteration_summary": iteration_summary,
-            },
-        )
+                },
+            )
         research_run.logger.event(
             "INFO",
             "Iteration",
@@ -3671,6 +3946,60 @@ def _aggregate_cycle_generation_statistics(iteration_results):
     }
 
 
+def _run_fixed_test_benchmark(
+    args,
+    *,
+    model_name,
+    test_taker_info,
+    agent_info,
+    evaluator_info,
+    fixed_questions,
+    fixed_metadata,
+    stage_name,
+    cycle_number=None,
+):
+    """Evaluate one model against the immutable holdout without training it."""
+    research_run = getattr(args, "research_run", None)
+    if research_run is None:
+        raise RuntimeError("Fixed benchmark requires a ResearchRun")
+    stage_dir = research_run.run_dir / "fixed_test" / stage_name
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    records = test_and_eval(
+        copy.deepcopy(fixed_questions),
+        str(stage_dir / "fixed_math"),
+        test_taker_info,
+        agent_info,
+        evaluator_info,
+        gold_ans_key="answer",
+        iter_number=0 if cycle_number is None else int(cycle_number),
+        temp_log_dir=str(stage_dir / "temp_log"),
+        research_config=research_run.config,
+        progress_manager=research_run.progress,
+        cycle_number=cycle_number,
+        event_logger=research_run.logger,
+    )
+    summary = fixed_benchmark_summary(
+        records,
+        stage=stage_name,
+        model_name=model_name,
+        dataset_sha256=fixed_metadata["sha256"],
+    )
+    atomic_json(
+        {**research_run.metadata(), **summary},
+        stage_dir / "summary.json",
+    )
+    clean_redundant_files(
+        str(stage_dir),
+        preserve_json_paths=(
+            f"{stage_dir / 'fixed_math'}.test_taker_inference.json",
+            f"{stage_dir / 'fixed_math'}.compare_answers.json",
+            stage_dir / "summary.json",
+        ),
+        strict_json_allowlist=True,
+    )
+    return summary
+
+
 # [ADDED] Execute eval or the complete evaluation-training flywheel.
 def _run_autobencher(args, agent_info, evaluator_info):
     output_root = _output_root(args.outfile_prefix1)
@@ -3706,6 +4035,68 @@ def _run_autobencher(args, agent_info, evaluator_info):
     else:
         cycle_record["status"] = "running"
     _save_cycle_record(cycle_record_path, cycle_record)
+
+    fixed_questions = []
+    fixed_metadata = {}
+    baseline_fixed_summary = None
+    if args.research_run.config["fixed_test"]["enabled"]:
+        try:
+            fixed_questions, fixed_metadata = load_fixed_test_set(
+                args.research_run.config,
+                args.research_run.project_root,
+            )
+            fixed_root = args.research_run.run_dir / "fixed_test"
+            fixed_root.mkdir(parents=True, exist_ok=True)
+            atomic_json(
+                {
+                    **args.research_run.metadata(),
+                    **fixed_metadata,
+                    "questions": fixed_questions,
+                },
+                fixed_root / "dataset_snapshot.json",
+            )
+            if args.research_run.config["fixed_test"][
+                "evaluate_baseline"
+            ]:
+                baseline_info = _load_test_taker_info(
+                    args.test_taker_modelname,
+                    args.use_helm,
+                )
+                try:
+                    baseline_fixed_summary = _run_fixed_test_benchmark(
+                        args,
+                        model_name=args.test_taker_modelname,
+                        test_taker_info=baseline_info,
+                        agent_info=agent_info,
+                        evaluator_info=evaluator_info,
+                        fixed_questions=fixed_questions,
+                        fixed_metadata=fixed_metadata,
+                        stage_name="baseline",
+                    )
+                finally:
+                    _release_model_info(baseline_info)
+                cycle_record["fixed_test"] = {
+                    "dataset": fixed_metadata,
+                    "baseline": baseline_fixed_summary,
+                }
+                _save_cycle_record(cycle_record_path, cycle_record)
+        except Exception as exc:
+            cycle_record["status"] = "failed"
+            cycle_record["failed_stage"] = "fixed_test_baseline"
+            cycle_record["error"] = _sanitize_error(exc)
+            _save_cycle_record(cycle_record_path, cycle_record)
+            args.research_run.finalize(
+                "failed",
+                {
+                    "stage": "fixed_test_baseline",
+                    "error": _sanitize_error(exc),
+                },
+            )
+            print(
+                "[FixedTest] baseline failed "
+                f"error={_sanitize_error(exc)}"
+            )
+            return 1
 
     current_test_taker_model = cycle_record.get(
         "active_test_taker_model",
@@ -3856,13 +4247,23 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     record
                     for iteration_records in history_dict
                     for record in iteration_records
+                    if int(record.get("cycle_id", -1))
+                    == int(cycle_number)
                 ]
                 selected, dataset_manifest, rejected = build_training_dataset(
                     candidates,
                     args.research_run.config,
                     seed=int(args.research_run.config["experiment"]["seed"])
                     + cycle_number,
+                    holdout_records=fixed_questions,
                 )
+                if selected and not dataset_manifest[
+                    "strict_ratio_satisfied"
+                ]:
+                    raise RuntimeError(
+                        "Training dataset violated the configured "
+                        "25% correct / 75% wrong ratio"
+                    )
                 atomic_json(
                     {
                         **args.research_run.metadata(),
@@ -4007,6 +4408,49 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     if getattr(args, "research_run", None)
                     else None
                 ),
+                wandb_enabled=(
+                    bool(
+                        args.research_run.config["tracking"]["wandb"][
+                            "enabled"
+                        ]
+                    )
+                    if getattr(args, "research_run", None)
+                    else False
+                ),
+                wandb_mode=(
+                    args.research_run.config["tracking"]["wandb"]["mode"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                wandb_project=(
+                    args.research_run.config["tracking"]["wandb"]["project"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                wandb_entity=(
+                    args.research_run.config["tracking"]["wandb"]["entity"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                wandb_group=(
+                    args.research_run.config["tracking"]["wandb"]["group"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                wandb_tags=(
+                    args.research_run.config["tracking"]["wandb"]["tags"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                wandb_log_model=(
+                    bool(
+                        args.research_run.config["tracking"]["wandb"][
+                            "log_model"
+                        ]
+                    )
+                    if getattr(args, "research_run", None)
+                    else False
+                ),
             )
             if not result["success"]:
                 raise RuntimeError(
@@ -4014,6 +4458,55 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     or f"Fine-tuning exited with code {result['returncode']}"
                 )
             current_test_taker_model = os.path.abspath(finetune_output)
+            if (
+                fixed_questions
+                and args.research_run.config["fixed_test"][
+                    "evaluate_after_each_training_cycle"
+                ]
+            ):
+                stage = "fixed_test_evaluation"
+                trained_test_taker_info = _load_test_taker_info(
+                    current_test_taker_model,
+                    args.use_helm,
+                )
+                try:
+                    fixed_cycle_summary = _run_fixed_test_benchmark(
+                        args,
+                        model_name=current_test_taker_model,
+                        test_taker_info=trained_test_taker_info,
+                        agent_info=agent_info,
+                        evaluator_info=evaluator_info,
+                        fixed_questions=fixed_questions,
+                        fixed_metadata=fixed_metadata,
+                        stage_name=f"cycle_{cycle_number}",
+                        cycle_number=cycle_number,
+                    )
+                finally:
+                    _release_model_info(trained_test_taker_info)
+                fixed_cycle_summary["baseline_accuracy"] = (
+                    baseline_fixed_summary["accuracy"]
+                    if baseline_fixed_summary
+                    else None
+                )
+                fixed_cycle_summary["accuracy_delta"] = (
+                    fixed_cycle_summary["accuracy"]
+                    - baseline_fixed_summary["accuracy"]
+                    if baseline_fixed_summary
+                    else None
+                )
+                cycle_entry["fixed_test"] = fixed_cycle_summary
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        **fixed_cycle_summary,
+                    },
+                    (
+                        args.research_run.run_dir
+                        / "fixed_test"
+                        / f"cycle_{cycle_number}"
+                        / "summary.json"
+                    ),
+                )
             if getattr(args, "research_run", None):
                 training_dir = (
                     args.research_run.cycle_root
@@ -4104,27 +4597,25 @@ def _run_autobencher(args, agent_info, evaluator_info):
     cycle_record["active_test_taker_model"] = current_test_taker_model
     _save_cycle_record(cycle_record_path, cycle_record)
     if getattr(args, "research_run", None):
-        all_iteration_summaries = []
+        iteration_question_counts = []
         for path in args.research_run.cycle_root.glob(
-            "cycle_*/iter_*/iteration_summary.json"
+            "cycle_*/iter_*/*.test_taker_inference.json"
         ):
-            records = read_json_records(path)
-            if records:
-                all_iteration_summaries.append(records[0].get("data", {}))
+            iteration_question_counts.append(
+                len(read_json_records(path))
+            )
         atomic_json(
             {
                 **args.research_run.metadata(),
                 "status": "completed",
                 "cycle_count": cycle_limit,
-                "iteration_count": len(all_iteration_summaries),
-                "total_questions": sum(
-                    int(item.get("question_count", 0))
-                    for item in all_iteration_summaries
-                ),
+                "iteration_count": len(iteration_question_counts),
+                "total_questions": sum(iteration_question_counts),
                 "hard_pool_size": len(
                     read_json_records(os.path.join(output_root, "hard_pool.json"))
                 ),
                 "active_test_taker_model": current_test_taker_model,
+                "fixed_test": cycle_record.get("fixed_test", {}),
             },
             args.research_run.run_dir / "experiment_summary.json",
         )
