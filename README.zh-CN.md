@@ -68,6 +68,7 @@ AutoBencher/
 │   ├── evaluator.py
 │   ├── fixed_benchmark.py
 │   ├── output_schemas.py
+│   ├── reasoning.py
 │   ├── similarity.py
 │   ├── structured.py
 │   └── truth_solver.py
@@ -322,11 +323,13 @@ test-taker 每次只接收一道题，并且没有任何外部工具。输出必
 不足时可以由其他错题补足，但正确题绝不会占用错题位置。不完整的四条数据块不会
 导出；微调前 manifest 会记录计数并断言比例严格正确。
 
-每条合格记录还必须包含满足配置步数和单步字符限制的非空
-`gold_reasoning_summary`。这些步骤来自运行时已验证的 evaluator 解答；缺失步骤，
-或者包含角色注入、工具请求、Markdown 代码围栏和超长内容的样本都会被拒绝。
-Alpaca 输出固定包含已验证步骤、`final_answer`、`answer_type` 和置信度，不再用
-泛化占位句冒充解题过程。
+每条合格记录还必须包含满足配置步数和单步字符限制的具体
+`gold_reasoning_summary`。两路 Python 求解运行并达成一致后，最终隔离裁决器会
+重新推导题目，记录按顺序发生的真实变形、中间数值、规范最终答案，以及代回原题
+或独立重算步骤。`["compute", "solve", "check"]` 这类只有计划而没有推导的列表，
+以及缺失步骤、角色注入、工具请求、Markdown 围栏、没有落到最终答案和超长内容，
+都会被拒绝。Alpaca 输出固定包含这份复核后的步骤、`final_answer`、
+`answer_type` 和置信度，不再用泛化占位句冒充解题过程。
 
 QLoRA 使用 Hugging Face TRL 的 `SFTConfig`/`SFTTrainer`。当
 `tracking.wandb.enabled` 为真时，Trainer 向 W&B 记录指标；默认 `offline` 模式只
@@ -365,6 +368,11 @@ fixed_test/
     ├── fixed_math.compare_answers.json
     └── summary.json
 ```
+
+原始 test-taker 首次加载后会立即执行基线测试。每个 Cycle 成功训练并合并模型后，
+系统会加载该轮新模型并用同一固定测试集复测。每个阶段不仅保存一个总正确率，还会
+保留原始作答、解析后的 `reasoning_summary`、规范化答案、语义判定、按答案类型和
+细分题型统计的正确率，以及模型置信度数据。
 
 ## 开源项目基础
 

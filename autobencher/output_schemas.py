@@ -18,6 +18,7 @@ class EvaluatorPostcheck(StrictOutputModel):
     accepted: bool
     verified_answer: str = Field(min_length=1)
     answer_type: str = Field(min_length=1)
+    reasoning_summary: list[str] = Field(min_length=2, max_length=8)
     substitution_passed: bool
     difficulty_acceptable: bool
     estimated_difficulty: int = Field(ge=1, le=10)

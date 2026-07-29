@@ -20,6 +20,7 @@ from .output_schemas import (
     SemanticAnswerJudgment,
     SolverProposal,
 )
+from .reasoning import validate_training_reasoning
 from .structured import (
     ANSWER_TYPES,
     answers_equivalent,
@@ -30,7 +31,7 @@ from .structured import (
 
 SOLVER_PROMPT_VERSION = "evaluator_python_solver_v3_blind_consensus"
 INDEPENDENT_SOLVER_PROMPT_VERSION = "evaluator_independent_solver_v1"
-POSTCHECK_PROMPT_VERSION = "evaluator_python_postcheck_v2_adjudication"
+POSTCHECK_PROMPT_VERSION = "evaluator_python_postcheck_v3_training_derivation"
 SEMANTIC_JUDGE_PROMPT_VERSION = "semantic_answer_judge_v2_cross_format"
 
 _FORBIDDEN_AST_NODES = (
@@ -837,6 +838,39 @@ def solve_with_privileged_python(
                     "minimum": int(pipeline["minimum_difficulty"]),
                     "maximum": int(pipeline["maximum_difficulty"]),
                 },
+                REASONING_REQUIREMENTS_JSON={
+                    "minimum_steps": int(
+                        config["dataset"]["min_gold_reasoning_steps"]
+                    ),
+                    "maximum_steps": int(
+                        config["dataset"]["max_gold_reasoning_steps"]
+                    ),
+                    "minimum_chars_per_step": int(
+                        config["dataset"][
+                            "min_gold_reasoning_chars_per_step"
+                        ]
+                    ),
+                    "maximum_chars_per_step": int(
+                        config["dataset"][
+                            "max_gold_reasoning_chars_per_step"
+                        ]
+                    ),
+                    "must_show_concrete_derivation": bool(
+                        config["dataset"][
+                            "require_concrete_gold_reasoning"
+                        ]
+                    ),
+                    "must_end_with_verification": bool(
+                        config["dataset"][
+                            "require_gold_reasoning_verification"
+                        ]
+                    ),
+                    "must_state_verified_answer": bool(
+                        config["dataset"][
+                            "require_gold_answer_in_reasoning"
+                        ]
+                    ),
+                },
                 QUESTION_JSON={"question": question_text},
                 PRIMARY_RESULT_JSON=runtime_result,
                 INDEPENDENT_RESULT_JSON=independent_result,
@@ -864,6 +898,7 @@ def solve_with_privileged_python(
                 "accepted",
                 "verified_answer",
                 "answer_type",
+                "reasoning_summary",
                 "substitution_passed",
                 "difficulty_acceptable",
                 "estimated_difficulty",
@@ -893,6 +928,18 @@ def solve_with_privileged_python(
                 postcheck["answer_type"],
                 config,
             )
+            training_reasoning_summary, reasoning_error = (
+                validate_training_reasoning(
+                    postcheck["reasoning_summary"],
+                    config,
+                    verified_answer=verified_answer,
+                )
+            )
+            if reasoning_error:
+                raise EvaluatorProtocolError(
+                    "postcheck reasoning_summary is not a concrete verified "
+                    f"derivation: {reasoning_error}"
+                )
             equivalence = answers_equivalent(
                 runtime_result["canonical_answer"],
                 verified_answer,
@@ -922,7 +969,9 @@ def solve_with_privileged_python(
                 "prompt_fingerprint": prompt_fingerprint,
                 "solver_strategy": "microsoft_tora_single_round_adaptation",
                 "attempt": attempt,
-                "analysis_summary": proposal["analysis_summary"],
+                "analysis_summary": training_reasoning_summary,
+                "training_reasoning_summary": training_reasoning_summary,
+                "solver_analysis_summary": proposal["analysis_summary"],
                 "python_code": code,
                 "python_code_sha256": hashlib.sha256(
                     code.encode("utf-8")

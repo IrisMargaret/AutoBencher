@@ -77,6 +77,7 @@ AutoBencher/
 │   ├── evaluator.py
 │   ├── fixed_benchmark.py
 │   ├── output_schemas.py
+│   ├── reasoning.py
 │   ├── similarity.py
 │   ├── structured.py
 │   └── truth_solver.py
@@ -362,12 +363,16 @@ other wrong records may fill its share, but correct records never fill a wrong
 slot. Incomplete four-example blocks are not exported. The manifest records the
 selected counts and asserts the exact ratio before fine-tuning.
 
-Every eligible record must also contain a non-empty `gold_reasoning_summary`
-within the configured step and character limits. The summary comes from the
-runtime-verified evaluator solution; missing, role-injected, tool-seeking,
-Markdown-fenced, or oversized steps are rejected. Alpaca output always contains
-the verified steps, `final_answer`, `answer_type`, and confidence—there is no
-generic placeholder solution.
+Every eligible record must also contain a concrete
+`gold_reasoning_summary` within the configured step and character limits. The
+final isolated adjudicator re-derives the answer after both Python solvers have
+run and records the actual ordered transformations, intermediate values, the
+verified final answer, and a substitution or independent check. Plan-only
+lists such as `["compute", "solve", "check"]`, missing steps, role injection,
+tool requests, Markdown fences, ungrounded answers, and oversized steps are
+rejected. Alpaca output always contains these postchecked steps,
+`final_answer`, `answer_type`, and confidence—there is no generic placeholder
+solution.
 
 QLoRA is implemented with Hugging Face TRL's `SFTConfig`/`SFTTrainer`. When
 `tracking.wandb.enabled` is true, Trainer reports metrics to W&B. The default
@@ -410,6 +415,13 @@ fixed_test/
     ├── fixed_math.compare_answers.json
     └── summary.json
 ```
+
+The baseline runs immediately after the original test-taker is first loaded.
+After every successful training and merge, the resulting model is loaded and
+evaluated on the same immutable set. Each stage keeps the raw response, parsed
+`reasoning_summary`, normalized answers, semantic judgment, per-answer-type
+and per-subcategory statistics, confidence metrics, and accuracy—not only a
+single aggregate score.
 
 ## Open-source foundations
 

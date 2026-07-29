@@ -59,7 +59,8 @@ def record(question, answer, *, correct=False, accuracy=0.2, **extra):
         "question_parse_success": True,
         "answer_validation_success": True,
         "gold_reasoning_summary": [
-            "Apply the stated arithmetic operation and verify the result."
+            f"Evaluate the stated arithmetic expression to obtain {answer}.",
+            f"Check the original operation independently; it also gives {answer}.",
         ],
         **extra,
     }
@@ -125,6 +126,61 @@ def test_alpaca_output_contains_verified_steps_and_answer(config):
     assert payload["reasoning_summary"] == source["gold_reasoning_summary"]
     assert payload["final_answer"] == "84"
     assert payload["answer_type"] == "integer"
+
+
+def test_training_rejects_plan_only_reasoning(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    source = record(
+        "Compute 12 times 7.",
+        "84",
+        gold_reasoning_summary=["Compute the answer.", "Check the answer."],
+    )
+    selected, manifest, rejected = build_training_dataset([source], config)
+    assert selected == []
+    assert manifest["rejection_reasons"][
+        "non_concrete_gold_reasoning_steps"
+    ] == 1
+    assert rejected[0]["reasons"] == [
+        "non_concrete_gold_reasoning_steps"
+    ]
+
+
+def test_alpaca_export_matches_verified_step_by_step_contract(config, tmp_path):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    question = (
+        "Solve the system for (m, n): "
+        "4*m + n = 9, m - 3*n = -1."
+    )
+    steps = [
+        "Rewrite the first equation as n = 9 - 4m.",
+        "Substitute into the second equation: m - 3(9 - 4m) = -1.",
+        "Simplify to 13m = 26, so m = 2.",
+        "Use n = 9 - 4m with m = 2 to obtain n = 1.",
+        "Check: 4*2 + 1 = 9 and 2 - 3*1 = -1, so both equations hold.",
+    ]
+    source = record(
+        question,
+        "(2, 1)",
+        answer_type="ordered_tuple",
+        gold_reasoning_summary=steps,
+    )
+    selected, _, rejected = build_training_dataset([source], config)
+    assert rejected == []
+    target = tmp_path / "train.jsonl"
+    assert write_alpaca_jsonl(selected, target) == 1
+    exported = json.loads(target.read_text(encoding="utf-8"))
+    assert set(exported) == {"instruction", "input", "output"}
+    assert exported["instruction"] == (
+        "Solve the math problem and return a JSON object with "
+        "reasoning_summary, final_answer, answer_type, and confidence."
+    )
+    assert exported["input"] == question
+    assert json.loads(exported["output"]) == {
+        "reasoning_summary": steps,
+        "final_answer": "(2, 1)",
+        "answer_type": "ordered_tuple",
+        "confidence": 1.0,
+    }
 
 
 def test_dataset_template_cluster_limit(config):

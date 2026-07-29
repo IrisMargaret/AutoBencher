@@ -310,8 +310,12 @@ dataset:
   filter_invalid_answers: true
   filter_tool_violations: true
   require_gold_reasoning_steps: true
-  min_gold_reasoning_steps: 1
+  require_concrete_gold_reasoning: true
+  require_gold_reasoning_verification: true
+  require_gold_answer_in_reasoning: true
+  min_gold_reasoning_steps: 2
   max_gold_reasoning_steps: 6
+  min_gold_reasoning_chars_per_step: 8
   max_gold_reasoning_chars_per_step: 300
   max_samples_per_template_cluster: 5
   holdout_exact_template_rejection: true

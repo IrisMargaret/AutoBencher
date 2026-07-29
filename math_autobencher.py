@@ -1821,12 +1821,13 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 key: value
                 for key, value in evaluator_truth.items()
                 if key
-                not in {
-                    "python_code",
-                    "analysis_summary",
-                    "independent_python_code",
-                    "independent_analysis_summary",
-                }
+                    not in {
+                        "python_code",
+                        "analysis_summary",
+                        "solver_analysis_summary",
+                        "independent_python_code",
+                        "independent_analysis_summary",
+                    }
             }
             truth_details = {
                 "source_question": question_text,
@@ -1885,7 +1886,10 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "answer": canonical_answer,
                 "gold_answer": canonical_answer,
                 "gold_reasoning_summary": list(
-                    evaluator_truth.get("analysis_summary", [])
+                    evaluator_truth.get(
+                        "training_reasoning_summary",
+                        evaluator_truth.get("analysis_summary", []),
+                    )
                 ),
                 "unit": None,
                 "tolerance": None,
@@ -3984,6 +3988,22 @@ def _run_fixed_test_benchmark(
         model_name=model_name,
         dataset_sha256=fixed_metadata["sha256"],
     )
+    inference_path = stage_dir / "fixed_math.test_taker_inference.json"
+    comparison_path = stage_dir / "fixed_math.compare_answers.json"
+    summary["answer_artifacts"] = {
+        "test_taker_inference": _relative_json_path(
+            inference_path,
+            research_run.run_dir,
+        ),
+        "answer_comparison": _relative_json_path(
+            comparison_path,
+            research_run.run_dir,
+        ),
+        "contains_raw_response": True,
+        "contains_parsed_reasoning_summary": True,
+        "contains_normalized_answers": True,
+        "contains_semantic_judgment": True,
+    }
     atomic_json(
         {**research_run.metadata(), **summary},
         stage_dir / "summary.json",
@@ -3991,8 +4011,8 @@ def _run_fixed_test_benchmark(
     clean_redundant_files(
         str(stage_dir),
         preserve_json_paths=(
-            f"{stage_dir / 'fixed_math'}.test_taker_inference.json",
-            f"{stage_dir / 'fixed_math'}.compare_answers.json",
+            inference_path,
+            comparison_path,
             stage_dir / "summary.json",
         ),
         strict_json_allowlist=True,

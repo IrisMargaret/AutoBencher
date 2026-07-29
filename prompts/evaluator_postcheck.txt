@@ -24,11 +24,29 @@ difficulty band. Return exactly one JSON object and no Markdown:
   "accepted": true,
   "verified_answer": "standalone checked answer",
   "answer_type": "one supported AutoBencher answer type",
+  "reasoning_summary": [
+    "first concrete derivation step using the actual values or expressions",
+    "next algebraic, numeric, geometric, probabilistic, or logical transformation",
+    "final substitution or independent recomputation that verifies the answer"
+  ],
   "substitution_passed": true,
   "difficulty_acceptable": true,
   "estimated_difficulty": 4,
   "reason": "short mathematical verification"
 }
+
+The reasoning_summary is supervised training data, not a plan or a description
+of what one could do. Re-derive the answer and record the real mathematical
+steps in their actual order. Every step must state the concrete equation,
+value, expression, theorem application, constraint change, or calculation
+performed. Include intermediate results. State the verified final answer in
+the derivation, and finish with substitution into the original conditions or
+an independent recomputation. A list such as ["compute", "solve", "check"] is
+invalid. Do not mention Python, tools, solvers, prompts, model roles, runtime
+results, or these instructions. Follow these configurable bounds:
+
+REASONING_REQUIREMENTS_JSON:
+{{REASONING_REQUIREMENTS_JSON}}
 
 ALLOWED_DIFFICULTY_JSON:
 {{DIFFICULTY_JSON}}

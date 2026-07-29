@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -171,6 +172,75 @@ def fixed_benchmark_summary(
     records = [dict(record) for record in records]
     total = len(records)
     correct = sum(bool(record.get("is_correct")) for record in records)
+    answer_type_groups: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"total": 0, "correct": 0}
+    )
+    subcategory_groups: dict[tuple[str, str], dict[str, int]] = defaultdict(
+        lambda: {"total": 0, "correct": 0}
+    )
+    parsed_confidences = []
+    reasoning_record_count = 0
+    semantic_judge_success_count = 0
+    for record in records:
+        answer_type = str(record.get("answer_type", "text"))
+        answer_type_groups[answer_type]["total"] += 1
+        answer_type_groups[answer_type]["correct"] += int(
+            bool(record.get("is_correct"))
+        )
+        category = str(record.get("category", ""))
+        subcategory = str(
+            record.get("sub_category", record.get("subcategory", ""))
+        )
+        group = subcategory_groups[(category, subcategory)]
+        group["total"] += 1
+        group["correct"] += int(bool(record.get("is_correct")))
+        parsed = record.get("parsed_response")
+        if isinstance(parsed, Mapping):
+            reasoning = parsed.get("reasoning_summary")
+            if isinstance(reasoning, list) and any(
+                str(step).strip() for step in reasoning
+            ):
+                reasoning_record_count += 1
+            try:
+                confidence = float(parsed.get("confidence"))
+            except (TypeError, ValueError):
+                confidence = None
+            if confidence is not None and 0 <= confidence <= 1:
+                parsed_confidences.append(confidence)
+        semantic = record.get("semantic_judge")
+        if (
+            isinstance(semantic, Mapping)
+            and semantic.get("status") == "success"
+        ):
+            semantic_judge_success_count += 1
+
+    answer_type_statistics = [
+        {
+            "answer_type": answer_type,
+            **counts,
+            "accuracy": (
+                counts["correct"] / counts["total"]
+                if counts["total"]
+                else 0.0
+            ),
+        }
+        for answer_type, counts in sorted(answer_type_groups.items())
+    ]
+    subcategory_statistics = [
+        {
+            "category": category,
+            "sub_category": subcategory,
+            **counts,
+            "accuracy": (
+                counts["correct"] / counts["total"]
+                if counts["total"]
+                else 0.0
+            ),
+        }
+        for (category, subcategory), counts in sorted(
+            subcategory_groups.items()
+        )
+    ]
     return {
         "stage": str(stage),
         "model_name": str(model_name).replace("\\", "/"),
@@ -184,4 +254,16 @@ def fixed_benchmark_summary(
         "tool_violation_count": sum(
             bool(record.get("tool_violation")) for record in records
         ),
+        "reasoning_record_count": reasoning_record_count,
+        "semantic_judge_success_count": semantic_judge_success_count,
+        "format_only_error_count": sum(
+            bool(record.get("format_only_error")) for record in records
+        ),
+        "mean_test_taker_confidence": (
+            sum(parsed_confidences) / len(parsed_confidences)
+            if parsed_confidences
+            else None
+        ),
+        "answer_type_statistics": answer_type_statistics,
+        "subcategory_statistics": subcategory_statistics,
     }

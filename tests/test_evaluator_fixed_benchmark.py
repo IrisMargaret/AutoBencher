@@ -17,7 +17,10 @@ from autobencher.evaluator import (
     solve_with_privileged_python,
     validate_generated_python,
 )
-from autobencher.fixed_benchmark import load_fixed_test_set
+from autobencher.fixed_benchmark import (
+    fixed_benchmark_summary,
+    load_fixed_test_set,
+)
 from autobencher.similarity import (
     MinHashBackendUnavailable,
     SemanticSimilarityUnavailable,
@@ -51,7 +54,11 @@ def _training_record(index, correct):
         "question_parse_success": True,
         "answer_validation_success": True,
         "gold_reasoning_summary": [
-            "Compute the requested expression and verify the result."
+            f"Add {index} and 11 to obtain {index + 11}.",
+            (
+                f"Check the sum by subtracting 11 from {index + 11}; "
+                f"the original value {index} is recovered."
+            ),
         ],
     }
 
@@ -71,6 +78,64 @@ def test_fixed_test_covers_every_subcategory(config):
     assert observed == expected
     assert metadata["covered_subcategory_count"] == 27
     assert len(metadata["sha256"]) == 64
+
+
+def test_fixed_test_summary_keeps_solution_level_metrics():
+    records = [
+        {
+            "category": "Algebra",
+            "sub_category": "Linear Equations",
+            "answer_type": "integer",
+            "is_correct": True,
+            "parse_status": "success",
+            "parsed_response": {
+                "reasoning_summary": [
+                    "Subtract 2 from x + 2 = 5 to obtain x = 3.",
+                    "Check: 3 + 2 = 5, so the equation holds.",
+                ],
+                "final_answer": "3",
+                "answer_type": "integer",
+                "confidence": 0.9,
+            },
+            "semantic_judge": {"status": "success"},
+        },
+        {
+            "category": "Algebra",
+            "sub_category": "Linear Equations",
+            "answer_type": "integer",
+            "is_correct": False,
+            "parse_status": "success",
+            "parsed_response": {
+                "reasoning_summary": [
+                    "Subtract 1 from x + 2 = 5 to claim x = 4.",
+                    "Check: 4 + 2 = 6, which does not satisfy the equation.",
+                ],
+                "final_answer": "4",
+                "answer_type": "integer",
+                "confidence": 0.7,
+            },
+            "semantic_judge": {"status": "success"},
+        },
+    ]
+    summary = fixed_benchmark_summary(
+        records,
+        stage="cycle_1",
+        model_name="/models/qwen-cycle-1",
+        dataset_sha256="abc",
+    )
+    assert summary["accuracy"] == 0.5
+    assert summary["reasoning_record_count"] == 2
+    assert summary["semantic_judge_success_count"] == 2
+    assert summary["mean_test_taker_confidence"] == pytest.approx(0.8)
+    assert summary["answer_type_statistics"] == [
+        {
+            "answer_type": "integer",
+            "total": 2,
+            "correct": 1,
+            "accuracy": 0.5,
+        }
+    ]
+    assert summary["subcategory_statistics"][0]["accuracy"] == 0.5
 
 
 def test_math_verify_fraction_decimal_equivalence_without_worker_timeout():
@@ -318,6 +383,11 @@ def test_privileged_solver_requires_runtime_and_postcheck(config, tmp_path):
         "accepted": True,
         "verified_answer": "3",
         "answer_type": "integer",
+        "reasoning_summary": [
+            "Subtract 2 from both sides of 3*x + 2 = 11 to get 3*x = 9.",
+            "Divide both sides by 3 to obtain x = 3.",
+            "Check: substituting x = 3 gives 3*3 + 2 = 11, so the equation holds.",
+        ],
         "substitution_passed": True,
         "difficulty_acceptable": True,
         "estimated_difficulty": 2,
@@ -336,6 +406,11 @@ def test_privileged_solver_requires_runtime_and_postcheck(config, tmp_path):
     assert result["status"] == "passed"
     assert result["canonical_answer"] == "3"
     assert result["substitution_passed"] is True
+    assert result["training_reasoning_summary"] == postcheck[
+        "reasoning_summary"
+    ]
+    assert result["analysis_summary"] == postcheck["reasoning_summary"]
+    assert result["solver_analysis_summary"] == proposal["analysis_summary"]
     cache = json.loads(
         (tmp_path / "solver.json").read_text(encoding="utf-8")
     )

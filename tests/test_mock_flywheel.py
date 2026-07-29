@@ -62,7 +62,11 @@ def test_cpu_mock_research_pipeline_exports_all_core_artifacts(tmp_path):
             "gold_answer": answer,
             "canonical_answer": answer,
             "gold_reasoning_summary": [
-                "Add one to the given integer and verify the sum."
+                f"Add {index} and 1 to obtain {answer}.",
+                (
+                    f"Check by subtracting 1 from {answer}; "
+                    f"the original value {index} is recovered."
+                ),
             ],
             "difficulty": allocation["difficulty"],
         }

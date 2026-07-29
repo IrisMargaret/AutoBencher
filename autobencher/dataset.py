@@ -17,6 +17,7 @@ from .similarity import (
     SimilarityBatch,
     build_similarity_batch,
 )
+from .reasoning import validate_training_reasoning
 
 
 def normalize_question_text(text: Any) -> str:
@@ -324,43 +325,14 @@ def _validated_gold_reasoning_steps(
     record: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> tuple[list[str], str | None]:
-    dataset_config = config["dataset"]
-    raw_steps = record.get("gold_reasoning_summary")
-    if not isinstance(raw_steps, list):
-        return [], "missing_gold_reasoning_steps"
-    steps = [
-        re.sub(r"\s+", " ", str(step or "")).strip()
-        for step in raw_steps
-    ]
-    minimum = int(dataset_config["min_gold_reasoning_steps"])
-    maximum = int(dataset_config["max_gold_reasoning_steps"])
-    maximum_chars = int(
-        dataset_config["max_gold_reasoning_chars_per_step"]
+    return validate_training_reasoning(
+        record.get("gold_reasoning_summary"),
+        config,
+        verified_answer=record.get(
+            "gold_answer",
+            record.get("canonical_answer"),
+        ),
     )
-    if not minimum <= len(steps) <= maximum or any(not step for step in steps):
-        return [], "invalid_gold_reasoning_steps"
-    forbidden = (
-        "```",
-        "<|",
-        "|>",
-        "system:",
-        "assistant:",
-        "user:",
-        "human:",
-        "question_json",
-        "python_code",
-        "ignore previous",
-        "browse",
-        "search the web",
-        "tool call",
-    )
-    if any(
-        len(step) > maximum_chars
-        or any(marker in step.lower() for marker in forbidden)
-        for step in steps
-    ):
-        return [], "unsafe_gold_reasoning_steps"
-    return steps, None
 
 
 def build_training_dataset(
