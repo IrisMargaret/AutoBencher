@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 import yaml
 
 from .config import REQUIRED_DATA_ROOT
+from .difficulty import analyze_difficulty
 from .experiment import atomic_json
 from .structured import normalize_answer_type
 
@@ -251,7 +252,7 @@ def _canonical_record(
         answer_type or "auto",
         answer,
     )
-    return {
+    record = {
         "question_id": "open-" + _sha256_text(source_key)[:24],
         "category": category,
         "sub_category": sub_category,
@@ -275,6 +276,28 @@ def _canonical_record(
         ),
         "choices": list(choices or []),
     }
+    profile = analyze_difficulty(
+        record["question"],
+        normalized_type,
+    )
+    profile.update(
+        {
+            "declared_source_score": int(difficulty),
+            "effective_score": int(difficulty),
+            "profile_role": (
+                "cross_source_diagnostic_only; source score remains the "
+                "fixed benchmark stratum"
+            ),
+        }
+    )
+    record.update(
+        {
+            "target_difficulty": int(difficulty),
+            "observed_difficulty": int(profile["score"]),
+            "difficulty_profile": profile,
+        }
+    )
+    return record
 
 
 def _load_hf_dataset(

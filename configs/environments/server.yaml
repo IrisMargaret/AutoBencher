@@ -12,6 +12,10 @@ paths:
   checkpoint_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/checkpoints
   review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
 
+fixed_test:
+  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/open_math_fixed_suite.json
+  require_all_subcategories: false
+
 logging:
   progress_enabled: true
   progress_leave: false

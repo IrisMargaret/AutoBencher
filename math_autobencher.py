@@ -38,6 +38,10 @@ from autobencher.dataset import (
     normalize_question_text,
     write_alpaca_jsonl,
 )
+from autobencher.difficulty import (
+    assess_difficulty,
+    target_difficulty_profile,
+)
 from autobencher.experiment import (
     ResearchRun,
     atomic_json,
@@ -1599,12 +1603,20 @@ def _generate_question_text_with_truth(
         description_json.get("subcategory_description", ""),
     )
     generation_config = research_config["generation"]
+    target_profile = description_json.get(
+        "target_difficulty_profile",
+    ) or target_difficulty_profile(
+        int(description_json.get("difficulty", 5)),
+        research_config,
+    )
     max_retry = int(generation_config["generator_max_retry"])
     truth_solver = TruthSolver.from_config(research_config)
     context = f"""Generate exactly {question_count} English math questions for:
 Category: {description_json["category"]}
 Subcategory: {sub_category}
 Difficulty: {description_json.get("difficulty", 5)}
+Objective difficulty profile:
+{json.dumps(target_profile, ensure_ascii=False, sort_keys=True)}
 
 Return only one JSON array in this exact question-only format:
 [
@@ -1632,6 +1644,10 @@ Mandatory rules:
    {int(generation_config["maximum_difficulty"])} on a 1-10 scale and solvable
    in at most {int(generation_config["maximum_reasoning_steps"])} concise
    reasoning steps.
+   Difficulty means the required mathematical work in the objective profile:
+   reasoning steps, operations, constraints, symbolic depth, and
+   representation load. Do not simulate difficulty with large numbers,
+   verbose stories, obscure names, or unnecessary arithmetic.
 8. Do not generate olympiad, contest-final, research-level, trick, or
    intentionally pathological problems. Prefer clear school or early
    undergraduate exercises with modest arithmetic.
@@ -2076,7 +2092,7 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 deterministic_truth.truth_validation_details
             )
             truth_details["solver_backend"] = "sympy"
-        estimated_difficulty = max(
+        requested_difficulty = max(
             int(research_config["generation"]["minimum_difficulty"]),
             min(
                 int(research_config["generation"]["maximum_difficulty"]),
@@ -2088,6 +2104,75 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 ),
             ),
         )
+        legacy_evaluator_difficulty = requested_difficulty
+        requested_difficulty = max(
+            int(research_config["generation"]["minimum_difficulty"]),
+            min(
+                int(research_config["generation"]["maximum_difficulty"]),
+                int(description_json.get("difficulty", 5)),
+            ),
+        )
+        gold_reasoning_summary = list(
+            evaluator_truth.get(
+                "training_reasoning_summary",
+                evaluator_truth.get("analysis_summary", []),
+            )
+        )
+        difficulty_profile = assess_difficulty(
+            question_text,
+            answer_type,
+            truth_details,
+            gold_reasoning_summary,
+            requested_difficulty,
+            research_config,
+        )
+        difficulty_profile["legacy_evaluator_estimated_score"] = (
+            legacy_evaluator_difficulty
+        )
+        difficulty_config = research_config["difficulty"]
+        difficulty_rejection_reason = None
+        if (
+            difficulty_profile["profile_trusted"]
+            and bool(
+                difficulty_config[
+                    "reject_outside_generation_bounds"
+                ]
+            )
+            and not difficulty_profile["within_generation_bounds"]
+        ):
+            difficulty_rejection_reason = (
+                "objective observed difficulty "
+                f"{difficulty_profile['score']} is outside generation bounds "
+                f"{research_config['generation']['minimum_difficulty']}.."
+                f"{research_config['generation']['maximum_difficulty']}"
+            )
+        elif (
+            difficulty_profile["profile_trusted"]
+            and str(difficulty_config["mismatch_action"]) == "reject"
+            and not difficulty_profile["within_target_tolerance"]
+        ):
+            difficulty_rejection_reason = (
+                "objective observed difficulty "
+                f"{difficulty_profile['score']} differs from requested "
+                f"{requested_difficulty} by more than tolerance "
+                f"{difficulty_profile['target_tolerance']}"
+            )
+        if difficulty_rejection_reason:
+            failures.append(
+                {
+                    "stage": "difficulty_profile",
+                    "failure_type": FailureType.DIFFICULTY_REJECTED.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": difficulty_rejection_reason,
+                    "difficulty_profile": difficulty_profile,
+                }
+            )
+            continue
+        effective_difficulty = int(
+            difficulty_profile["effective_score"]
+        )
+        truth_details["difficulty_profile"] = difficulty_profile
         solved_questions.append(
             {
                 "id": f"q_{index + 1}",
@@ -2095,19 +2180,19 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "category": description_json["category"],
                 "subcategory": sub_category,
                 "sub_category": sub_category,
-                "difficulty": estimated_difficulty,
+                "difficulty": effective_difficulty,
+                "target_difficulty": requested_difficulty,
+                "observed_difficulty": int(
+                    difficulty_profile["score"]
+                ),
+                "difficulty_profile": difficulty_profile,
                 "question": question_text,
                 "answer_type": answer_type,
                 "canonical_answer": canonical_answer,
                 "display_answer": canonical_answer,
                 "answer": canonical_answer,
                 "gold_answer": canonical_answer,
-                "gold_reasoning_summary": list(
-                    evaluator_truth.get(
-                        "training_reasoning_summary",
-                        evaluator_truth.get("analysis_summary", []),
-                    )
-                ),
+                "gold_reasoning_summary": gold_reasoning_summary,
                 "unit": None,
                 "tolerance": None,
                 "order_sensitive": answer_type == "ordered_tuple",
@@ -2665,8 +2750,27 @@ def _ask_question_v3(
 
 def _build_compare_summary(iter_number, inference_records, research_config=None):
     grouped = defaultdict(list)
+    difficulty_grouped = defaultdict(list)
+    difficulty_gaps = []
     for record in inference_records:
         grouped[(record["category"], record["sub_category"])].append(record)
+        difficulty_grouped[int(record.get("difficulty", 5))].append(record)
+        profile = record.get("difficulty_profile")
+        if isinstance(profile, dict):
+            try:
+                difficulty_gaps.append(
+                    abs(
+                        float(profile["score"])
+                        - float(
+                            profile.get(
+                                "requested_score",
+                                record.get("target_difficulty"),
+                            )
+                        )
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
     category_statistics = []
     for (category, sub_category), records in sorted(grouped.items()):
         correct_count = sum(record["is_correct"] for record in records)
@@ -2688,6 +2792,36 @@ def _build_compare_summary(iter_number, inference_records, research_config=None)
             total_correct / total_questions if total_questions else 0.0
         ),
         "category_statistics": category_statistics,
+        "difficulty_statistics": [
+            {
+                "difficulty": difficulty,
+                "total_count": len(records),
+                "correct_count": sum(
+                    bool(record.get("is_correct"))
+                    for record in records
+                ),
+                "accuracy": (
+                    sum(
+                        bool(record.get("is_correct"))
+                        for record in records
+                    )
+                    / len(records)
+                ),
+            }
+            for difficulty, records in sorted(
+                difficulty_grouped.items()
+            )
+            if records
+        ],
+        "difficulty_profiled_count": sum(
+            isinstance(record.get("difficulty_profile"), dict)
+            for record in inference_records
+        ),
+        "difficulty_mean_absolute_target_gap": (
+            sum(difficulty_gaps) / len(difficulty_gaps)
+            if difficulty_gaps
+            else None
+        ),
         "parse_failed_count": sum(
             record.get("parse_status") == "parse_failed"
             for record in inference_records
@@ -5141,6 +5275,14 @@ def _run_preflight(config, storage_paths):
             "SymPy gold solver self-test failed: "
             f"{self_test.to_dict()}"
         )
+    difficulty_self_test = assess_difficulty(
+        "Solve for x: 2*x + 3 = 11.",
+        self_test.answer_type or "equation",
+        self_test.truth_validation_details,
+        solver.training_reasoning(self_test),
+        int(config["adaptive_sampling"]["initial_difficulty"]),
+        config,
+    )
     similarity_probe_config = dict(config["dataset"])
     # Probe MinHash independently. Loading the embedding model here would make
     # a nominal preflight download a large optional model.
@@ -5186,6 +5328,14 @@ def _run_preflight(config, storage_paths):
                 ],
                 "sympy_version": sympy.__version__,
                 "sympy_self_test_answer": self_test.canonical_answer,
+                "difficulty_rubric_version": config["difficulty"][
+                    "rubric_version"
+                ],
+                "difficulty_self_test": difficulty_self_test,
+                "difficulty_generation_bounds": [
+                    int(config["generation"]["minimum_difficulty"]),
+                    int(config["generation"]["maximum_difficulty"]),
+                ],
                 "minhash_backend": similarity_probe.minhash_backend,
                 "minhash_backend_error": similarity_probe.minhash_error,
                 "sentence_transformers_enabled": bool(

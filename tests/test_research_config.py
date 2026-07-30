@@ -33,6 +33,10 @@ def test_default_config_loads_and_contains_nine_categories():
     config, provenance = load_resolved_config(DEFAULT_CONFIG)
     assert len(config["taxonomy"]) == 9
     assert provenance["config_hash"] == config_hash(config)
+    assert config["difficulty"]["rubric_version"] == "observable_math_v1"
+    assert sum(config["difficulty"]["dimension_weights"].values()) == (
+        pytest.approx(1.0)
+    )
 
 
 def test_yaml_inheritance_overrides_parent():
@@ -55,6 +59,10 @@ def test_quick_flywheel_profile_runs_one_complete_27_question_cycle():
     assert config["dataset"]["datasketch_required"] is True
     assert config["dataset"]["sentence_transformers_required"] is True
     assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
+    assert (
+        config["difficulty"]["reject_outside_generation_bounds"]
+        is True
+    )
 
 
 def test_mini_flywheel_profile_runs_the_full_chain_with_sympy_gold():
@@ -73,6 +81,10 @@ def test_mini_flywheel_profile_runs_the_full_chain_with_sympy_gold():
     assert config["dataset"]["sentence_transformers_required"] is False
     assert config["fixed_test"]["evaluate_baseline"] is True
     assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
+    assert (
+        config["difficulty"]["reject_outside_generation_bounds"]
+        is False
+    )
 
 
 def test_volcengine_writable_paths_are_confined_to_required_data_root():
@@ -220,6 +232,24 @@ def test_global_accuracy_bounds_must_be_ordered():
                 "adaptive_sampling.global_accuracy_low=0.8",
                 "adaptive_sampling.global_accuracy_high=0.4",
             ],
+        )
+
+
+def test_difficulty_weights_must_sum_to_one():
+    with pytest.raises(ConfigurationError, match="dimension_weights"):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=[
+                "difficulty.dimension_weights.reasoning_steps=0.50"
+            ],
+        )
+
+
+def test_difficulty_mismatch_action_is_validated():
+    with pytest.raises(ConfigurationError, match="mismatch_action"):
+        load_resolved_config(
+            SMOKE_CONFIG,
+            temporary_overrides=["difficulty.mismatch_action=guess"],
         )
 
 

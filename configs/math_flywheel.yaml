@@ -199,6 +199,26 @@ generation:
   gold_validation_max_tokens: 4096
   gold_validation_timeout_seconds: 10
 
+# Difficulty is not an LLM impression or a synonym for large numbers. The
+# objective score is derived from five stored, reproducible dimensions after
+# SymPy has solved the question. The requested score guides generation; the
+# observed score is used by adaptive sampling.
+difficulty:
+  rubric_version: observable_math_v1
+  target_tolerance: 2
+  minimum_profile_confidence: 0.70
+  # relabel preserves useful verified questions while recording target drift.
+  # Use reject for a strict difficulty-calibration experiment.
+  mismatch_action: relabel
+  reject_outside_generation_bounds: true
+  use_observed_score_for_adaptive_sampling: true
+  dimension_weights:
+    reasoning_steps: 0.30
+    operation_count: 0.20
+    constraint_count: 0.20
+    symbolic_depth: 0.20
+    representation_load: 0.10
+
 evaluator_pipeline:
   # This legacy LLM-authored Python gold path is not used when
   # generation.gold_solver_backend is sympy.

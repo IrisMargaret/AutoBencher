@@ -250,6 +250,37 @@ def validate_generated_question(payload: Mapping[str, Any]) -> None:
             "Generated question validation failed: non-English or corrupted "
             "Unicode text detected"
         )
+    profile = payload.get("difficulty_profile")
+    if profile is not None:
+        if not isinstance(profile, Mapping):
+            raise ValueError(
+                "Generated question validation failed: difficulty_profile "
+                "must be an object"
+            )
+        observed = int(
+            payload.get("observed_difficulty", profile.get("score", -1))
+        )
+        if observed != int(profile.get("score", -1)):
+            raise ValueError(
+                "Generated question validation failed: observed_difficulty "
+                "does not match difficulty_profile.score"
+            )
+        effective = int(profile.get("effective_score", observed))
+        if int(payload["difficulty"]) != effective:
+            raise ValueError(
+                "Generated question validation failed: difficulty does not "
+                "match difficulty_profile.effective_score"
+            )
+        requested = payload.get("target_difficulty")
+        if (
+            requested is not None
+            and int(requested)
+            != int(profile.get("requested_score", requested))
+        ):
+            raise ValueError(
+                "Generated question validation failed: target_difficulty "
+                "does not match difficulty_profile.requested_score"
+            )
 
 
 def test_taker_prompt(question: Mapping[str, Any], config: Mapping[str, Any]) -> str:

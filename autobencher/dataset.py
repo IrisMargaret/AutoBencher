@@ -667,6 +667,21 @@ def build_training_dataset(
                     "sub_category",
                     record.get("subcategory"),
                 ),
+                "difficulty": record.get("difficulty"),
+                "target_difficulty": record.get("target_difficulty"),
+                "observed_difficulty": record.get(
+                    "observed_difficulty"
+                ),
+                "difficulty_rubric_version": (
+                    record.get("difficulty_profile", {}).get(
+                        "rubric_version"
+                    )
+                    if isinstance(
+                        record.get("difficulty_profile"),
+                        Mapping,
+                    )
+                    else None
+                ),
             },
         }
         for record in selected
@@ -694,6 +709,44 @@ def build_training_dataset(
         },
         "requested_mix_counts": requested,
         "selected_mix_counts": dict(selected_counts),
+        "selected_difficulty_counts": dict(
+            sorted(
+                Counter(
+                    str(record.get("difficulty", "unknown"))
+                    for record in selected
+                ).items()
+            )
+        ),
+        "selected_target_difficulty_counts": dict(
+            sorted(
+                Counter(
+                    str(
+                        record.get(
+                            "target_difficulty",
+                            record.get("difficulty", "unknown"),
+                        )
+                    )
+                    for record in selected
+                ).items()
+            )
+        ),
+        "difficulty_rubric_versions": sorted(
+            {
+                str(
+                    record.get("difficulty_profile", {}).get(
+                        "rubric_version"
+                    )
+                )
+                for record in selected
+                if isinstance(
+                    record.get("difficulty_profile"),
+                    Mapping,
+                )
+                and record.get("difficulty_profile", {}).get(
+                    "rubric_version"
+                )
+            }
+        ),
         "selected_correct_count": sum(
             bool(record.get("is_correct")) for record in selected
         ),

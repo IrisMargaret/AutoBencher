@@ -15,7 +15,8 @@ Multilingual 入口已移除。
 ## 系统能力
 
 - 固定覆盖 9 个数学大类、27 个细分题型。
-- 在可配置难度范围内生成中等难度题目。
+- 将调度器要求的目标难度与客观、可复算的五维难度画像分开；后续自适应采样使用
+  实测难度，而不是未经证实的 LLM 自我评级。
 - test-taker 不接收任何工具 schema，也不能调用外部工具，只能依靠自身推理，并按
   严格 JSON 协议作答。
 - 默认使用本地 SymPy 作为标准答案唯一来源，执行精确求解和方程/方程组逐式回代；
@@ -24,10 +25,12 @@ Multilingual 入口已移除。
   规范化。
 - 使用独立的大模型语义判定两个答案是否表达相同含义，同时保留确定性比较证据和
   语义判定结果，避免仅因格式差异误判。
+- 只有解析器、类型检查、SymPy 等式验证、候选解回代或数值错误签名提供可复现证据
+  时才归因；证据不足时明确输出 `unknown_error`。
 - 每个 Cycle 的训练集只使用本 Cycle 数据，严格由 25% 做对题和 75% 本轮错题组成；
   每条导出样本都包含已验证的正确答案和非空安全解题步骤。
-- 启动时用固定测试集评测原始 test-taker，每轮训练后评测合并后的新模型，并报告
-  正确率变化。
+- 启动时用多来源开源固定测试集评测原始 test-taker，每轮训练后评测合并后的新模型，
+  并报告总分、分来源、分题型、分答案类型和分难度结果。
 - 使用精确/模板检查、参考 Text-Dedup 的 datasketch MinHash/LSH 和
   Sentence-Transformers 语义相似度，拒绝与固定测试集相同或高度相似的训练题。
 - 直接加载的本地模型可使用 Outlines 做 token 级 JSON 约束，并以 Guidance
@@ -43,6 +46,7 @@ YAML 配置 + 显式 CLI 覆盖
   → 受控 SymPy 求解子句
   → 确定性解析 + 本地精确执行
   → 方程/方程组逐式回代和 fail-closed 校验
+  → 五维客观难度画像和实际生效难度
   → 根据求解证据生成训练推理步骤
   → 接受规范标准答案
   → 无工具 test-taker 独立推理
@@ -66,8 +70,10 @@ AutoBencher/
 │   ├── config.py
 │   ├── coverage.py
 │   ├── dataset.py
+│   ├── difficulty.py
 │   ├── evaluator.py
 │   ├── fixed_benchmark.py
+│   ├── open_benchmark.py
 │   ├── output_schemas.py
 │   ├── reasoning.py
 │   ├── similarity.py
@@ -76,9 +82,11 @@ AutoBencher/
 ├── benchmarks/
 │   └── fixed_math_test_set.json
 ├── configs/
-│   ├── math_flywheel.yaml
+│   ├── benchmarks/open_math_fixed_suite.yaml
 │   ├── environments/
-│   └── experiments/
+│   ├── experiments/
+│   └── math_flywheel.yaml
+├── docs/
 ├── prompts/
 │   ├── evaluator_python_solver.txt
 │   ├── evaluator_independent_solver.txt
@@ -86,6 +94,8 @@ AutoBencher/
 │   ├── semantic_answer_judge.txt
 │   └── tora_evaluator_strategy.txt
 ├── tests/
+├── evaluate_error_attribution.py
+├── prepare_open_math_benchmark.py
 ├── math_autobencher.py
 ├── run_scripts.py
 ├── train_llm.py
@@ -173,7 +183,8 @@ CLI、`--override`。未知字段和不安全值会在加载模型前直接报�
 
 | 节点 | 用途 |
 | --- | --- |
-| `generation` | 默认难度 2–6、推理步数、重试与 Quota 修复。 |
+| `generation` | 默认允许难度 2–6、推理步数、重试与 Quota 修复。 |
+| `difficulty` | 客观难度量表、维度权重、目标容差、重标/拒绝策略和采样分数来源。 |
 | `evaluator_pipeline` | 主求解、盲审、裁决和语义提示词路径，以及 Python 限制与重试。 |
 | `test_taker_prompt` | 无工具、严格 JSON、推理和输出注入限制。 |
 | `answer_normalization` | 数值误差、符号规则和 Math-Verify 开关。 |
@@ -186,6 +197,34 @@ CLI、`--override`。未知字段和不安全值会在加载模型前直接报�
 | `tracking.wandb` | W&B 模式、项目、分组、标签与模型记录。 |
 
 evaluator 与出题器的难度边界必须一致；默认配置禁止竞赛级题目。
+
+### 客观难度定义
+
+`difficulty` 是进入统计分桶和自适应采样的实际生效分数，不再从出题计划原样复制。
+每道已求解题目同时保存：
+
+- `target_difficulty`：调度器要求的目标难度；
+- `observed_difficulty`：求解后按客观量表重新计算的难度；
+- `difficulty`：下一轮采样真正使用的生效难度。
+
+`observable_math_v1` 将 1–10 分难度拆成五个可观测、可复算的维度：
+
+| 维度 | 默认权重 | 可观测含义 |
+| --- | ---: | --- |
+| 推理步骤 | 0.30 | 相互依赖且经过验证的变换步数 |
+| 运算数量 | 0.20 | 数学运算符和函数数量 |
+| 约束数量 | 0.20 | 方程、不等式和定义域条件 |
+| 符号深度 | 0.20 | 变量、函数、幂和嵌套结构 |
+| 表征负荷 | 0.10 | 文字转译、单位、比率、分情况、矩阵或几何表征 |
+
+难度区间定义为：1–2 基础直接题，3–4 常规多步题，5–6 综合题，7–8 高阶题，
+9–10 专家题。生产出题仍限制在 2–6。单纯增大数字、拉长题干、使用冷僻名字或加入
+无意义计算不会提高难度。
+
+`difficulty.mismatch_action: relabel` 会保留数学上合法且通过 SymPy 验证的题目，
+但按实测难度重新标记，并记录目标偏差；设为 `reject` 时，超出
+`target_tolerance` 的题目会被拒绝。正式配置和 27 题配置会拒绝实测难度超出 2–6
+的题目；8 题功能测试只记录并重标，避免把有限修复预算浪费在难度校准上。
 
 ### 自适应难度与题目分配
 
@@ -209,9 +248,28 @@ evaluator 与出题器的难度边界必须一致；默认配置禁止竞赛级�
 Beta-Binomial 后验、覆盖 Quota 缺口、不确定性、持续错题、保留探测和合格 hard-pool
 变式共同决定题型与难度。局部目标区间仍由
 `target_accuracy_low/mid/high` 单独配置，默认是 0.10/0.20/0.30。每个细分题型还会
-从最近一次实际采样难度继续调节，不会每轮重置。
+从最近一次实测/生效难度继续调节，不会每轮重置。如果某题目标难度为 5、实测为 3，
+Beta-Binomial 后验会把这条观测计入难度 3，而不是错误地计入难度 5。
 
 ## 运行
+
+服务器首次运行前先构建带版本和哈希的多来源开源固定测试集：
+
+```bash
+export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
+export HF_DATASETS_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/datasets"
+
+python prepare_open_math_benchmark.py \
+  --manifest configs/benchmarks/open_math_fixed_suite.yaml \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json" \
+  --cache-dir "$HF_DATASETS_CACHE" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+默认配额完整时固定为 595 题：GSM8K test 100 题、MATH 七主题 test 245 题、
+MMLU 五个数学任务 test 250 题。DeepMind Mathematics 的
+interpolate/extrapolate 可从 VEPFS 选择性加入。构建器拒绝训练/验证切分、静默缩减
+配额、清单漂移和意外覆盖。
 
 只评测、不训练：
 
@@ -303,14 +361,31 @@ test-taker 每次只接收一道题，并且没有任何外部工具。输出必
 答案类型、规范化结果和 test-taker 答案。最终记录同时保留确定性证据和大模型判断，
 包括置信度及两者不一致标记。
 
+### 证据化错误归因
+
+归因按确定性证据阶梯执行：协议/解析失败、答案类型规范化、单位和选择题检查、
+TruthSolver 候选解回代、SymPy 常数等式验证、推理结果到最终答案的一致性、数值错误
+签名以及符号等价性。每条结果保存证据、置信度、验证层级、首个错误步骤和标签版本。
+没有检查能够隔离出可靠机制时，系统输出 `unknown_error`，不会根据关键词猜测模型的
+“认知原因”。
+
+每轮会导出双人标注复核 CSV。两位标注者填写人工标签后，使用
+`evaluate_error_attribution.py score` 计算归因准确率、选择性覆盖/准确率、Macro-F1、
+Cohen's kappa、证据覆盖率、Brier Score 和分验证层级准确率。只有“确定性验证 +
+存在证据 + 置信度达标”的标签才能定向指导错题池出题。
+
 ## 固定测试集与泄漏防护
 
-`benchmarks/fixed_math_test_set.json` 是训练循环的不可变输入，包含每个配置细分题型
-各一道中等难度题目。
+服务器环境使用 VEPFS 中不可变的
+`benchmarks/open_math_fixed_suite.json`，由 GSM8K、MATH 七个主题和 MMLU 五个数学
+任务的固定公开 test 子集组成。仓库中的 `benchmarks/fixed_math_test_set.json`
+保留为本地测试使用的小型项目原生 fixture。
 
 - 启动时先评测原始 test-taker 并保存基线正确率。
 - 每轮训练成功后，用同一测试集评测合并后的新模型。
 - 每轮摘要保存基线正确率、当前正确率和增量。
+- 摘要还保存分来源和分难度正确率、各客观难度维度均值，以及目标/实测难度平均绝对
+  偏差。
 - 固定测试题不会进入错题训练候选。
 - 训练候选如与测试题文本完全相同、规范模板相同，或者 Token、TF-IDF、
   datasketch MinHash/LSH、Sentence-Transformers 余弦相似度超过对应阈值，
@@ -417,6 +492,19 @@ Apache-2.0 兼容 MinHash 独立后备实现、MIT 许可的
 回退到 [Guidance](https://github.com/guidance-ai/guidance)；微调使用
 [TRL](https://github.com/huggingface/trl)，实验追踪使用可配置的
 [Weights & Biases](https://github.com/wandb/wandb)。
+
+固定开源测试集使用
+[GSM8K](https://github.com/openai/grade-school-math)、
+[MATH](https://github.com/hendrycks/math) 和
+[MMLU](https://github.com/hendrycks/test) 的数学任务，并可选加入
+[DeepMind Mathematics](https://github.com/google-deepmind/mathematics_dataset)
+插值/外推数据。错误归因合同借鉴
+[DSPy](https://github.com/stanfordnlp/dspy) 的声明式职责拆分；人工审计把准确率、覆盖率、
+证据、一致性和置信度校准分开报告，借鉴了
+[Ragas](https://github.com/vibrantlabsai/ragas) 的可组合评测思想。DSPy 和 Ragas
+只是设计参考，不是运行时依赖。
+
+精确复用边界和许可说明见 `THIRD_PARTY_NOTICES.md`。
 
 ## 检查与验证
 

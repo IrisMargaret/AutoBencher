@@ -13,7 +13,9 @@ Multilingual entry points have been removed from this math-only repository.
 ## What the pipeline does
 
 - Covers a fixed taxonomy of 9 categories and 27 subcategories.
-- Generates moderate questions within configurable difficulty bounds.
+- Separates requested difficulty from an objective, reproducible five-dimension
+  profile. The observed score—not unsupported LLM self-rating—drives later
+  adaptive sampling.
 - Gives the test taker no tool schema or external-tool access; it answers with
   its own reasoning under a strict JSON contract.
 - Uses local SymPy as the authoritative gold-answer source, including exact
@@ -24,11 +26,15 @@ Multilingual entry points have been removed from this math-only repository.
 - Uses a separate LLM semantic judge to decide whether differently formatted
   answers mean the same thing. Deterministic checks and the semantic decision
   are both retained for audit.
+- Attributes errors only when a parser, type checker, SymPy equality,
+  substitution check, or numeric signature supplies reproducible evidence;
+  otherwise it abstains with `unknown_error`.
 - Builds every cycle's training set only from that cycle: exactly 25% correctly
   answered examples and 75% incorrectly answered examples. Every exported
   sample contains a verified gold answer and safe, non-empty solution steps.
 - Evaluates the original model and every trained cycle on one immutable,
-  all-subcategory holdout and reports the accuracy delta.
+  multi-source open holdout and reports overall, source, subcategory, answer
+  type, and difficulty-stratum accuracy.
 - Rejects training questions that are identical or highly similar to the fixed
   test set using exact/template checks, datasketch MinHash/LSH informed by
   Text-Dedup, and Sentence-Transformers semantic similarity.
@@ -50,6 +56,7 @@ YAML config + explicit CLI overrides
   -> controlled SymPy solver clause
   -> deterministic parse + exact local execution
   -> equation/system substitution and fail-closed verification
+  -> observable five-dimension difficulty profile and effective score
   -> answer-anchored training reasoning from solver evidence
   -> accepted canonical gold answer
   -> no-tool test-taker reasoning
@@ -69,37 +76,36 @@ calls. Gold generation itself is local and deterministic.
 
 ```text
 AutoBencher/
-├── autobencher/
-│   ├── config.py
-│   ├── coverage.py
-│   ├── dataset.py
-│   ├── evaluator.py
-│   ├── fixed_benchmark.py
-│   ├── output_schemas.py
-│   ├── reasoning.py
-│   ├── similarity.py
-│   ├── structured.py
-│   └── truth_solver.py
-├── benchmarks/
-│   └── fixed_math_test_set.json
-├── configs/
-│   ├── math_flywheel.yaml
-│   ├── environments/
-│   └── experiments/
-├── prompts/
-│   ├── evaluator_python_solver.txt
-│   ├── evaluator_independent_solver.txt
-│   ├── evaluator_postcheck.txt
-│   ├── semantic_answer_judge.txt
-│   └── tora_evaluator_strategy.txt
-├── tests/
-├── math_autobencher.py
-├── run_scripts.py
-├── train_llm.py
-├── tool_util.py
-├── THIRD_PARTY_NOTICES.md
-├── requirements.txt
-└── requirements-lock.txt
+|-- autobencher/
+|   |-- config.py
+|   |-- coverage.py
+|   |-- dataset.py
+|   |-- difficulty.py
+|   |-- evaluator.py
+|   |-- fixed_benchmark.py
+|   |-- open_benchmark.py
+|   |-- similarity.py
+|   |-- structured.py
+|   `-- truth_solver.py
+|-- benchmarks/
+|   `-- fixed_math_test_set.json
+|-- configs/
+|   |-- benchmarks/open_math_fixed_suite.yaml
+|   |-- environments/
+|   |-- experiments/
+|   `-- math_flywheel.yaml
+|-- docs/
+|-- prompts/
+|-- tests/
+|-- evaluate_error_attribution.py
+|-- prepare_open_math_benchmark.py
+|-- math_autobencher.py
+|-- run_scripts.py
+|-- train_llm.py
+|-- tool_util.py
+|-- THIRD_PARTY_NOTICES.md
+|-- requirements.txt
+`-- requirements-lock.txt
 ```
 
 ## Requirements
@@ -184,7 +190,8 @@ Important sections in `configs/math_flywheel.yaml`:
 
 | Section | Purpose |
 | --- | --- |
-| `generation` | Difficulty 2–6 by default, reasoning limit, retries, quota repair. |
+| `generation` | Allowed difficulty range 2–6 by default, reasoning limit, retries, quota repair. |
+| `difficulty` | Observable rubric, dimension weights, target tolerance, relabel/reject policy, and sampler score source. |
 | `evaluator_pipeline` | Prompt paths, Python timeout/size limits, retries, semantic-judge threshold. |
 | `test_taker_prompt` | No-tool, strict-JSON, reasoning and output-injection limits. |
 | `answer_normalization` | Numeric tolerances, symbolic rules, Math-Verify switch. |
@@ -198,6 +205,39 @@ Important sections in `configs/math_flywheel.yaml`:
 
 The evaluator and generation difficulty bounds must match. The validated
 defaults prohibit competition-level questions.
+
+### Observable difficulty definition
+
+`difficulty` is the effective score used for bucketing and adaptive sampling.
+It is no longer copied blindly from the generation plan. Every solved question
+stores three related values:
+
+- `target_difficulty`: the score requested by the scheduler;
+- `observed_difficulty`: the score recomputed after solving;
+- `difficulty`: the effective score used by the next sampling round.
+
+The `observable_math_v1` rubric derives the observed 1–10 score from five
+stored dimensions:
+
+| Dimension | Default weight | Observable meaning |
+| --- | ---: | --- |
+| Reasoning steps | 0.30 | Number of dependent verified transformations |
+| Operation count | 0.20 | Mathematical operators and functions |
+| Constraint count | 0.20 | Equations, inequalities, and domain conditions |
+| Symbolic depth | 0.20 | Variables, functions, powers, and nesting |
+| Representation load | 0.10 | Translation, units, rates, cases, matrices, or geometry |
+
+The bands have explicit interpretations: 1–2 foundational, 3–4 routine
+multi-step, 5–6 integrated, 7–8 advanced, and 9–10 expert. The production
+generator remains limited to 2–6. Large literals, verbose stories, obscure
+names, and unnecessary arithmetic do not independently increase the score.
+
+`difficulty.mismatch_action: relabel` preserves a mathematically valid,
+SymPy-verified question but uses its observed score and records the target gap.
+`reject` instead discards questions outside `target_tolerance`. Production and
+the 27-question profile reject observed scores outside the configured 2–6
+range; the 8-question functional profile records and relabels them without
+spending its small repair budget.
 
 ### Adaptive difficulty and question allocation
 
@@ -214,7 +254,7 @@ The global rule starts after
 `adaptive_sampling.global_accuracy_min_observations: 10`. Configure the two
 bounds with `global_accuracy_low` and `global_accuracy_high`, the step with
 `global_difficulty_step`, and the safety cap with
-`max_difficulty_change_per_iteration`. Difficulty is always clamped to
+`max_difficulty_change_per_iteration`. The next target is always clamped to
 `generation.minimum_difficulty` and `generation.maximum_difficulty` (2–6 by
 default).
 
@@ -224,9 +264,31 @@ posterior, coverage quota deficits, uncertainty, persistent errors, retention
 probes, and eligible hard-pool variants. The local posterior target remains
 separately configurable as `target_accuracy_low/mid/high` (0.10/0.20/0.30 by
 default). A subcategory also resumes from its most recently sampled difficulty
-instead of resetting every round.
+instead of resetting every round. The Beta-Binomial state is keyed by the
+observed/effective difficulty, so a question requested at 5 but objectively
+scored at 3 teaches the sampler about difficulty 3.
 
 ## Running
+
+Build the versioned multi-source open holdout before the first server run:
+
+```bash
+export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
+export HF_DATASETS_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/datasets"
+
+python prepare_open_math_benchmark.py \
+  --manifest configs/benchmarks/open_math_fixed_suite.yaml \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json" \
+  --cache-dir "$HF_DATASETS_CACHE" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+The default suite contains exactly 595 questions when all quotas are
+satisfied: 100 GSM8K test questions, 245 MATH test questions, and 250
+mathematics-related MMLU test questions. Optional DeepMind Mathematics
+interpolation/extrapolation data can be enabled only from the VEPFS data root.
+The builder rejects training/validation splits, silent quota shrinkage,
+manifest drift, and accidental overwrite.
 
 For the complete low-cost 8-question path (baseline -> SymPy-verified
 generation -> QLoRA -> fixed-set re-evaluation), see
@@ -360,16 +422,39 @@ compares only the question, canonical gold, answer type, normalized forms, and
 test-taker answer. The final record retains both deterministic evidence and the
 LLM decision, including confidence and disagreement flags.
 
+### Evidence-based error attribution
+
+Attribution follows a deterministic evidence ladder: protocol/parse failures,
+typed normalization, unit and option checks, TruthSolver substitution,
+SymPy validation of constant equalities, answer-transfer consistency, numeric
+error signatures, and symbolic equivalence. Each result stores its evidence,
+confidence, verification tier, first failing step, and taxonomy version. When
+no check isolates a defensible mechanism, the system emits `unknown_error`
+instead of inferring a cognitive cause from keywords.
+
+Every iteration exports a double-annotation review CSV. Use
+`evaluate_error_attribution.py score` after two reviewers fill the human-label
+columns to obtain attribution accuracy, selective coverage/accuracy, macro-F1,
+Cohen's kappa, evidence coverage, Brier score, and accuracy by verification
+tier. Only deterministic, evidenced, above-threshold labels can direct
+hard-pool question generation.
+
 ## Fixed test and leakage protection
 
-`benchmarks/fixed_math_test_set.json` is immutable input to the training loop and
-contains one moderate question for every configured subcategory.
+The server environment uses the immutable
+`benchmarks/open_math_fixed_suite.json` artifact under VEPFS. It combines fixed
+public test subsets from GSM8K, all seven MATH subjects, and five
+mathematics-related MMLU tasks. The checked-in
+`benchmarks/fixed_math_test_set.json` remains a small project-native fixture for
+local tests.
 
 - At startup, the original test taker is evaluated and its baseline accuracy is
   stored.
 - After every successful training cycle, the merged model is evaluated on the
   same dataset.
 - Each cycle summary records baseline accuracy, current accuracy, and delta.
+- Summaries also report per-source and per-difficulty accuracy, observable
+  dimension means, and the mean absolute target/observed difficulty gap.
 - Fixed-test questions never enter the hard-example training candidates.
 - Training candidates are rejected on exact question match, normalized
   template match, token overlap, TF-IDF cosine similarity, datasketch
@@ -496,6 +581,19 @@ Local constrained JSON uses
 [Guidance](https://github.com/guidance-ai/guidance) fallback. Fine-tuning uses
 [TRL](https://github.com/huggingface/trl), and configurable experiment tracking
 uses [Weights & Biases](https://github.com/wandb/wandb).
+
+The fixed open holdout is built from
+[GSM8K](https://github.com/openai/grade-school-math),
+[MATH](https://github.com/hendrycks/math), and the mathematical tasks in
+[MMLU](https://github.com/hendrycks/test), with optional
+[DeepMind Mathematics](https://github.com/google-deepmind/mathematics_dataset)
+interpolation/extrapolation data. Error-attribution contracts follow the
+declarative separation encouraged by
+[DSPy](https://github.com/stanfordnlp/dspy), while the audit report decomposes
+accuracy, coverage, evidence, agreement, and confidence calibration in the
+spirit of [Ragas](https://github.com/vibrantlabsai/ragas). DSPy and Ragas are
+design references, not runtime dependencies.
+
 See `THIRD_PARTY_NOTICES.md` for the precise reuse boundary and license notes.
 
 ## Verification

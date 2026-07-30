@@ -56,6 +56,13 @@ def record(question, answer, *, correct=False, accuracy=0.2, **extra):
         "category": "Arithmetic",
         "sub_category": "Integer Operations",
         "answer_type": "integer",
+        "difficulty": 3,
+        "target_difficulty": 3,
+        "observed_difficulty": 3,
+        "difficulty_profile": {
+            "rubric_version": "observable_math_v1",
+            "score": 3,
+        },
         "is_correct": correct,
         "sub_category_accuracy": accuracy,
         "evaluator_confidence": 0.95,
@@ -93,6 +100,10 @@ def test_dataset_exact_dedup_and_noise_filter(config):
     assert len(selected) == 1
     assert manifest["rejection_reasons"]["exact_duplicate"] == 1
     assert manifest["rejection_reasons"]["tool_violation"] == 1
+    assert manifest["selected_difficulty_counts"] == {"3": 1}
+    assert manifest["difficulty_rubric_versions"] == [
+        "observable_math_v1"
+    ]
     assert len(rejected) == 2
 
 

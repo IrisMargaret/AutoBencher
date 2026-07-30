@@ -128,6 +128,12 @@ taxonomy:
 finetune:
   enabled: false
 
+# Smoke tests still compute and export the objective profile, but do not reject
+# fixtures that intentionally sit outside the production 2--6 band.
+difficulty:
+  mismatch_action: relabel
+  reject_outside_generation_bounds: false
+
 structured_output:
   enabled: false
   required: false

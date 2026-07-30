@@ -6,6 +6,8 @@ import math
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
+from .difficulty import target_difficulty_profile
+
 
 def taxonomy_items(config: Mapping[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
     default_quota = int(config["coverage"]["default_min_quota"])
@@ -452,6 +454,12 @@ def generation_schedule(
                         "sub_category": item["subcategory"],
                         "question_count": chunk_count,
                         "difficulty": item["selected_difficulty"],
+                        "target_difficulty_profile": (
+                            target_difficulty_profile(
+                                item["selected_difficulty"],
+                                config,
+                            )
+                        ),
                         "generation_source": source,
                         "generation_strategy": (
                             "numeric_structure_variant"

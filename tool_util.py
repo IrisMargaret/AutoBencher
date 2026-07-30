@@ -14,6 +14,7 @@ from collections import defaultdict
 import numpy as np
 from util import gen_from_prompt
 from autobencher.output_schemas import TestTakerOutput
+from autobencher.difficulty import analyze_difficulty
 from autobencher.structured import (
     ERROR_TAGS as STRUCTURED_ERROR_TAGS,
     parse_test_taker_output,
@@ -381,11 +382,36 @@ def canonicalize_math_record(record, index=0):
         "error_tags": error_tags,
         "unique_key": unique_key,
     }
+    if not isinstance(record.get("difficulty_profile"), dict):
+        legacy_profile = analyze_difficulty(
+            question,
+            canonical["answer_type"],
+            record.get("truth_validation_details", {}),
+            record.get("gold_reasoning_summary", []),
+        )
+        legacy_profile.update(
+            {
+                "requested_score": int(canonical["difficulty"]),
+                "effective_score": int(canonical["difficulty"]),
+                "profile_role": "legacy_record_diagnostic_only",
+            }
+        )
+        canonical.update(
+            {
+                "target_difficulty": int(canonical["difficulty"]),
+                "observed_difficulty": int(legacy_profile["score"]),
+                "difficulty_profile": legacy_profile,
+            }
+        )
     preserved_fields = (
         "generation_source",
         "reference_hard_sample_ids",
         "target_error_type",
         "generation_strategy",
+        "target_difficulty",
+        "observed_difficulty",
+        "difficulty_profile",
+        "target_difficulty_profile",
         "choices",
         "source_dataset",
         "source_config",

@@ -72,6 +72,7 @@ python run_scripts.py math \
 
 - `gold_solver_backend: sympy`
 - SymPy 自检答案 `4`
+- `difficulty_rubric_version: observable_math_v1` 及难度自检画像
 - 实际 MinHash 后端；服务器未安装 `datasketch` 时，8 题配置会显示
   `builtin_minhash_exhaustive`
 - 固定测试集题数与 SHA-256
@@ -138,6 +139,9 @@ find "$RUN_DIR/models" -name config.json -type f -print
 - baseline 与 `cycle_1` 两份固定集 `summary.json` 都存在。
 - 保留的生成/推理记录中，`truth_validation_details.solver_backend` 为
   `sympy`；默认流程不应再产生 `evaluator_code_failure`。
+- 生成记录同时包含 `target_difficulty`、`observed_difficulty` 和
+  `difficulty_profile.rubric_version=observable_math_v1`。8 题功能配置允许客观难度
+  越界后重标，正式 27 题和生产配置则会拒绝越界题。
 
 若 `finetune_status` 是 `no_train_eligible_samples`，查看：
 

@@ -699,6 +699,19 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
             self.assertEqual(question["canonical_answer"], "3")
             self.assertEqual(question["gold_answer"], "3")
             self.assertEqual(len(question["gold_reasoning_summary"]), 2)
+            self.assertEqual(question["target_difficulty"], 4)
+            self.assertEqual(
+                question["observed_difficulty"],
+                question["difficulty_profile"]["score"],
+            )
+            self.assertEqual(
+                question["difficulty"],
+                question["difficulty_profile"]["effective_score"],
+            )
+            self.assertEqual(
+                question["difficulty_profile"]["rubric_version"],
+                "observable_math_v1",
+            )
             self.assertEqual(
                 question["truth_validation_details"]["solver_backend"],
                 "sympy",
@@ -714,6 +727,10 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
                 0.0,
             )
             self.assertEqual(generate.call_args.kwargs["top_p"], 0.1)
+            self.assertIn(
+                "Objective difficulty profile",
+                generate.call_args.kwargs["prompt"][0],
+            )
             summary = json.loads(
                 Path(
                     f"{prefix}.generation_batch_summary.json"
@@ -721,6 +738,64 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
             )
             self.assertEqual(summary["gold_solver_backend"], "sympy")
             self.assertEqual(summary["llm_gold_solver_calls"], 0)
+
+    def test_objective_difficulty_can_reject_out_of_band_question(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=[
+                "evaluator_pipeline.enabled=false",
+                "generation.minimum_difficulty=2",
+                "generation.maximum_difficulty=2",
+                "evaluator_pipeline.minimum_difficulty=2",
+                "evaluator_pipeline.maximum_difficulty=2",
+                "adaptive_sampling.initial_difficulty=2",
+                "difficulty.reject_outside_generation_bounds=true",
+            ],
+        )
+        description = {
+            "category": "Algebra",
+            "sub_category": "Systems of Equations",
+            "difficulty": 2,
+            "generation_source": "coverage_deficit",
+            "generation_strategy": "quota_repair",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "difficulty"))
+            with patch.object(
+                math_autobencher,
+                "gen_from_prompt",
+                return_value=self._result(
+                    [
+                        {
+                            "question": (
+                                "Solve the system for (x, y): "
+                                "x + y = 7, 2*x - y = 2."
+                            )
+                        }
+                    ]
+                ),
+            ):
+                result = math_autobencher._generate_question_text_with_truth(
+                    description,
+                    "model",
+                    None,
+                    object(),
+                    prefix,
+                    question_count=1,
+                    research_config=config,
+                )
+            self.assertEqual(result[0], [])
+            failures = json.loads(
+                Path(
+                    f"{prefix}.generation_failures.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                any(
+                    item.get("failure_type") == "difficulty_rejected"
+                    for item in failures
+                )
+            )
 
     def test_sympy_gold_does_not_cross_compare_its_own_symbolic_answer(self):
         config, _ = load_project_config(

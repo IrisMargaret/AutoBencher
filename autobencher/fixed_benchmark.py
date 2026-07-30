@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .config import DEFAULT_TAXONOMY
+from .difficulty import analyze_difficulty
 from .structured import ANSWER_TYPES, normalize_answer_type
 
 
@@ -100,6 +101,21 @@ def load_fixed_test_set(
         difficulty = int(record["difficulty"])
         if not 1 <= difficulty <= 10:
             raise ValueError("Fixed test difficulty must be within [1, 10]")
+        difficulty_profile = record.get("difficulty_profile")
+        if not isinstance(difficulty_profile, Mapping):
+            difficulty_profile = analyze_difficulty(
+                question_text,
+                answer_type,
+            )
+            difficulty_profile.update(
+                {
+                    "declared_source_score": difficulty,
+                    "effective_score": difficulty,
+                    "profile_role": (
+                        "legacy_fixed_set_diagnostic_only"
+                    ),
+                }
+            )
         identifiers.add(identifier)
         normalized_questions.add(question_text.lower())
         questions.append(
@@ -118,6 +134,16 @@ def load_fixed_test_set(
                 "answer": str(record["canonical_answer"]).strip(),
                 "display_answer": str(record["canonical_answer"]).strip(),
                 "difficulty": difficulty,
+                "target_difficulty": int(
+                    record.get("target_difficulty", difficulty)
+                ),
+                "observed_difficulty": int(
+                    record.get(
+                        "observed_difficulty",
+                        difficulty_profile["score"],
+                    )
+                ),
+                "difficulty_profile": dict(difficulty_profile),
                 "fixed_test": True,
                 "truth_validation_details": {
                     "source_question_sha256": hashlib.sha256(
@@ -172,6 +198,17 @@ def load_fixed_test_set(
         ),
         "source_manifests": list(payload.get("sources", [])),
         "selection_policy": dict(payload.get("selection_policy", {})),
+        "difficulty_rubric_versions": sorted(
+            {
+                str(
+                    record.get("difficulty_profile", {}).get(
+                        "rubric_version",
+                        "unknown",
+                    )
+                )
+                for record in questions
+            }
+        ),
     }
     return questions, metadata
 
@@ -195,6 +232,11 @@ def fixed_benchmark_summary(
     source_groups: dict[str, dict[str, int]] = defaultdict(
         lambda: {"total": 0, "correct": 0}
     )
+    difficulty_groups: dict[int, dict[str, int]] = defaultdict(
+        lambda: {"total": 0, "correct": 0}
+    )
+    difficulty_gaps = []
+    dimension_values: dict[str, list[float]] = defaultdict(list)
     parsed_confidences = []
     reasoning_record_count = 0
     semantic_judge_success_count = 0
@@ -216,6 +258,33 @@ def fixed_benchmark_summary(
         source_groups[source]["correct"] += int(
             bool(record.get("is_correct"))
         )
+        difficulty = int(record.get("difficulty", 5))
+        difficulty_groups[difficulty]["total"] += 1
+        difficulty_groups[difficulty]["correct"] += int(
+            bool(record.get("is_correct"))
+        )
+        profile = record.get("difficulty_profile")
+        if isinstance(profile, Mapping):
+            requested = profile.get(
+                "requested_score",
+                record.get("target_difficulty"),
+            )
+            observed = profile.get(
+                "score",
+                record.get("observed_difficulty"),
+            )
+            if requested is not None and observed is not None:
+                difficulty_gaps.append(abs(float(observed) - float(requested)))
+            dimensions = profile.get("dimensions", {})
+            if isinstance(dimensions, Mapping):
+                for name, dimension in dimensions.items():
+                    if isinstance(dimension, Mapping):
+                        try:
+                            dimension_values[str(name)].append(
+                                float(dimension["value"])
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            pass
         parsed = record.get("parsed_response")
         if isinstance(parsed, Mapping):
             reasoning = parsed.get("reasoning_summary")
@@ -275,6 +344,18 @@ def fixed_benchmark_summary(
         }
         for source, counts in sorted(source_groups.items())
     ]
+    difficulty_statistics = [
+        {
+            "difficulty": difficulty,
+            **counts,
+            "accuracy": (
+                counts["correct"] / counts["total"]
+                if counts["total"]
+                else 0.0
+            ),
+        }
+        for difficulty, counts in sorted(difficulty_groups.items())
+    ]
     return {
         "stage": str(stage),
         "model_name": str(model_name).replace("\\", "/"),
@@ -301,4 +382,22 @@ def fixed_benchmark_summary(
         "answer_type_statistics": answer_type_statistics,
         "subcategory_statistics": subcategory_statistics,
         "source_statistics": source_statistics,
+        "difficulty_statistics": difficulty_statistics,
+        "difficulty_calibration": {
+            "profiled_count": sum(
+                1
+                for record in records
+                if isinstance(record.get("difficulty_profile"), Mapping)
+            ),
+            "mean_absolute_target_gap": (
+                sum(difficulty_gaps) / len(difficulty_gaps)
+                if difficulty_gaps
+                else None
+            ),
+            "mean_dimension_values": {
+                name: sum(values) / len(values)
+                for name, values in sorted(dimension_values.items())
+                if values
+            },
+        },
     }

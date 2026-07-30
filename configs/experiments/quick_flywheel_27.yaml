@@ -33,6 +33,13 @@ dataset:
   sentence_transformers_enabled: true
   sentence_transformers_required: true
 
+# The 27-subcategory chain is the smallest profile that enforces the same
+# objective difficulty bounds as a production experiment.
+difficulty:
+  mismatch_action: relabel
+  reject_outside_generation_bounds: true
+  use_observed_score_for_adaptive_sampling: true
+
 fixed_test:
   enabled: true
   evaluate_baseline: true

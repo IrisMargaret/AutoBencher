@@ -24,6 +24,13 @@ generation:
 evaluator_pipeline:
   enabled: false
 
+# Functional verification records objective difficulty but does not spend
+# repair budget rejecting an otherwise valid question solely for calibration.
+difficulty:
+  mismatch_action: relabel
+  reject_outside_generation_bounds: false
+  use_observed_score_for_adaptive_sampling: true
+
 # Keep the functional smoke chain dependency-light. datasketch is preferred
 # when installed; otherwise the exporter uses deterministic built-in MinHash
 # with exhaustive pair comparison. Production profiles remain fail-closed.

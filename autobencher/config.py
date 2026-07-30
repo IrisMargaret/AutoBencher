@@ -291,6 +291,21 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "gold_validation_max_tokens": 4096,
         "gold_validation_timeout_seconds": 10,
     },
+    "difficulty": {
+        "rubric_version": "observable_math_v1",
+        "target_tolerance": 2,
+        "minimum_profile_confidence": 0.70,
+        "mismatch_action": "relabel",
+        "reject_outside_generation_bounds": True,
+        "use_observed_score_for_adaptive_sampling": True,
+        "dimension_weights": {
+            "reasoning_steps": 0.30,
+            "operation_count": 0.20,
+            "constraint_count": 0.20,
+            "symbolic_depth": 0.20,
+            "representation_load": 0.10,
+        },
+    },
     "evaluator_pipeline": {
         "enabled": True,
         "max_parallel_questions": 4,
@@ -1160,9 +1175,88 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "fixed_test.evaluate_after_each_training_cycle",
         "fixed_test.fail_on_training_leakage",
         "error_attribution.export_review_csv",
+        "difficulty.reject_outside_generation_bounds",
+        "difficulty.use_observed_score_for_adaptive_sampling",
     ):
         if not isinstance(_get(config, path), bool):
             raise ConfigurationError(path, "must be a Boolean")
+    difficulty_rubric = str(
+        _get(config, "difficulty.rubric_version")
+    ).strip()
+    if difficulty_rubric != "observable_math_v1":
+        raise ConfigurationError(
+            "difficulty.rubric_version",
+            "must be observable_math_v1",
+            difficulty_rubric,
+        )
+    difficulty_action = str(
+        _get(config, "difficulty.mismatch_action")
+    ).strip()
+    if difficulty_action not in {"relabel", "reject"}:
+        raise ConfigurationError(
+            "difficulty.mismatch_action",
+            "must be relabel or reject",
+            difficulty_action,
+        )
+    difficulty_tolerance = _get(
+        config,
+        "difficulty.target_tolerance",
+    )
+    if (
+        not isinstance(difficulty_tolerance, int)
+        or isinstance(difficulty_tolerance, bool)
+        or not 0 <= difficulty_tolerance <= 9
+    ):
+        raise ConfigurationError(
+            "difficulty.target_tolerance",
+            "must be an integer within [0, 9]",
+            difficulty_tolerance,
+        )
+    profile_confidence = _get(
+        config,
+        "difficulty.minimum_profile_confidence",
+    )
+    if (
+        not isinstance(profile_confidence, (int, float))
+        or isinstance(profile_confidence, bool)
+        or not 0 <= float(profile_confidence) <= 1
+    ):
+        raise ConfigurationError(
+            "difficulty.minimum_profile_confidence",
+            "must be within [0, 1]",
+            profile_confidence,
+        )
+    difficulty_weights = _get(
+        config,
+        "difficulty.dimension_weights",
+    )
+    expected_difficulty_dimensions = {
+        "reasoning_steps",
+        "operation_count",
+        "constraint_count",
+        "symbolic_depth",
+        "representation_load",
+    }
+    if (
+        not isinstance(difficulty_weights, Mapping)
+        or set(difficulty_weights) != expected_difficulty_dimensions
+        or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or float(value) < 0
+            for value in difficulty_weights.values()
+        )
+        or abs(
+            sum(float(value) for value in difficulty_weights.values())
+            - 1.0
+        )
+        > 1.0e-9
+    ):
+        raise ConfigurationError(
+            "difficulty.dimension_weights",
+            "must define the five non-negative dimensions and sum to 1.0",
+            difficulty_weights,
+        )
     minimum_verified = _get(
         config,
         "generation.minimum_verified_questions",

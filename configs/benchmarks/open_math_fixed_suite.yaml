@@ -3,7 +3,9 @@ name: open_math_fixed_suite_v1
 description: >-
   Reproducible evaluation-only union of public test splits. Selection is
   deterministic, source solutions never enter model prompts, and all downloaded
-  data must be stored under the configured VEPFS data root.
+  data must be stored under the configured VEPFS data root. Source difficulty
+  labels are retained while an observable_math_v1 profile is also computed for
+  cross-source analysis.
 
 sources:
   - type: gsm8k

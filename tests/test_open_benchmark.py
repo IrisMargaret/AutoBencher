@@ -114,6 +114,16 @@ def test_open_suite_uses_only_test_splits_and_records_provenance(
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["selection_policy"]["training_splits_forbidden"] is True
     assert {item["source_split"] for item in payload["questions"]} == {"test"}
+    assert all(
+        item["difficulty_profile"]["rubric_version"]
+        == "observable_math_v1"
+        for item in payload["questions"]
+    )
+    assert all(
+        item["observed_difficulty"]
+        == item["difficulty_profile"]["score"]
+        for item in payload["questions"]
+    )
     assert {
         item["source_dataset"] for item in payload["questions"]
     } == {
@@ -298,6 +308,9 @@ def test_fixed_loader_and_summary_keep_source_provenance(
     questions, metadata = load_fixed_test_set(config)
     assert metadata["source_counts"]["openai/gsm8k"] == 1
     assert "builder_manifest_sha256" in metadata
+    assert metadata["difficulty_rubric_versions"] == [
+        "observable_math_v1"
+    ]
     records = [
         {
             **record,
@@ -317,3 +330,7 @@ def test_fixed_loader_and_summary_keep_source_provenance(
         for item in summary["source_statistics"]
     }
     assert source["openai/gsm8k"]["accuracy"] == 1.0
+    assert summary["difficulty_statistics"]
+    assert summary["difficulty_calibration"]["profiled_count"] == len(
+        records
+    )

@@ -465,6 +465,46 @@ def test_generated_question_schema_accepts_complete_record():
     )
 
 
+def test_generated_question_rejects_inconsistent_difficulty_profile():
+    with pytest.raises(ValueError, match="observed_difficulty"):
+        validate_generated_question(
+            {
+                "question_id": "q1",
+                "category": "Arithmetic",
+                "subcategory": "Integer Operations",
+                "difficulty": 2,
+                "target_difficulty": 3,
+                "observed_difficulty": 4,
+                "difficulty_profile": {
+                    "rubric_version": "observable_math_v1",
+                    "score": 2,
+                    "band": "foundational",
+                    "confidence": 0.9,
+                    "effective_score": 2,
+                    "requested_score": 3,
+                    "dimensions": {
+                        "reasoning_steps": {},
+                        "operation_count": {},
+                        "constraint_count": {},
+                        "symbolic_depth": {},
+                        "representation_load": {},
+                    },
+                },
+                "question": "What is 5 + 3?",
+                "answer_type": "integer",
+                "canonical_answer": "8",
+                "display_answer": "8",
+                "unit": None,
+                "tolerance": None,
+                "order_sensitive": False,
+                "generation_source": "coverage_deficit",
+                "reference_hard_sample_ids": [],
+                "target_error_type": None,
+                "generation_strategy": "quota_repair",
+            }
+        )
+
+
 def test_generated_question_schema_rejects_unknown_category():
     with pytest.raises(ValueError, match="validation failed"):
         validate_generated_question(
