@@ -12,6 +12,18 @@ experiment:
   clean_cycle_cache: true
   resume: true
 
+paths:
+  allowed_data_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  enforce_data_root: true
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  cache_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/cache
+  model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
+  log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
+  temp_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/temp
+  dataset_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/datasets
+  checkpoint_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/checkpoints
+  review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
+
 # Re-enable every fail-closed production leakage backend disabled by the
 # evaluation-only smoke profile.
 dataset:

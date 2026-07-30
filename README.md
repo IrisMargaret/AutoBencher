@@ -16,10 +16,9 @@ Multilingual entry points have been removed from this math-only repository.
 - Generates moderate questions within configurable difficulty bounds.
 - Gives the test taker no tool schema or external-tool access; it answers with
   its own reasoning under a strict JSON contract.
-- Makes a primary and a blind independent evaluator each propose
-  problem-specific Python, executes both in isolated subprocesses, requires
-  their answers to agree, and then asks a fresh adjudicator context to
-  recompute/substitute the result.
+- Uses local SymPy as the authoritative gold-answer source, including exact
+  solving and equation/system substitution. LLM-authored solver code is an
+  explicit compatibility mode, not the default.
 - Normalizes numeric, rational, symbolic, set, interval, tuple, matrix, Boolean,
   and textual answers before comparison.
 - Uses a separate LLM semantic judge to decide whether differently formatted
@@ -45,11 +44,10 @@ Multilingual entry points have been removed from this math-only repository.
 YAML config + explicit CLI overrides
   -> original AutoBencher quota/adaptive scheduler
   -> moderate question-only generator
-  -> evaluator solver prompt (question treated as untrusted data)
-  -> primary + blind-independent Python programs
-  -> AST validation + two isolated executions
-  -> answer consensus + runtime verification and substitution
-  -> fresh-context evaluator adjudication
+  -> controlled SymPy solver clause
+  -> deterministic parse + exact local execution
+  -> equation/system substitution and fail-closed verification
+  -> answer-anchored training reasoning from solver evidence
   -> accepted canonical gold answer
   -> no-tool test-taker reasoning
   -> deterministic normalization / Math-Verify fallback
@@ -61,10 +59,8 @@ YAML config + explicit CLI overrides
   -> fixed-test re-evaluation and accuracy delta
 ```
 
-The generator, evaluator solver, evaluator post-check, semantic judge, and test
-taker have separate prompts and model calls. A question is serialized into a
-named JSON data block; its text is never interpolated as an instruction. This
-limits cross-question context contamination and prompt injection.
+The generator, semantic judge, and test taker have separate prompts and model
+calls. Gold generation itself is local and deterministic.
 
 ## Project layout
 
@@ -229,12 +225,16 @@ instead of resetting every round.
 
 ## Running
 
+For the complete low-cost 8-question path (baseline -> SymPy-verified
+generation -> QLoRA -> fixed-set re-evaluation), see
+[`docs/mini_flywheel_zh-CN.md`](docs/mini_flywheel_zh-CN.md).
+
 Evaluation only:
 
 ```bash
 python run_scripts.py math \
   --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/local.yaml \
+  --environment configs/environments/volcengine.yaml \
   --mode eval \
   --num-iters 2
 ```
@@ -244,7 +244,7 @@ Complete 27-question quick flywheel (one iteration, one cycle, one epoch):
 ```bash
 python run_scripts.py math \
   --config configs/experiments/quick_flywheel_27.yaml \
-  --environment configs/environments/server.private.yaml \
+  --environment configs/environments/volcengine.yaml \
   --run-id quick-flywheel-27
 ```
 
@@ -271,9 +271,20 @@ python run_scripts.py math \
 The legacy long-form arguments accepted by `math_autobencher.py` remain
 available for existing math workflows. Explicit CLI values override YAML.
 
-## Evaluator answer pipeline
+## Gold answer pipeline
 
-For every generated question:
+The default `generation.gold_solver_backend: sympy` path never accepts an
+LLM-produced gold answer and does not ask an LLM to author solver code.
+DeepSeek emits question text only. The local deterministic solver parses the
+controlled final solver clause, computes an exact result with SymPy, verifies
+equation/system answers by substitution, and derives answer-anchored training
+steps from that evidence. Unsupported or ambiguous questions fail closed and
+are replaced by quota repair.
+
+The older multi-call LLM-authored Python evaluator remains available only as
+the explicit compatibility setting `gold_solver_backend: llm_python`.
+
+In that non-default compatibility mode:
 
 1. `evaluator_python_solver.txt` asks the primary evaluator to analyze the
    problem and return only `analysis_summary` and problem-specific
@@ -318,12 +329,9 @@ semantic judging, and API-backed test-taker inference all honor the configured
 therefore times out and retries instead of leaving the process silently
 blocked.
 
-Gold verification keeps the full three-stage evaluator chain but processes
-independent questions concurrently for OpenAI-compatible API clients.
-`evaluator_pipeline.max_parallel_questions` controls the worker count and
-defaults to `4`; local Hugging Face and Ollama evaluator paths remain serial
-to avoid unsafe shared-model access. Lower this value when the API account has
-a strict request-rate limit.
+Only the non-default `llm_python` compatibility mode uses the three-stage
+evaluator chain. In that mode,
+`evaluator_pipeline.max_parallel_questions` controls the worker count.
 
 ## Test-taker isolation and grading
 
@@ -395,9 +403,8 @@ selected counts and asserts the exact ratio before fine-tuning.
 
 Every eligible record must also contain a concrete
 `gold_reasoning_summary` within the configured step and character limits. The
-final isolated adjudicator re-derives the answer after both Python solvers have
-run and records the actual ordered transformations, intermediate values, the
-verified final answer, and a substitution or independent check. Plan-only
+default path derives these steps from SymPy's exact result and substitution
+evidence, including the verified final answer and an independent check. Plan-only
 lists such as `["compute", "solve", "check"]`, missing steps, role injection,
 tool requests, Markdown fences, ungrounded answers, and oversized steps are
 rejected. Alpaca output always contains these postchecked steps,
@@ -416,10 +423,11 @@ configuration hash, environment snapshot, manifests, logs, global hard pool,
 training artifacts, model artifacts, and fixed-test results.
 
 The configured output root contains one automatically allocated `test_<N>`
-directory per invocation. With `configs/environments/server.yaml` and a
-repository working directory of `/root/code/AutoBencher`, the concrete path is
-`/root/code/AutoBencher/output/math_flywheel/test_<N>/`. The newest run can be
-located with `ls -dt output/math_flywheel/test_* | head -1`.
+directory per invocation. Server configurations enforce
+`/vepfs-mlp2/queue010/20262202597/math_flywheel`; writable output, caches,
+temporary files, logs, datasets, checkpoints, and model artifacts outside that
+root are rejected. The newest run can be located with
+`ls -dt /vepfs-mlp2/queue010/20262202597/math_flywheel/test_* | head -1`.
 
 With `experiment.clean_cycle_cache: true`, every iteration directory contains
 exactly these JSON files after its `finally` cleanup:

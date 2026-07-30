@@ -1,6 +1,5 @@
 import argparse
 import os
-from pathlib import Path
 import subprocess
 import sys
 
@@ -137,6 +136,7 @@ def build_command(
     environment=None,
     run_id=None,
     resume=None,
+    preflight_only=False,
     overrides=None,
 ):
     agent_modelname = agent_modelname or model
@@ -147,12 +147,11 @@ def build_command(
         )
     acc_target = acc_target or "0.1--0.3"
 
-    if outfile_prefix1 is None:
-        outfile_prefix1 = f"math_v5/{model}.0.1--0.3."
-
-    output_parent = Path(outfile_prefix1).parent
-    if output_parent != Path("."):
-        output_parent.mkdir(parents=True, exist_ok=True)
+    if outfile_prefix1 is None and config is None:
+        outfile_prefix1 = (
+            "/vepfs-mlp2/queue010/20262202597/math_flywheel/"
+            f"legacy/{model}.0.1--0.3."
+        )
 
     common = [
         "--exp_mode", exp_mode,
@@ -160,9 +159,9 @@ def build_command(
         "--test_taker_modelname", test_taker_modelname,
         "--use_helm", use_helm,
         "--num_iters", str(num_iters),
-        "--outfile_prefix1", outfile_prefix1,
         "--acc_target", acc_target,
     ]
+    _append_option(common, "--outfile_prefix1", outfile_prefix1)
     _append_option(common, "--test_taker_modelname2", test_taker_modelname2)
     _append_option(common, "--tool_modelname", tool_modelname)
     _append_option(common, "--temperature", temperature)
@@ -187,6 +186,8 @@ def build_command(
     _append_option(math_options, "--run_id", run_id)
     if resume is not None:
         _append_option(math_options, "--resume", str(bool(resume)).lower())
+    if preflight_only:
+        math_options.append("--preflight-only")
     if overrides:
         math_options.append("--override")
         math_options.extend(str(item) for item in overrides)
@@ -295,6 +296,11 @@ def main():
     parser.add_argument("--run-id", "--run_id", dest="run_id")
     parser.add_argument("--resume", type=parse_bool)
     parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="validate storage, SymPy, fixed data, dependencies, and CUDA only",
+    )
+    parser.add_argument(
         "--override",
         nargs="*",
         default=[],
@@ -348,6 +354,7 @@ def main():
         environment=args.environment,
         run_id=args.run_id,
         resume=args.resume,
+        preflight_only=args.preflight_only,
         overrides=args.override,
     )
     if args.mode == "math" and args.config:

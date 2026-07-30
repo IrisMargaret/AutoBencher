@@ -14,6 +14,11 @@ from typing import Any, Iterable, Mapping
 import yaml
 
 
+REQUIRED_DATA_ROOT = (
+    "/vepfs-mlp2/queue010/20262202597/math_flywheel"
+)
+
+
 class ConfigurationError(RuntimeError):
     """A configuration error with a precise dotted field path."""
 
@@ -216,6 +221,8 @@ SAFE_DEFAULTS: dict[str, Any] = {
     "paths": {
         "output_root": "math_flywheel",
         "outfile_prefix": "qwen7b_dsagent",
+        "allowed_data_root": None,
+        "enforce_data_root": False,
         "cache_dir": None,
         "model_output_dir": None,
         "log_dir": None,
@@ -273,6 +280,7 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "max_quota_repair_rounds": 3,
         "allow_partial_question_budget": True,
         "minimum_verified_questions": 1,
+        "gold_solver_backend": "sympy",
         "truth_solver_timeout_seconds": 10,
         "truth_solver_max_retry": 1,
         "subcategory_failure_cooldown_threshold": 3,
@@ -838,6 +846,75 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "must be eval or data_flywheel",
             mode,
         )
+    enforce_data_root = _get(config, "paths.enforce_data_root")
+    if not isinstance(enforce_data_root, bool):
+        raise ConfigurationError(
+            "paths.enforce_data_root",
+            "must be a Boolean",
+            enforce_data_root,
+        )
+    if enforce_data_root:
+        allowed_raw = _get(config, "paths.allowed_data_root")
+        if not str(allowed_raw or "").strip():
+            raise ConfigurationError(
+                "paths.allowed_data_root",
+                "is required when paths.enforce_data_root is true",
+                allowed_raw,
+            )
+        if str(allowed_raw).replace("\\", "/").rstrip("/") != (
+            REQUIRED_DATA_ROOT
+        ):
+            raise ConfigurationError(
+                "paths.allowed_data_root",
+                f"must be exactly {REQUIRED_DATA_ROOT}",
+                allowed_raw,
+            )
+        allowed = os.path.normcase(
+            os.path.realpath(
+                os.path.abspath(os.path.expanduser(str(allowed_raw)))
+            )
+        )
+        writable_fields = (
+            "output_root",
+            "cache_dir",
+            "model_output_dir",
+            "log_dir",
+            "temp_dir",
+            "dataset_dir",
+            "checkpoint_dir",
+            "review_dir",
+        )
+        for field in writable_fields:
+            raw_value = _get(config, f"paths.{field}")
+            if raw_value in {None, ""}:
+                candidate = os.path.join(
+                    os.path.abspath(
+                        os.path.expanduser(
+                            str(_get(config, "paths.output_root"))
+                        )
+                    ),
+                    field.removesuffix("_dir"),
+                )
+            else:
+                candidate = os.path.abspath(
+                    os.path.expanduser(str(raw_value))
+                )
+            candidate = os.path.normcase(os.path.realpath(candidate))
+            try:
+                contained = os.path.commonpath(
+                    [allowed, candidate]
+                ) == allowed
+            except ValueError:
+                contained = False
+            if not contained:
+                raise ConfigurationError(
+                    f"paths.{field}",
+                    (
+                        "writable path must stay under "
+                        f"paths.allowed_data_root={allowed_raw}"
+                    ),
+                    raw_value,
+                )
     for path in (
         "experiment.num_iterations",
         "experiment.max_cycles",
@@ -874,6 +951,25 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "generation.max_questions_per_prompt",
             "must be a positive integer",
             prompt_batch,
+        )
+    gold_solver_backend = _get(
+        config,
+        "generation.gold_solver_backend",
+    )
+    if gold_solver_backend not in {"sympy", "llm_python"}:
+        raise ConfigurationError(
+            "generation.gold_solver_backend",
+            "must be sympy or llm_python",
+            gold_solver_backend,
+        )
+    if (
+        gold_solver_backend == "llm_python"
+        and not bool(_get(config, "evaluator_pipeline.enabled"))
+    ):
+        raise ConfigurationError(
+            "evaluator_pipeline.enabled",
+            "must be true when generation.gold_solver_backend is llm_python",
+            False,
         )
     for path in (
         "generation.generator_max_retry",

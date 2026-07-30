@@ -1,5 +1,8 @@
 # AutoBencher 数学数据飞轮
 
+少量题目生成、SymPy 金标、微调和固定集复测的完整操作步骤见
+[`docs/mini_flywheel_zh-CN.md`](docs/mini_flywheel_zh-CN.md)。
+
 简体中文 | [English](README.md)
 
 AutoBencher 是一个自适应数学评测与本地训练数据飞轮。它保留原 AutoBencher 的
@@ -15,8 +18,8 @@ Multilingual 入口已移除。
 - 在可配置难度范围内生成中等难度题目。
 - test-taker 不接收任何工具 schema，也不能调用外部工具，只能依靠自身推理，并按
   严格 JSON 协议作答。
-- 主 evaluator 与盲审独立 evaluator 分别分析题目并生成专题 Python 代码；系统
-  隔离执行两份代码，要求答案一致，再由全新裁决上下文重新计算或回代。
+- 默认使用本地 SymPy 作为标准答案唯一来源，执行精确求解和方程/方程组逐式回代；
+  LLM 生成求解代码仅作为显式兼容模式保留。
 - 对数值、分数、符号表达式、集合、区间、有序元组、矩阵、布尔值和文本答案做
   规范化。
 - 使用独立的大模型语义判定两个答案是否表达相同含义，同时保留确定性比较证据和
@@ -37,11 +40,10 @@ Multilingual 入口已移除。
 YAML 配置 + 显式 CLI 覆盖
   → 原 AutoBencher Quota / 自适应调度
   → 中等难度 question-only 出题
-  → evaluator 求解提示词（题目仅作为不可信数据）
-  → 主求解器 + 盲审独立求解器分别生成 Python
-  → AST 安全检查 + 两次隔离 Python 执行
-  → 双路答案一致性、运行时验证与答案回代
-  → 全新上下文 evaluator 裁决
+  → 受控 SymPy 求解子句
+  → 确定性解析 + 本地精确执行
+  → 方程/方程组逐式回代和 fail-closed 校验
+  → 根据求解证据生成训练推理步骤
   → 接受规范标准答案
   → 无工具 test-taker 独立推理
   → 确定性规范化 / Math-Verify 兜底
@@ -53,9 +55,8 @@ YAML 配置 + 显式 CLI 覆盖
   → 固定测试集复测并计算正确率增量
 ```
 
-出题器、evaluator 求解器、evaluator 二次复核、语义判定器和 test-taker 使用彼此
-独立的提示词和模型调用。题目被序列化到明确命名的 JSON 数据块中，不会被拼接成
-系统指令，从而限制跨题上下文污染和提示词注入。
+出题器、语义判定器和 test-taker 使用彼此独立的提示词和模型调用；gold 生成本身
+在本地确定性执行。
 
 ## 项目结构
 
@@ -217,7 +218,7 @@ Beta-Binomial 后验、覆盖 Quota 缺口、不确定性、持续错题、保�
 ```bash
 python run_scripts.py math \
   --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/local.yaml \
+  --environment configs/environments/volcengine.yaml \
   --mode eval \
   --num-iters 2
 ```
@@ -227,7 +228,7 @@ python run_scripts.py math \
 ```bash
 python run_scripts.py math \
   --config configs/experiments/quick_flywheel_27.yaml \
-  --environment configs/environments/server.private.yaml \
+  --environment configs/environments/volcengine.yaml \
   --run-id quick-flywheel-27
 ```
 
@@ -252,34 +253,24 @@ python run_scripts.py math \
 
 `math_autobencher.py` 仍兼容原数学工作流的长参数形式。显式 CLI 值会覆盖 YAML。
 
-## evaluator 标准答案流程
+## SymPy 标准答案流程
 
-每一道生成题都执行以下步骤：
+默认 `generation.gold_solver_backend: sympy`。每一道生成题执行以下步骤：
 
-1. `evaluator_python_solver.txt` 要求主 evaluator 分析题目，并且只返回
-   `analysis_summary` 和本题专用的 `python_code`。可配置的
-   `tora_evaluator_strategy.txt` 将 ToRA 的“规划—程序—输出—答案”方法适配为一轮
-   fail-closed 求解。
-2. `evaluator_independent_solver.txt` 只把原题交给第二个盲审求解器，它看不到
-   第一条路径的推理、代码或答案。
-3. 系统使用 `ast` 检查两份代码；导入、文件/网络访问、动态执行、私有属性、函数定义及
-   未批准调用会被拒绝。
-4. 两份通过检查的代码分别使用 `python -I` 在临时工作目录、最小环境变量和受限
-   built-in 下执行，同时限制输出大小和执行时间。代码必须返回规范答案，通过自身
-   验证和回代检查，并且两条运行时答案必须等价。
-5. `evaluator_postcheck.txt` 在一个全新模型调用中运行，只看到题目和两条已验证运行
-   结果，独立裁决答案并拒绝超出目标难度的题目。
-6. 两条运行时答案与裁决答案必须确定性等价，答案类型必须兼容。
+1. DeepSeek 只返回题面，不允许返回候选答案、推理或求解代码。
+2. 题面必须包含受控的最终求解子句，例如 `Compute ...`、`Solve for x: ...`、
+   方程组、导数、积分、极限或不等式格式。
+3. 本地 `TruthSolver` 解析该子句并调用 SymPy 精确求解；方程与方程组还会把结果
+   逐式代回，只有所有残差均为 0 才接受。
+4. 系统从 SymPy 的求解分支、规范答案和回代证据生成
+   `gold_reasoning_summary`，再执行训练推理质量检查。
+5. 无法解析、没有有限闭式解、超时或回代失败的题目直接丢弃，由 quota repair
+   生成替代题；不再进入 LLM 自我修复标准答案的循环。
 
-原有确定性 `TruthSolver` 没有被丢弃：对它支持的题目继续做独立交叉验证。两条求解
-路径不一致时直接丢弃题目，不会静默选择其中一个答案。
-
-生成的 Python 和原始分析只存在于可清理 evaluator 缓存中，不会进入 test-taker
-提示词。训练数据只保留经过长度、角色注入和无关内容检查的 `analysis_summary`
-作为标准解题步骤；代码、提示词片段和盲审求解器原始记录不会进入训练输入。
-
-DeepSeek 兼容请求不会设置 `max_tokens`，因此 evaluator 不会被应用层输出 token
-上限截断；本地模型仍保留进程安全所需的生成长度限制。
+旧的 LLM 生成 Python、双路执行和 postcheck 流程只作为显式兼容模式保留。只有把
+`generation.gold_solver_backend` 改为 `llm_python` 并启用
+`evaluator_pipeline.enabled` 时才会调用；默认生产配置不使用它，因此
+`evaluator_code_failure` 不再是 gold 生成路径的失败来源。
 
 规划、出题、gold 求解、复核、语义判定以及 API 型 test-taker 推理都会使用配置中的
 `request_timeout_seconds`、`max_retries` 和 evaluator 的
@@ -288,10 +279,8 @@ DeepSeek 兼容请求不会设置 `max_tokens`，因此 evaluator 不会被应�
 `[Generate] subcategory_start` 和 `subcategory_done`。因此服务端请求卡住时会按配置
 超时并重试，不会让进程在没有任何日志的情况下无限等待。
 
-gold 校验仍完整保留三阶段 evaluator 链，但对彼此独立的题目使用 OpenAI 兼容 API
-并发处理。`evaluator_pipeline.max_parallel_questions` 控制并发数，默认是 `4`；
-本地 Hugging Face 和 Ollama evaluator 保持串行，避免不安全地共享模型状态。如果
-API 账号限流严格，可调低该值。
+`evaluator_pipeline.max_parallel_questions` 只对上述非默认
+`llm_python` 兼容模式生效。
 
 ## test-taker 隔离与判分
 
@@ -349,9 +338,8 @@ test-taker 每次只接收一道题，并且没有任何外部工具。输出必
 导出；微调前 manifest 会记录计数并断言比例严格正确。
 
 每条合格记录还必须包含满足配置步数和单步字符限制的具体
-`gold_reasoning_summary`。两路 Python 求解运行并达成一致后，最终隔离裁决器会
-重新推导题目，记录按顺序发生的真实变形、中间数值、规范最终答案，以及代回原题
-或独立重算步骤。`["compute", "solve", "check"]` 这类只有计划而没有推导的列表，
+`gold_reasoning_summary`。默认流程根据 SymPy 的精确求解、规范最终答案和回代
+证据生成真实变形与验证步骤。`["compute", "solve", "check"]` 这类只有计划而没有推导的列表，
 以及缺失步骤、角色注入、工具请求、Markdown 围栏、没有落到最终答案和超长内容，
 都会被拒绝。Alpaca 输出固定包含这份复核后的步骤、`final_answer`、
 `answer_type` 和置信度，不再用泛化占位句冒充解题过程。
@@ -365,10 +353,12 @@ QLoRA 使用 Hugging Face TRL 的 `SFTConfig`/`SFTTrainer`。当
 每次运行会保留解析后的配置、配置来源、校验结果、配置哈希、环境快照、运行
 manifest、日志、全局错题池、训练产物、模型产物和固定测试结果。
 
-配置的输出根目录会为每次启动自动创建一个 `test_<N>` 目录。使用
-`configs/environments/server.yaml` 且仓库位于 `/root/code/AutoBencher` 时，实际
-路径是 `/root/code/AutoBencher/output/math_flywheel/test_<N>/`。可执行
-`ls -dt output/math_flywheel/test_* | head -1` 找到最新一次运行目录。
+配置的输出根目录会为每次启动自动创建一个 `test_<N>` 目录。服务器配置强制
+所有运行产物、缓存、临时文件、日志、训练集、checkpoint 和模型位于
+`/vepfs-mlp2/queue010/20262202597/math_flywheel`；任何指向系统盘、
+`/root/code/` 或该根目录之外的可写路径都会在启动时被拒绝。可执行
+`ls -dt /vepfs-mlp2/queue010/20262202597/math_flywheel/test_* | head -1`
+找到最新一次运行目录。
 
 当 `experiment.clean_cycle_cache: true` 时，每个迭代目录在 `finally` 清理后严格只
 保留以下三个 JSON：

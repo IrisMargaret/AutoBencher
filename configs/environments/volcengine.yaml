@@ -5,8 +5,10 @@ models:
     model_path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
 
 paths:
+  allowed_data_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  enforce_data_root: true
   output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
-  cache_dir: /vepfs-mlp2/queue010/20262202597/.cache
+  cache_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/cache
   model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
   log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
   temp_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/temp

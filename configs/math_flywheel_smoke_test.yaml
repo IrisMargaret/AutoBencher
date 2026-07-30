@@ -9,6 +9,19 @@ experiment:
   export_interval: 1
   clean_cycle_cache: true
 
+paths:
+  # Unit/smoke tests may override this local root with pytest tmp_path.
+  allowed_data_root: null
+  enforce_data_root: false
+  output_root: math_flywheel
+  cache_dir: null
+  model_output_dir: null
+  log_dir: null
+  temp_dir: null
+  dataset_dir: null
+  checkpoint_dir: null
+  review_dir: null
+
 coverage:
   default_min_quota: 1
   repair_rounds: 1

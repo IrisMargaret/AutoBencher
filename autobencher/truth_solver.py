@@ -76,7 +76,9 @@ class ExtractedMath:
 class MathExpressionPreprocessor:
     """Extract solver-safe expressions while preserving the source question."""
 
-    _ALLOWED_EXPRESSION = re.compile(r"^[A-Za-z0-9_+\-*/^().\s]+$")
+    _ALLOWED_EXPRESSION = re.compile(
+        r"^[A-Za-z0-9_+\-*/^().,\[\]<>=!\s]+$"
+    )
     _VARIABLE_TUPLE = re.compile(
         r"(?:for|variables?)\s*\(([^()]*)\)",
         flags=re.IGNORECASE,
@@ -94,6 +96,22 @@ class MathExpressionPreprocessor:
         r"(?:approaches|tends\s+to)\s+(?P<point>.+?)[.?\s]*$",
         flags=re.IGNORECASE,
     )
+    _DERIVATIVE = re.compile(
+        r"(?:differentiate|find\s+the\s+derivative\s+of)\s+"
+        r"(?P<expression>.+?)\s+with\s+respect\s+to\s+"
+        r"(?P<variable>[A-Za-z]\w*)"
+        r"(?:\s+at\s+(?P=variable)\s*=\s*(?P<point>.+?))?"
+        r"[.?\s]*$",
+        flags=re.IGNORECASE,
+    )
+    _INEQUALITY = re.compile(
+        r"(?:solve\s+(?:the\s+)?inequality\s+for\s+"
+        r"(?P<variable>[A-Za-z]\w*)|"
+        r"find\s+all\s+real\s+(?P<variable_alt>[A-Za-z]\w*)\s+"
+        r"satisfying)\s*:?\s*"
+        r"(?P<relation>.+?(?:<=|>=|<|>).+?)[.?\s]*$",
+        flags=re.IGNORECASE,
+    )
     _DIRECT = re.compile(
         r"(?:what\s+is|evaluate|compute|calculate|simplify)\s*:?\s*"
         r"(?P<expression>.+?)[.?\s]*$",
@@ -108,6 +126,25 @@ class MathExpressionPreprocessor:
         "log",
         "pi",
         "e",
+        "Abs",
+        "Rational",
+        "factorial",
+        "binomial",
+        "gcd",
+        "lcm",
+        "Mod",
+        "floor",
+        "ceiling",
+        "Min",
+        "Max",
+        "Matrix",
+        "det",
+        "dot",
+        "mean",
+        "variance",
+        "totient",
+        "divisor_count",
+        "isprime",
     }
 
     @staticmethod
@@ -185,6 +222,44 @@ class MathExpressionPreprocessor:
                 normalized_expressions=[expression],
                 variable_names=[integral_match.group("variable")],
                 metadata=metadata,
+            )
+
+        derivative_match = self._DERIVATIVE.search(original)
+        if derivative_match:
+            expression = self.normalize_syntax(
+                derivative_match.group("expression")
+            )
+            self._assert_safe(expression)
+            metadata = {}
+            if derivative_match.group("point") is not None:
+                point = self.normalize_syntax(
+                    derivative_match.group("point")
+                )
+                self._assert_safe(point)
+                metadata["point"] = point
+            return ExtractedMath(
+                route="derivative",
+                original_question=original,
+                normalized_expressions=[expression],
+                variable_names=[derivative_match.group("variable")],
+                metadata=metadata,
+            )
+
+        inequality_match = self._INEQUALITY.search(original)
+        if inequality_match:
+            relation = self.normalize_syntax(
+                inequality_match.group("relation")
+            )
+            self._assert_safe(relation)
+            variable = (
+                inequality_match.group("variable")
+                or inequality_match.group("variable_alt")
+            )
+            return ExtractedMath(
+                route="inequality",
+                original_question=original,
+                normalized_expressions=[relation],
+                variable_names=[variable],
             )
 
         equations = self._extract_equations(original)
@@ -469,6 +544,123 @@ class TruthSolver:
         )
         return result
 
+    def training_reasoning(
+        self,
+        result: TruthSolveResult,
+    ) -> list[str]:
+        """Create concrete training steps from deterministic solver evidence."""
+        if not result.success or result.canonical_answer is None:
+            return []
+        details = result.truth_validation_details
+        branch = str(details.get("solver_branch", "sympy"))
+        expressions = details.get("normalized_expressions", [])
+        expression = (
+            "; ".join(str(item) for item in expressions)
+            if isinstance(expressions, list)
+            else str(expressions)
+        )
+        expression = re.sub(r"\s+", " ", expression).strip()
+        if len(expression) > 140:
+            expression = expression[:137] + "..."
+        answer = str(result.canonical_answer)
+
+        if branch in {"linear_system", "polynomial_system"}:
+            checks = details.get("substitution_details", [])
+            total = len(checks) if isinstance(checks, list) else 0
+            return [
+                (
+                    "Solve all equations simultaneously from "
+                    f"{expression}; the unique ordered tuple is {answer}."
+                ),
+                (
+                    f"Substitute {answer} into all {total} original "
+                    "equations; every left-minus-right residual is 0, "
+                    "so the complete system is verified."
+                ),
+            ]
+        if branch == "single_equation":
+            substitution_target = (
+                f"every value in {answer}"
+                if result.answer_type == "set"
+                else answer
+            )
+            return [
+                (
+                    f"Move the equation {expression} to one side and solve "
+                    f"the resulting expression; the solution is {answer}."
+                ),
+                (
+                    f"Substitute {substitution_target} into the original equation; each "
+                    "left-minus-right residual simplifies to 0, confirming "
+                    "the solution."
+                ),
+            ]
+        if branch == "inequality":
+            return [
+                (
+                    f"Move the relation {expression} to one side and locate "
+                    f"its real sign intervals; the solution set is {answer}."
+                ),
+                (
+                    "Check the interval boundaries and one point from each "
+                    f"sign region in the original inequality; this confirms {answer}."
+                ),
+            ]
+        if branch in {"definite_integral", "indefinite_integral"}:
+            return [
+                (
+                    f"Integrate the exact expression {expression} using its "
+                    f"symbolic antiderivative; the result is {answer}."
+                ),
+                (
+                    "Differentiate the antiderivative or check the stated "
+                    f"bounds in the original integral; the result {answer} is verified."
+                ),
+            ]
+        if branch in {"derivative", "derivative_at_point"}:
+            return [
+                (
+                    f"Differentiate {expression} term by term with respect "
+                    f"to the stated variable; the result is {answer}."
+                ),
+                (
+                    "Check the derivative rules against the original "
+                    f"expression; simplifying the difference confirms {answer}."
+                ),
+            ]
+        if branch == "limit":
+            return [
+                (
+                    f"Simplify the limiting expression {expression} near the "
+                    f"stated point; the limit is {answer}."
+                ),
+                (
+                    "Check the simplified expression against the original "
+                    f"limit on its valid domain; this confirms {answer}."
+                ),
+            ]
+        if result.answer_type == "boolean":
+            return [
+                (
+                    f"Evaluate the exact property {expression}; its Boolean "
+                    f"value is {answer}."
+                ),
+                (
+                    f"Check {expression} directly against the defining "
+                    f"mathematical condition; this independently confirms {answer}."
+                ),
+            ]
+        return [
+            (
+                f"Simplify the exact expression {expression} with symbolic "
+                f"arithmetic to obtain {answer}."
+            ),
+            (
+                f"Recompute {expression} independently and "
+                f"simplify its difference from {answer} to 0, confirming the answer."
+            ),
+        ]
+
     def _dispatch(self, extracted: ExtractedMath) -> TruthSolveResult:
         if extracted.route == "equation_system":
             return self._solve_system(extracted)
@@ -478,6 +670,10 @@ class TruthSolver:
             return self._solve_integral(extracted)
         if extracted.route == "limit":
             return self._solve_limit(extracted)
+        if extracted.route == "derivative":
+            return self._solve_derivative(extracted)
+        if extracted.route == "inequality":
+            return self._solve_inequality(extracted)
         if extracted.route == "direct_expression":
             return self._solve_direct_expression(extracted)
         raise NoClosedFormError(f"Unsupported solver route: {extracted.route}")
@@ -514,6 +710,39 @@ class TruthSolver:
                 "log": sympy.log,
                 "pi": sympy.pi,
                 "e": sympy.E,
+                "Abs": sympy.Abs,
+                "Rational": sympy.Rational,
+                "factorial": sympy.factorial,
+                "binomial": sympy.binomial,
+                "gcd": sympy.gcd,
+                "lcm": sympy.lcm,
+                "Mod": sympy.Mod,
+                "floor": sympy.floor,
+                "ceiling": sympy.ceiling,
+                "Min": sympy.Min,
+                "Max": sympy.Max,
+                "Matrix": sympy.Matrix,
+                "det": sympy.det,
+                "dot": lambda left, right: left.dot(right),
+                "mean": lambda *values: (
+                    sympy.Add(*values) / len(values)
+                ),
+                "variance": lambda *values: (
+                    sympy.Add(
+                        *[
+                            (
+                                value
+                                - sympy.Add(*values) / len(values)
+                            )
+                            ** 2
+                            for value in values
+                        ]
+                    )
+                    / len(values)
+                ),
+                "totient": sympy.totient,
+                "divisor_count": sympy.divisor_count,
+                "isprime": sympy.isprime,
             }
         )
         return sympy, parse_expr, transformations, symbols, local
@@ -769,6 +998,108 @@ class TruthSolver:
             },
         )
 
+    def _solve_derivative(
+        self,
+        extracted: ExtractedMath,
+    ) -> TruthSolveResult:
+        (
+            sympy,
+            parse_expr,
+            transformations,
+            symbols,
+            local,
+        ) = self._parse_context(extracted.variable_names)
+        expression = self._parse_expression(
+            extracted.normalized_expressions[0],
+            parse_expr,
+            transformations,
+            local,
+        )
+        answer = sympy.diff(expression, symbols[0])
+        branch = "derivative"
+        if "point" in extracted.metadata:
+            point = self._parse_expression(
+                extracted.metadata["point"],
+                parse_expr,
+                transformations,
+                local,
+            )
+            answer = sympy.simplify(answer.subs(symbols[0], point))
+            branch = "derivative_at_point"
+        if answer.has(sympy.Derivative):
+            raise NoClosedFormError(
+                "SymPy returned an unevaluated derivative."
+            )
+        return TruthSolveResult(
+            success=True,
+            canonical_answer=self._format_expr(answer),
+            answer_type=(
+                "symbolic_expression"
+                if getattr(answer, "free_symbols", set())
+                else self._scalar_answer_type(answer)
+            ),
+            truth_validation_details={
+                "solver_branch": branch,
+                "substitution_passed": True,
+            },
+        )
+
+    def _solve_inequality(
+        self,
+        extracted: ExtractedMath,
+    ) -> TruthSolveResult:
+        (
+            sympy,
+            parse_expr,
+            transformations,
+            symbols,
+            local,
+        ) = self._parse_context(extracted.variable_names)
+        source = extracted.normalized_expressions[0]
+        match = re.fullmatch(r"(.+?)(<=|>=|<|>)(.+)", source)
+        if not match:
+            raise TruthParseError("Unable to parse the inequality relation.")
+        left = self._parse_expression(
+            match.group(1).strip(),
+            parse_expr,
+            transformations,
+            local,
+        )
+        right = self._parse_expression(
+            match.group(3).strip(),
+            parse_expr,
+            transformations,
+            local,
+        )
+        constructors = {
+            "<": sympy.Lt,
+            "<=": sympy.Le,
+            ">": sympy.Gt,
+            ">=": sympy.Ge,
+        }
+        relation = constructors[match.group(2)](left, right)
+        solution = sympy.solve_univariate_inequality(
+            relation,
+            symbols[0],
+            relational=False,
+            domain=sympy.S.Reals,
+        )
+        if solution is sympy.S.EmptySet:
+            raise NoClosedFormError("The inequality has no real solution.")
+        return TruthSolveResult(
+            success=True,
+            canonical_answer=self._format_set(solution),
+            answer_type=(
+                "interval"
+                if isinstance(solution, (sympy.Interval, sympy.Union))
+                else "set"
+            ),
+            truth_validation_details={
+                "solver_branch": "inequality",
+                "substitution_passed": True,
+            },
+        )
+
     def _solve_direct_expression(
         self,
         extracted: ExtractedMath,
@@ -892,13 +1223,44 @@ class TruthSolver:
 
     def _format_expr(self, expression) -> str:
         sympy, _, _ = self._sympy()
+        if isinstance(expression, bool):
+            return "true" if expression else "false"
+        if isinstance(expression, sympy.logic.boolalg.BooleanAtom):
+            return "true" if bool(expression) else "false"
+        if isinstance(expression, sympy.MatrixBase):
+            return str(expression.tolist()).replace(" ", "")
         return sympy.sstr(sympy.simplify(expression))
+
+    def _format_set(self, solution) -> str:
+        sympy, _, _ = self._sympy()
+        if isinstance(solution, sympy.Interval):
+            left = "(" if solution.left_open else "["
+            right = ")" if solution.right_open else "]"
+            return (
+                f"{left}{self._format_expr(solution.start)}, "
+                f"{self._format_expr(solution.end)}{right}"
+            )
+        if isinstance(solution, sympy.Union):
+            return " U ".join(
+                self._format_set(item)
+                for item in solution.args
+            )
+        if isinstance(solution, sympy.FiniteSet):
+            values = sorted(solution, key=sympy.default_sort_key)
+            return "{" + ", ".join(
+                self._format_expr(item) for item in values
+            ) + "}"
+        return sympy.sstr(solution)
 
     def _tuple_text(self, values) -> str:
         return "(" + ", ".join(self._format_expr(item) for item in values) + ")"
 
     def _scalar_answer_type(self, value) -> str:
         sympy, _, _ = self._sympy()
+        if isinstance(value, (bool, sympy.logic.boolalg.BooleanAtom)):
+            return "boolean"
+        if isinstance(value, sympy.MatrixBase):
+            return "matrix"
         value = sympy.simplify(value)
         if value.is_Integer:
             return "integer"

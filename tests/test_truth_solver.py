@@ -61,6 +61,37 @@ def test_integral_and_limit_use_separate_solver_routes():
     assert limit.truth_validation_details["route"] == "limit"
 
 
+def test_derivative_inequality_and_exact_function_routes():
+    derivative = solver().solve(
+        "Differentiate x^3 + 2*x with respect to x at x = 2."
+    )
+    inequality = solver().solve(
+        "Solve the inequality for x: x^2 - 5*x + 6 <= 0."
+    )
+    matrix = solver().solve(
+        "Compute det(Matrix([[1,2],[3,4]]))."
+    )
+    statistics = solver().solve(
+        "A sample contains 2, 4, and 6. Compute variance(2,4,6)."
+    )
+    assert derivative.canonical_answer == "14"
+    assert derivative.truth_validation_details["route"] == "derivative"
+    assert inequality.canonical_answer == "[2, 3]"
+    assert inequality.answer_type == "interval"
+    assert matrix.canonical_answer == "-2"
+    assert statistics.canonical_answer == "8/3"
+
+
+def test_sympy_result_produces_training_safe_answer_anchored_reasoning():
+    result = solver().solve(
+        "Solve the system for (x, y): 2*x + y = 11, x - y = 1."
+    )
+    steps = solver().training_reasoning(result)
+    assert len(steps) == 2
+    assert "(4, 3)" in " ".join(steps)
+    assert "residual is 0" in steps[1]
+
+
 def test_infinite_system_and_unparseable_question_fail_closed():
     infinite = solver().solve(
         "Solve the system for (x, y): x + y = 2, 2x + 2y = 4."

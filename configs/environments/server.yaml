@@ -1,14 +1,16 @@
 schema_version: "1.0"
 
 paths:
-  output_root: output/math_flywheel
-  cache_dir: output/cache
-  model_output_dir: output/models
-  log_dir: output/logs
-  temp_dir: output/temp
-  dataset_dir: output/datasets
-  checkpoint_dir: output/checkpoints
-  review_dir: output/review
+  allowed_data_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  enforce_data_root: true
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  cache_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/cache
+  model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
+  log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
+  temp_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/temp
+  dataset_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/datasets
+  checkpoint_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/checkpoints
+  review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
 
 logging:
   progress_enabled: true

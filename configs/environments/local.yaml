@@ -5,14 +5,16 @@ models:
     model_path: qwen2.5:7b-instruct
 
 paths:
-  output_root: math_flywheel
-  cache_dir: null
-  model_output_dir: null
-  log_dir: null
-  temp_dir: null
-  dataset_dir: null
-  checkpoint_dir: null
-  review_dir: null
+  allowed_data_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  enforce_data_root: true
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  cache_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/cache
+  model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
+  log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
+  temp_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/temp
+  dataset_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/datasets
+  checkpoint_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/checkpoints
+  review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
 
 logging:
   progress_enabled: true

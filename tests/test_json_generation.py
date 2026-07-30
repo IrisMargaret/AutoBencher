@@ -671,13 +671,19 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             prefix = str(Path(temp_dir, "subcat0"))
-            with patch.object(
-                math_autobencher,
-                "gen_from_prompt",
-                return_value=self._result(
-                    [{"question": "Solve for x: 3x + 2 = 11."}]
-                ),
-            ) as generate:
+            with (
+                patch.object(
+                    math_autobencher,
+                    "gen_from_prompt",
+                    return_value=self._result(
+                        [{"question": "Solve for x: 3x + 2 = 11."}]
+                    ),
+                ) as generate,
+                patch.object(
+                    math_autobencher,
+                    "solve_with_privileged_python",
+                ) as llm_solver,
+            ):
                 result = (
                     math_autobencher._generate_question_text_with_truth(
                         self._description(),
@@ -692,6 +698,12 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
             question = result[0][0]
             self.assertEqual(question["canonical_answer"], "3")
             self.assertEqual(question["gold_answer"], "3")
+            self.assertEqual(len(question["gold_reasoning_summary"]), 2)
+            self.assertEqual(
+                question["truth_validation_details"]["solver_backend"],
+                "sympy",
+            )
+            llm_solver.assert_not_called()
             self.assertIsNone(question["failure_type"])
             self.assertEqual(
                 question["truth_validation_details"]["solver_branch"],
@@ -702,6 +714,13 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
                 0.0,
             )
             self.assertEqual(generate.call_args.kwargs["top_p"], 0.1)
+            summary = json.loads(
+                Path(
+                    f"{prefix}.generation_batch_summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(summary["gold_solver_backend"], "sympy")
+            self.assertEqual(summary["llm_gold_solver_calls"], 0)
 
     def test_leaked_partial_gold_adds_feedback_before_retry(self):
         config, _ = load_project_config(
@@ -830,6 +849,8 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
         config, _ = load_project_config(
             ROOT / "configs" / "math_flywheel_smoke_test.yaml",
             temporary_overrides=[
+                "generation.gold_solver_backend=llm_python",
+                "evaluator_pipeline.enabled=true",
                 "evaluator_pipeline.max_parallel_questions=3",
             ],
         )

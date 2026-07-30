@@ -314,7 +314,7 @@ class LauncherTests(unittest.TestCase):
             self.assertIn("qwen2.5:7b-instruct", command)
             self.assertEqual(command[command.index("--num_iters") + 1], "2")
             self.assertEqual(command[command.index("--outfile_prefix1") + 1], prefix)
-            self.assertTrue(Path(prefix).parent.is_dir())
+            self.assertFalse(Path(prefix).parent.is_dir())
 
     def test_main_accepts_original_underscore_style_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:

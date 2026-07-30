@@ -19,6 +19,9 @@ EXPERIMENT_CONFIG = ROOT / "configs" / "experiments" / "math_flywheel.yaml"
 QUICK_FLYWHEEL_CONFIG = (
     ROOT / "configs" / "experiments" / "quick_flywheel_27.yaml"
 )
+MINI_FLYWHEEL_CONFIG = (
+    ROOT / "configs" / "experiments" / "mini_flywheel_8.yaml"
+)
 VOLCENGINE_CONFIG = ROOT / "configs" / "environments" / "volcengine.yaml"
 
 
@@ -48,6 +51,50 @@ def test_quick_flywheel_profile_runs_one_complete_27_question_cycle():
     assert config["dataset"]["datasketch_required"] is True
     assert config["dataset"]["sentence_transformers_required"] is True
     assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
+
+
+def test_mini_flywheel_profile_runs_the_full_chain_with_sympy_gold():
+    config, _ = load_resolved_config(MINI_FLYWHEEL_CONFIG)
+    assert config["experiment"]["questions_per_iteration"] == 8
+    assert config["generation"]["max_questions_per_prompt"] == 1
+    assert config["generation"]["gold_solver_backend"] == "sympy"
+    assert config["evaluator_pipeline"]["enabled"] is False
+    assert config["finetune"]["enabled"] is True
+    assert config["finetune"]["epochs"] == 1
+    assert config["training_mix"]["minimum_samples"] == 1
+    assert config["fixed_test"]["evaluate_baseline"] is True
+    assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
+
+
+def test_volcengine_writable_paths_are_confined_to_required_data_root():
+    config, _ = load_resolved_config(
+        EXPERIMENT_CONFIG,
+        environment_path=VOLCENGINE_CONFIG,
+    )
+    root = config["paths"]["allowed_data_root"].rstrip("/")
+    assert config["paths"]["enforce_data_root"] is True
+    for field in (
+        "output_root",
+        "cache_dir",
+        "model_output_dir",
+        "log_dir",
+        "temp_dir",
+        "dataset_dir",
+        "checkpoint_dir",
+        "review_dir",
+    ):
+        assert config["paths"][field].startswith(root + "/") or (
+            config["paths"][field] == root
+        )
+
+
+def test_volcengine_rejects_system_disk_output_override():
+    with pytest.raises(ConfigurationError, match="allowed_data_root"):
+        load_resolved_config(
+            EXPERIMENT_CONFIG,
+            environment_path=VOLCENGINE_CONFIG,
+            temporary_overrides=["paths.output_root=/root/code/output"],
+        )
 
 
 def test_precedence_is_defaults_then_yaml_then_cli_then_temporary():
@@ -219,3 +266,15 @@ def test_launcher_explicit_cli_still_overrides_yaml():
         ],
     )
     assert stripped[stripped.index("--agent_modelname") + 1] == "explicit-agent"
+
+
+def test_launcher_forwards_preflight_without_creating_legacy_output():
+    command = build_command(
+        "math",
+        "implicit-model",
+        1,
+        config="configs/experiments/mini_flywheel_8.yaml",
+        preflight_only=True,
+    )
+    assert "--preflight-only" in command
+    assert "--outfile_prefix1" not in command

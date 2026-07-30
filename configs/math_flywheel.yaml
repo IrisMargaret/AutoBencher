@@ -42,15 +42,17 @@ models:
     model_name: null
 
 paths:
-  output_root: math_flywheel
+  allowed_data_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
+  enforce_data_root: true
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel
   outfile_prefix: qwen7b_dsagent
-  cache_dir: null
-  model_output_dir: null
-  log_dir: null
-  temp_dir: null
-  dataset_dir: null
-  checkpoint_dir: null
-  review_dir: null
+  cache_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/cache
+  model_output_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/models
+  log_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/logs
+  temp_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/temp
+  dataset_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/datasets
+  checkpoint_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/checkpoints
+  review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
 
 sensitive_environment:
   deepseek_api_key: DEEPSEEK_API_KEY
@@ -185,6 +187,8 @@ generation:
   max_quota_repair_rounds: 3
   allow_partial_question_budget: true
   minimum_verified_questions: 1
+  # SymPy is authoritative. "llm_python" is retained only for compatibility.
+  gold_solver_backend: sympy
   truth_solver_timeout_seconds: 10
   truth_solver_max_retry: 1
   subcategory_failure_cooldown_threshold: 3
@@ -196,7 +200,9 @@ generation:
   gold_validation_timeout_seconds: 10
 
 evaluator_pipeline:
-  enabled: true
+  # This legacy LLM-authored Python gold path is not used when
+  # generation.gold_solver_backend is sympy.
+  enabled: false
   # Parallelize independent questions only. Each question still retains the
   # full primary-solver, blind-solver, and postcheck chain.
   max_parallel_questions: 4

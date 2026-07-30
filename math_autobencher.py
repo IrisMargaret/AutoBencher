@@ -5,6 +5,11 @@ import random
 import signal
 import sys
 import threading
+
+# Runtime artifacts and caches are configured after YAML resolution. Avoid
+# writing repository-local bytecode during the imports that precede it.
+sys.dont_write_bytecode = True
+
 import contextlib
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,6 +56,7 @@ from autobencher.structured import (
     normalize_answer_type,
     validate_generated_question,
 )
+from autobencher.storage import configure_runtime_storage
 from autobencher.truth_solver import FailureType, TruthSolver
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
 from tool_util import (
@@ -1475,10 +1481,104 @@ Train-eligible examples:
     return extracted_json
 
 
-# [ADDED] New question-only generator. Gold is accepted only after the
-# privileged evaluator has generated isolated Python, executed it, verified the
-# result, and completed a separate post-execution check. TruthSolver remains an
-# independent deterministic agreement layer when it can parse the question.
+_SYMPY_SUBCATEGORY_CONTRACTS = {
+    "Integer Operations": "End with `Compute <integer expression>.`",
+    "Fraction and Decimal Operations": (
+        "End with `Compute <exact fraction/decimal expression>.`"
+    ),
+    "Ratio and Percentage": (
+        "State the ratio or percentage story, then end with one equivalent "
+        "`Compute <exact expression>.` clause."
+    ),
+    "Linear Equations": "Use `Solve for x: <left> = <right>.`",
+    "Systems of Equations": (
+        "Use `Solve the system for (x, y): <eq1>, <eq2>.` with a unique tuple."
+    ),
+    "Polynomials and Inequalities": (
+        "Use either `Solve for x: <polynomial> = 0.` or "
+        "`Solve the inequality for x: <relation>.`"
+    ),
+    "Plane Geometry": (
+        "State the geometry facts, then end with `Compute <formula with values>.`"
+    ),
+    "Solid Geometry": (
+        "State the solid dimensions, then end with `Compute <exact volume or "
+        "surface-area expression>.`"
+    ),
+    "Trigonometric Reasoning": (
+        "End with `Compute <exact expression using sin, cos, tan, sqrt, pi>.`"
+    ),
+    "Basic Probability": (
+        "State the event, then end with `Compute <favorable/total expression>.`"
+    ),
+    "Combinatorics": (
+        "End with `Compute binomial(n,k).` or a factorial expression."
+    ),
+    "Descriptive Statistics": (
+        "End with `Compute mean(v1,...,vn).` or `Compute "
+        "variance(v1,...,vn).`"
+    ),
+    "Rate and Distance": (
+        "State the word problem, then end with `Compute <distance/rate/time "
+        "expression>.`"
+    ),
+    "Work and Mixture": (
+        "State the word problem, then end with `Compute <exact rational expression>.`"
+    ),
+    "Financial Applications": (
+        "State the financial problem, then end with `Compute <exact expression>.`"
+    ),
+    "Divisibility and Factors": (
+        "End with `Compute gcd(a,b).`, `Compute lcm(a,b).`, or "
+        "`Compute divisor_count(n).`"
+    ),
+    "Prime Factorization": (
+        "Ask a prime property with `Compute isprime(n).` or use "
+        "`Compute divisor_count(n).`"
+    ),
+    "Modular Arithmetic": "End with `Compute Mod(a,m).`",
+    "Limits and Continuity": (
+        "Use `Find the limit of <expression> as x approaches <point>.`"
+    ),
+    "Differentiation": (
+        "Use `Differentiate <expression> with respect to x.` optionally "
+        "followed by `at x = <point>`."
+    ),
+    "Integration": (
+        "Use `Integrate <expression> with respect to x from <a> to <b>.`"
+    ),
+    "Matrix Operations": (
+        "End with `Compute det(Matrix([[...],[...]])).`"
+    ),
+    "Linear Systems": (
+        "Use `Solve the system for (x, y): <eq1>, <eq2>.` with a unique tuple."
+    ),
+    "Vectors and Vector Spaces": (
+        "End with `Compute dot(Matrix([...]),Matrix([...])).`"
+    ),
+    "Cross-Domain Multi-Step Problems": (
+        "Give a short multi-step story and end with one exact `Compute "
+        "<combined expression>.` clause."
+    ),
+    "Proof and Mathematical Reasoning": (
+        "Ask for a decidable property and end with `Compute isprime(n).` or "
+        "an exact identity-difference expression."
+    ),
+    "Constraint Synthesis": (
+        "Use a complete equation system with a unique finite solution."
+    ),
+}
+
+
+def _sympy_question_contract(sub_category):
+    return _SYMPY_SUBCATEGORY_CONTRACTS.get(
+        str(sub_category),
+        "End with one exact `Compute <expression>.` clause.",
+    )
+
+
+# The generator emits only questions. The default gold source is the local
+# deterministic SymPy solver; the legacy LLM-authored Python chain is opt-in.
 def _generate_question_text_with_truth(
     description_json,
     agent_lm,
@@ -1521,6 +1621,8 @@ Mandatory rules:
    - integrals: "Integrate EXPR with respect to x from A to B."
    - limits: "Find the limit of EXPR as x approaches A."
    - calculations: "Compute EXPR."
+   - derivatives: "Differentiate EXPR with respect to x."
+   - inequalities: "Solve the inequality for x: LEFT <= RIGHT."
 5. Write powers as ^ or ** and use explicit equality signs.
 6. Use English only and never copy an earlier question verbatim.
 7. Keep every problem within difficulty
@@ -1531,6 +1633,16 @@ Mandatory rules:
 8. Do not generate olympiad, contest-final, research-level, trick, or
    intentionally pathological problems. Prefer clear school or early
    undergraduate exercises with modest arithmetic.
+9. The final solver clause must encode exactly the same computation described
+   by any preceding story. Do not require unstated assumptions or mental
+   arithmetic outside that clause.
+10. Allowed exact functions are sin, cos, tan, sqrt, exp, log, Abs, factorial,
+    binomial, gcd, lcm, Mod, floor, ceiling, Matrix, det, dot, mean, variance,
+    totient, divisor_count, and isprime. Do not use prose number words inside
+    the solver clause.
+
+Subcategory-specific SymPy contract:
+{_sympy_question_contract(sub_category)}
 """
     if "system" in sub_category.lower():
         context += """
@@ -1722,8 +1834,12 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
             }
         )
 
+    gold_solver_backend = str(
+        generation_config["gold_solver_backend"]
+    )
     evaluator_enabled = bool(
-        research_config["evaluator_pipeline"]["enabled"]
+        gold_solver_backend == "llm_python"
+        and research_config["evaluator_pipeline"]["enabled"]
     )
     evaluator_truths = [None] * len(accepted_questions)
     evaluator_cache_path = (
@@ -1837,10 +1953,15 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                         "solver_question_sha256"
                     )
                 ),
-                "solver_prompt_version": "truth_solver_compatibility",
+                "solver_prompt_version": "sympy_gold_executor_v1",
                 "python_code_sha256": None,
                 "verification_details": [],
                 "postcheck": {},
+                "training_reasoning_summary": (
+                    truth_solver.training_reasoning(
+                        deterministic_truth
+                    )
+                ),
                 "estimated_difficulty": int(
                     description_json.get("difficulty", 5)
                 ),
@@ -1943,6 +2064,7 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
             truth_details = dict(
                 deterministic_truth.truth_validation_details
             )
+            truth_details["solver_backend"] = "sympy"
         estimated_difficulty = max(
             int(research_config["generation"]["minimum_difficulty"]),
             min(
@@ -2007,9 +2129,15 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                         truth_details.get("substitution_passed", True)
                     ),
                     "verification_method": (
-                        "isolated evaluator Python execution, runtime "
-                        "verification, postcheck, and optional TruthSolver "
-                        "agreement"
+                        (
+                            "isolated evaluator Python execution with "
+                            "runtime verification and SymPy agreement"
+                        )
+                        if evaluator_enabled
+                        else (
+                            "deterministic SymPy execution with exact "
+                            "solution and substitution verification"
+                        )
                     ),
                     "failure_reason": None,
                     "answer_equivalent": True,
@@ -2044,6 +2172,10 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
         failure_counts[str(failure.get("failure_type", "unknown"))] += 1
     dump_standard_json(
         {
+            "gold_solver_backend": gold_solver_backend,
+            "llm_gold_solver_calls": (
+                len(accepted_questions) if evaluator_enabled else 0
+            ),
             "requested_questions": question_count,
             "generator_output_questions": len(accepted_questions),
             "valid_truth_solved_questions": len(solved_questions),
@@ -4381,9 +4513,15 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     + cycle_number,
                     holdout_records=fixed_questions,
                 )
-                if selected and not dataset_manifest[
-                    "strict_ratio_satisfied"
-                ]:
+                if (
+                    selected
+                    and bool(
+                        args.research_run.config["training_mix"][
+                            "strict_correct_incorrect_ratio"
+                        ]
+                    )
+                    and not dataset_manifest["strict_ratio_satisfied"]
+                ):
                     raise RuntimeError(
                         "Training dataset violated the configured "
                         "25% correct / 75% wrong ratio"
@@ -4789,7 +4927,7 @@ def _build_parser():
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--acc_target", type=str, default="0.1--0.3")
     parser.add_argument("--num_iters", type=int, default=8)
-    parser.add_argument("--outfile_prefix1", type=str, default="att1")
+    parser.add_argument("--outfile_prefix1", type=str, default=None)
     parser.add_argument(
         "--config",
         "--experiment",
@@ -4804,6 +4942,11 @@ def _build_parser():
         help="Optional environment YAML merged below the experiment profile.",
     )
     parser.add_argument("--run_id", type=str, default=None)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="validate the complete flywheel environment without starting a run",
+    )
     parser.add_argument("--resume", type=_parse_bool, default=None)
     parser.add_argument(
         "--override",
@@ -4838,6 +4981,68 @@ def _build_parser():
     return parser
 
 
+def _run_preflight(config, storage_paths):
+    import sympy
+
+    from train_llm import validate_dependencies
+
+    solver = TruthSolver.from_config(config)
+    self_test = solver.solve("Solve for x: 2*x + 3 = 11.")
+    if not self_test.success or self_test.canonical_answer != "4":
+        raise RuntimeError(
+            "SymPy gold solver self-test failed: "
+            f"{self_test.to_dict()}"
+        )
+    fixed_questions = []
+    fixed_metadata = {}
+    if config["fixed_test"]["enabled"]:
+        fixed_questions, fixed_metadata = load_fixed_test_set(
+            config,
+            Path(__file__).resolve().parent,
+        )
+    cuda_available = None
+    if config["finetune"]["enabled"]:
+        validate_dependencies(
+            bool(config["tracking"]["wandb"]["enabled"])
+        )
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+        if not cuda_available:
+            raise RuntimeError(
+                "CUDA is unavailable but finetune.enabled is true."
+            )
+    evaluator_name = str(config["models"]["evaluator"]["model_name"])
+    if (
+        "deepseek" in evaluator_name.lower()
+        and not os.environ.get("DEEPSEEK_API_KEY")
+    ):
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY is required for the configured evaluator."
+        )
+    print(
+        json.dumps(
+            {
+                "status": "passed",
+                "gold_solver_backend": config["generation"][
+                    "gold_solver_backend"
+                ],
+                "sympy_version": sympy.__version__,
+                "sympy_self_test_answer": self_test.canonical_answer,
+                "output_root": storage_paths["output_root"],
+                "temp_dir": storage_paths["temp_dir"],
+                "fixed_test_question_count": len(fixed_questions),
+                "fixed_test_sha256": fixed_metadata.get("sha256"),
+                "finetune_enabled": bool(config["finetune"]["enabled"]),
+                "cuda_available": cuda_available,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _cli_option_present(*names):
     return any(
         token == name or token.startswith(name + "=")
@@ -4867,7 +5072,7 @@ def _configuration_cli_overrides(args, config_explicit):
     )
 
 
-def _apply_resolved_configuration(args, config, config_explicit):
+def _apply_resolved_configuration(args, config):
     args.agent_modelname = str(config["models"]["evaluator"]["model_name"])
     args.test_taker_modelname = str(config["models"]["test_taker"]["model_path"])
     args.exp_mode = str(config["experiment"]["exp_mode"])
@@ -4896,7 +5101,7 @@ def _apply_resolved_configuration(args, config, config_explicit):
         f"{config['adaptive_sampling']['target_accuracy_low']},"
         f"{config['adaptive_sampling']['target_accuracy_high']}"
     )
-    if config_explicit and not _cli_option_present(
+    if not _cli_option_present(
         "--outfile_prefix1",
         "--outfile-prefix1",
     ):
@@ -4921,13 +5126,17 @@ def main():
             temporary_overrides=args.override,
             validate_paths=True,
         )
+        storage_paths = configure_runtime_storage(resolved_config)
         _apply_resolved_configuration(
             args,
             resolved_config,
-            config_explicit,
         )
-    except ConfigurationError as exc:
+    except (OSError, RuntimeError) as exc:
         parser.error(str(exc))
+    print(
+        "[Storage] output_root="
+        f"{storage_paths['output_root']} temp_dir={storage_paths['temp_dir']}"
+    )
     for name in (
         "num_iters",
         "export_interval",
@@ -4942,6 +5151,15 @@ def main():
         parser.error("--disk_warning_threshold cannot be negative")
     if args.mode == "data_flywheel" and args.use_helm == "yes":
         parser.error("data_flywheel requires a local non-HELM test taker")
+    if args.preflight_only:
+        try:
+            return _run_preflight(resolved_config, storage_paths)
+        except Exception as exc:
+            print(
+                "[Preflight] status=failed error="
+                f"{type(exc).__name__}: {exc}"
+            )
+            return 2
 
     output_root = _output_root(args.outfile_prefix1)
     os.makedirs(output_root, exist_ok=True)

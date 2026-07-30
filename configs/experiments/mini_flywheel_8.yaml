@@ -1,0 +1,54 @@
+extends: quick_flywheel_27.yaml
+
+schema_version: "1.0"
+
+# Low-cost functional verification:
+# fixed-set baseline -> 8 generated questions -> one QLoRA epoch ->
+# the same immutable fixed-set evaluation.
+experiment:
+  name: mini_math_flywheel_8
+  mode: data_flywheel
+  num_iterations: 1
+  max_cycles: 1
+  questions_per_iteration: 8
+  export_interval: 1
+  clean_cycle_cache: true
+  resume: true
+
+generation:
+  max_questions_per_prompt: 1
+  max_quota_repair_rounds: 3
+  minimum_verified_questions: 1
+  gold_solver_backend: sympy
+
+evaluator_pipeline:
+  enabled: false
+
+# A functional smoke run must not require a complete 25/75 block. Do not use
+# this relaxed mix for a production-quality training run.
+training_mix:
+  strict_correct_incorrect_ratio: false
+  minimum_samples: 1
+
+finetune:
+  enabled: true
+  gpu: "0"
+  epochs: 1
+  batch_size: 1
+  lora_rank: 4
+  max_seq_length: 1024
+  learning_rate: 2.0e-4
+  save_step_metrics: true
+  merge_adapter: true
+
+fixed_test:
+  enabled: true
+  evaluate_baseline: true
+  evaluate_after_each_training_cycle: true
+  fail_on_training_leakage: true
+
+tracking:
+  wandb:
+    enabled: false
+    mode: disabled
+    log_model: false
