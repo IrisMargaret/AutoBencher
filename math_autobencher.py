@@ -50,6 +50,7 @@ from autobencher.fixed_benchmark import (
     fixed_benchmark_summary,
     load_fixed_test_set,
 )
+from autobencher.similarity import build_similarity_batch
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
@@ -1996,7 +1997,7 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
             canonical_answer,
         )
         deterministic_agreement = None
-        if deterministic_truth.success:
+        if evaluator_enabled and deterministic_truth.success:
             deterministic_agreement = answers_equivalent(
                 canonical_answer,
                 deterministic_truth.canonical_answer,
@@ -2021,6 +2022,15 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                     }
                 )
                 continue
+        elif deterministic_truth.success:
+            # With the SymPy backend, evaluator_truth is constructed directly
+            # from this exact TruthSolver result. Sending set/interval/symbolic
+            # answers through the generic cross-backend normalizer can only
+            # introduce a false disagreement and pointless repair rounds.
+            deterministic_agreement = {
+                "equivalent": True,
+                "method": "same_sympy_result",
+            }
         if evaluator_enabled:
             evaluator_audit_summary = {
                 key: value
@@ -4993,6 +5003,15 @@ def _run_preflight(config, storage_paths):
             "SymPy gold solver self-test failed: "
             f"{self_test.to_dict()}"
         )
+    similarity_probe_config = dict(config["dataset"])
+    # Probe MinHash independently. Loading the embedding model here would make
+    # a nominal preflight download a large optional model.
+    similarity_probe_config["sentence_transformers_enabled"] = False
+    similarity_probe_config["sentence_transformers_required"] = False
+    similarity_probe = build_similarity_batch(
+        ["solve x + 2 = 5", "solve x + 2 = 6"],
+        similarity_probe_config,
+    )
     fixed_questions = []
     fixed_metadata = {}
     if config["fixed_test"]["enabled"]:
@@ -5029,6 +5048,14 @@ def _run_preflight(config, storage_paths):
                 ],
                 "sympy_version": sympy.__version__,
                 "sympy_self_test_answer": self_test.canonical_answer,
+                "minhash_backend": similarity_probe.minhash_backend,
+                "minhash_backend_error": similarity_probe.minhash_error,
+                "sentence_transformers_enabled": bool(
+                    config["dataset"]["sentence_transformers_enabled"]
+                ),
+                "sentence_transformers_required": bool(
+                    config["dataset"]["sentence_transformers_required"]
+                ),
                 "output_root": storage_paths["output_root"],
                 "temp_dir": storage_paths["temp_dir"],
                 "fixed_test_question_count": len(fixed_questions),

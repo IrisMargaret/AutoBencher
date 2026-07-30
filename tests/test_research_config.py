@@ -62,6 +62,11 @@ def test_mini_flywheel_profile_runs_the_full_chain_with_sympy_gold():
     assert config["finetune"]["enabled"] is True
     assert config["finetune"]["epochs"] == 1
     assert config["training_mix"]["minimum_samples"] == 1
+    assert config["dataset"]["allow_optional_backend_fallback"] is True
+    assert config["dataset"]["datasketch_enabled"] is True
+    assert config["dataset"]["datasketch_required"] is False
+    assert config["dataset"]["sentence_transformers_enabled"] is False
+    assert config["dataset"]["sentence_transformers_required"] is False
     assert config["fixed_test"]["evaluate_baseline"] is True
     assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
 

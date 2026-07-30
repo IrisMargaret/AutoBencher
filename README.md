@@ -32,6 +32,9 @@ Multilingual entry points have been removed from this math-only repository.
 - Rejects training questions that are identical or highly similar to the fixed
   test set using exact/template checks, datasketch MinHash/LSH informed by
   Text-Dedup, and Sentence-Transformers semantic similarity.
+- The 8-question functional profile may use the deterministic built-in MinHash
+  with exhaustive pair comparison when optional datasketch is absent. The
+  production profiles still require datasketch and Sentence-Transformers.
 - Supports Outlines with Guidance fallback for token-constrained JSON from
   directly loaded local models, and W&B tracking in configurable offline,
   online, or disabled mode.

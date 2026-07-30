@@ -722,6 +722,68 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
             self.assertEqual(summary["gold_solver_backend"], "sympy")
             self.assertEqual(summary["llm_gold_solver_calls"], 0)
 
+    def test_sympy_gold_does_not_cross_compare_its_own_symbolic_answer(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "subcat0"))
+            with (
+                patch.object(
+                    math_autobencher,
+                    "gen_from_prompt",
+                    return_value=self._result(
+                        [
+                            {
+                                "question": (
+                                    "Solve for x: x^2 - 5*x + 6 = 0."
+                                )
+                            }
+                        ]
+                    ),
+                ) as generate,
+                patch.object(
+                    math_autobencher,
+                    "answers_equivalent",
+                    side_effect=AssertionError(
+                        "SymPy result must not be compared with itself"
+                    ),
+                ),
+            ):
+                result = (
+                    math_autobencher._generate_question_text_with_truth(
+                        self._description(
+                            "Polynomials and Inequalities"
+                        ),
+                        "model",
+                        None,
+                        object(),
+                        prefix,
+                        question_count=1,
+                        research_config=config,
+                    )
+                )
+
+            self.assertEqual(generate.call_count, 1)
+            self.assertEqual(result[0][0]["canonical_answer"], "{2, 3}")
+            self.assertEqual(
+                result[0][0]["truth_validation_details"]["solver_backend"],
+                "sympy",
+            )
+            failures = json.loads(
+                Path(
+                    f"{prefix}.generation_failures.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertFalse(
+                any(
+                    item.get("failure_type")
+                    == FailureType.TRUTH_DISAGREEMENT.value
+                    for item in failures
+                )
+            )
+
     def test_leaked_partial_gold_adds_feedback_before_retry(self):
         config, _ = load_project_config(
             ROOT / "configs" / "math_flywheel_smoke_test.yaml",

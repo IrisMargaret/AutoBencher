@@ -427,6 +427,7 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "datasketch_enabled": True,
         "datasketch_required": True,
         "datasketch_lsh_enabled": True,
+        "allow_optional_backend_fallback": False,
         "sentence_transformers_enabled": True,
         "sentence_transformers_required": True,
         "sentence_transformers_model": (
@@ -1135,6 +1136,7 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "dataset.datasketch_enabled",
         "dataset.datasketch_required",
         "dataset.datasketch_lsh_enabled",
+        "dataset.allow_optional_backend_fallback",
         "dataset.sentence_transformers_enabled",
         "dataset.sentence_transformers_required",
         "dataset.sentence_transformers_local_files_only",
@@ -1349,6 +1351,10 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         mode == "data_flywheel"
         and _get(config, "fixed_test.enabled")
         and _get(config, "fixed_test.fail_on_training_leakage")
+        and not _get(
+            config,
+            "dataset.allow_optional_backend_fallback",
+        )
         and not _get(config, "dataset.sentence_transformers_required")
     ):
         raise ConfigurationError(
@@ -1360,6 +1366,10 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
     if (
         mode == "data_flywheel"
         and _get(config, "dataset.text_dedup_enabled")
+        and not _get(
+            config,
+            "dataset.allow_optional_backend_fallback",
+        )
         and not _get(config, "dataset.datasketch_required")
     ):
         raise ConfigurationError(

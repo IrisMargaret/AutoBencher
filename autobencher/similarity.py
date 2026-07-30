@@ -307,7 +307,7 @@ def build_similarity_batch(
             )
             datasketch_sketches = ()
             minhash_lsh = None
-            minhash_backend = "text_dedup_fallback"
+            minhash_backend = "builtin_minhash_exhaustive"
     elif minhash_enabled:
         signatures = tuple(
             _fallback_minhash_signature(
@@ -318,7 +318,7 @@ def build_similarity_batch(
             )
             for text in normalized_texts
         )
-        minhash_backend = "text_dedup_fallback"
+        minhash_backend = "builtin_minhash_exhaustive"
     else:
         signatures = tuple(
             tuple(0 for _ in range(num_perm))

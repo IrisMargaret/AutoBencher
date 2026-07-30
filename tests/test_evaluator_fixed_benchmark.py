@@ -247,6 +247,31 @@ def test_required_datasketch_backend_fails_closed(config):
         )
 
 
+def test_optional_datasketch_uses_builtin_exhaustive_minhash(config):
+    config["dataset"].update(
+        {
+            "text_dedup_enabled": True,
+            "datasketch_enabled": True,
+            "datasketch_required": False,
+            "sentence_transformers_enabled": False,
+            "sentence_transformers_required": False,
+        }
+    )
+    with patch(
+        "autobencher.similarity._datasketch_minhash",
+        side_effect=MinHashBackendUnavailable("datasketch unavailable"),
+    ):
+        batch = build_similarity_batch(
+            ["Solve x + 2 = 5.", "Solve x + 2 = 6."],
+            config["dataset"],
+        )
+
+    assert batch.minhash_backend == "builtin_minhash_exhaustive"
+    assert "datasketch unavailable" in batch.minhash_error
+    assert batch.minhash_lsh is None
+    assert batch.pair(0, 1)["minhash_similarity"] > 0
+
+
 def test_datasketch_backend_records_lsh_candidates(config):
     class FakeSketch:
         def __init__(self, value):

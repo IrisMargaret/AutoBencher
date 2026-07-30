@@ -72,11 +72,18 @@ python run_scripts.py math \
 
 - `gold_solver_backend: sympy`
 - SymPy 自检答案 `4`
+- 实际 MinHash 后端；服务器未安装 `datasketch` 时，8 题配置会显示
+  `builtin_minhash_exhaustive`
 - 固定测试集题数与 SHA-256
 - VEPFS 输出和临时目录
 - `cuda_available: true`
 
 任一项失败都应先修复，不要直接开始完整运行。
+
+8 题配置的训练集去重会优先使用 `datasketch`。若该可选包不存在，则自动使用
+项目内置的确定性 MinHash，并对小数据集执行完整两两比较，不会再因
+`MinHashBackendUnavailable` 中断。该回退只用于功能链路；27 题和正式配置仍
+要求 `datasketch` 与 Sentence-Transformers，缺失时会失败并提示安装依赖。
 
 ## 4. 执行 8 题完整链路
 
@@ -90,6 +97,10 @@ python run_scripts.py math \
 这个命令依次执行：固定集 baseline、8 道题生成与 SymPy gold 求解、
 test-taker 作答、训练集导出、1 个 epoch 的 QLoRA、adapter 合并、固定集
 复测。
+
+如果上一轮已经在 `training_export` 阶段因缺少 `datasketch` 失败，更新代码后
+直接用相同命令重跑即可。程序会创建新的 `test_<N>` 自包含运行目录；失败的
+旧目录会保留用于审计，不会把其中的半成品混入新训练集。
 
 查找本次运行目录：
 

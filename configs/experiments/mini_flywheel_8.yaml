@@ -24,6 +24,17 @@ generation:
 evaluator_pipeline:
   enabled: false
 
+# Keep the functional smoke chain dependency-light. datasketch is preferred
+# when installed; otherwise the exporter uses deterministic built-in MinHash
+# with exhaustive pair comparison. Production profiles remain fail-closed.
+dataset:
+  allow_optional_backend_fallback: true
+  datasketch_enabled: true
+  datasketch_required: false
+  datasketch_lsh_enabled: true
+  sentence_transformers_enabled: false
+  sentence_transformers_required: false
+
 # A functional smoke run must not require a complete 25/75 block. Do not use
 # this relaxed mix for a production-quality training run.
 training_mix:
