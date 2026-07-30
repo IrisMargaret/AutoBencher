@@ -145,6 +145,11 @@ jq '.rejection_reasons' \
 ```
 
 常见原因是与固定集过度相似、答案解析失败或训练推理步骤不合格。
+修复后的程序会在 `[BuildDataset]` 日志中直接打印
+`rejection_reasons`；当样本少于 `training_mix.minimum_samples` 时会明确失败，
+不会把“未执行微调”误报为完整链路成功。旧版本若显示 8 条全部为
+`missing_gold_reasoning_steps`，是标准化阶段丢失 SymPy 推理步骤所致，更新
+代码并创建一次新的运行即可。
 
 ## 6. 扩大到 27 题
 

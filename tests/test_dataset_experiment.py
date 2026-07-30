@@ -2,9 +2,11 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import math_autobencher
 from autobencher.attribution_eval import evaluate_review_csv, export_review_sample
 from autobencher.config import load_resolved_config
 from autobencher.dataset import (
@@ -126,6 +128,31 @@ def test_alpaca_output_contains_verified_steps_and_answer(config):
     assert payload["reasoning_summary"] == source["gold_reasoning_summary"]
     assert payload["final_answer"] == "84"
     assert payload["answer_type"] == "integer"
+
+
+def test_canonicalization_preserves_sympy_training_reasoning(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    source = record(
+        "Compute 12 times 7.",
+        "84",
+        gold_reasoning_summary=[
+            "Multiply twelve by seven to obtain 84.",
+            "Check that 84 divided by seven equals twelve.",
+        ],
+    )
+
+    canonical = canonicalize_math_record(source)
+    selected, manifest, rejected = build_training_dataset(
+        [canonical],
+        config,
+    )
+
+    assert canonical["gold_reasoning_summary"] == source[
+        "gold_reasoning_summary"
+    ]
+    assert len(selected) == 1
+    assert manifest["selected_count"] == 1
+    assert rejected == []
 
 
 def test_training_rejects_plan_only_reasoning(config):
@@ -380,6 +407,109 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
     assert (run.run_dir / "cycle").is_dir()
     assert (run.run_dir / "environment.json").is_file()
     assert (run.run_dir / "run_manifest.json").is_file()
+
+
+def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(
+    tmp_path,
+    config,
+    monkeypatch,
+):
+    config["experiment"]["mode"] = "data_flywheel"
+    config["fixed_test"]["enabled"] = False
+    config["finetune"]["enabled"] = False
+    cycle_root = tmp_path / "cycle"
+    cycle_root.mkdir()
+    finalized = {}
+    research_run = SimpleNamespace(
+        config=config,
+        config_hash="test-config",
+        cycle_root=cycle_root,
+        run_dir=tmp_path,
+        project_root=ROOT,
+        run_id="zero-sample-test",
+        metadata=lambda: {
+            "run_id": "zero-sample-test",
+            "config_hash": "test-config",
+        },
+        logger=SimpleNamespace(event=lambda *_args, **_kwargs: None),
+        save_cycle_artifact=lambda *_args, **_kwargs: None,
+        finalize=lambda status, summary: finalized.update(
+            {"status": status, "summary": summary}
+        ),
+    )
+    args = SimpleNamespace(
+        outfile_prefix1=str(tmp_path / "math."),
+        mode="data_flywheel",
+        agent_modelname="agent",
+        test_taker_modelname="test-taker",
+        num_iters=1,
+        max_cycle=1,
+        export_interval=1,
+        finetune_gpu="0",
+        finetune_epoch=1,
+        finetune_batch=1,
+        lora_rank=4,
+        use_helm="no",
+        disk_warning_threshold=0,
+        research_run=research_run,
+    )
+
+    def completed_iteration(*_args, **_kwargs):
+        iteration_dir = cycle_root / "cycle_1" / "iter_1"
+        iteration_dir.mkdir(parents=True)
+        dump_standard_json(
+            [],
+            iteration_dir / "math.test_taker_inference.json",
+        )
+        return {"global_accuracy": 0.0, "generation_result": {}}
+
+    empty_manifest = {
+        "strict_ratio_satisfied": True,
+        "minimum_sample_requirement_met": False,
+        "rejection_reasons": {"missing_gold_reasoning_steps": 1},
+        "template_cluster_count": 0,
+        "selected_mix_counts": {},
+    }
+    monkeypatch.setattr(
+        math_autobencher,
+        "_load_test_taker_info",
+        lambda *_args, **_kwargs: ("model", None, object()),
+    )
+    monkeypatch.setattr(
+        math_autobencher,
+        "_release_model_info",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        math_autobencher,
+        "_run_math_iteration",
+        completed_iteration,
+    )
+    monkeypatch.setattr(
+        math_autobencher,
+        "_cleanup_iteration_cache",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        math_autobencher,
+        "check_disk_space",
+        lambda *_args, **_kwargs: {"ok": True, "free_gb": 1.0},
+    )
+    monkeypatch.setattr(
+        math_autobencher,
+        "build_training_dataset",
+        lambda *_args, **_kwargs: ([], empty_manifest, [{}]),
+    )
+
+    result = math_autobencher._run_autobencher(
+        args,
+        agent_info=("agent", None, object()),
+        evaluator_info=("evaluator", None, object()),
+    )
+
+    assert result == 0
+    assert finalized["status"] == "completed"
+    assert finalized["summary"]["iteration_count"] == 1
 
 
 def test_error_attribution_review_export_and_metrics(tmp_path):

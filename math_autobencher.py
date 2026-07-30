@@ -4596,11 +4596,19 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     },
                     training_dir / "finetune_config.json",
                 )
+                rejection_reason_counts = dataset_manifest[
+                    "rejection_reasons"
+                ]
                 args.research_run.logger.event(
                     "INFO",
                     "BuildDataset",
                     "stage_completed",
-                    f"selected={exported_count} rejected={len(rejected)}",
+                    (
+                        f"selected={exported_count} "
+                        f"rejected={len(rejected)} "
+                        "rejection_reasons="
+                        f"{json.dumps(rejection_reason_counts, sort_keys=True)}"
+                    ),
                     cycle=cycle_number,
                     metrics=dataset_manifest,
                 )
@@ -4620,6 +4628,20 @@ def _run_autobencher(args, agent_info, evaluator_info):
             )
             cycle_entry["training_sample_count"] = exported_count
             _save_cycle_record(cycle_record_path, cycle_record)
+            if (
+                getattr(args, "research_run", None)
+                and bool(args.research_run.config["finetune"]["enabled"])
+                and not dataset_manifest["minimum_sample_requirement_met"]
+            ):
+                raise RuntimeError(
+                    "Training dataset has fewer eligible samples than "
+                    "training_mix.minimum_samples: "
+                    f"selected={exported_count}, "
+                    "required="
+                    f"{args.research_run.config['training_mix']['minimum_samples']}, "
+                    "rejection_reasons="
+                    f"{json.dumps(rejection_reason_counts, sort_keys=True)}"
+                )
             if exported_count == 0:
                 cycle_entry["status"] = "completed_without_training"
                 cycle_entry["finetune_status"] = "no_train_eligible_samples"
@@ -4876,26 +4898,27 @@ def _run_autobencher(args, agent_info, evaluator_info):
             iteration_question_counts.append(
                 len(read_json_records(path))
             )
+        experiment_summary = {
+            **args.research_run.metadata(),
+            "status": "completed",
+            "cycle_count": cycle_limit,
+            "iteration_count": len(iteration_question_counts),
+            "total_questions": sum(iteration_question_counts),
+            "hard_pool_size": len(
+                read_json_records(os.path.join(output_root, "hard_pool.json"))
+            ),
+            "active_test_taker_model": current_test_taker_model,
+            "fixed_test": cycle_record.get("fixed_test", {}),
+        }
         atomic_json(
-            {
-                **args.research_run.metadata(),
-                "status": "completed",
-                "cycle_count": cycle_limit,
-                "iteration_count": len(iteration_question_counts),
-                "total_questions": sum(iteration_question_counts),
-                "hard_pool_size": len(
-                    read_json_records(os.path.join(output_root, "hard_pool.json"))
-                ),
-                "active_test_taker_model": current_test_taker_model,
-                "fixed_test": cycle_record.get("fixed_test", {}),
-            },
+            experiment_summary,
             args.research_run.run_dir / "experiment_summary.json",
         )
         args.research_run.finalize(
             "completed",
             {
-                "cycle_count": cycle_limit,
-                "iteration_count": len(all_iteration_summaries),
+                "cycle_count": experiment_summary["cycle_count"],
+                "iteration_count": experiment_summary["iteration_count"],
                 "active_test_taker_model": current_test_taker_model,
             },
         )
