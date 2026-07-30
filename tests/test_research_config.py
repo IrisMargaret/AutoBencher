@@ -9,7 +9,11 @@ from autobencher.config import (
     load_resolved_config,
     str2bool,
 )
-from run_scripts import _strip_implicit_config_options, build_command
+from run_scripts import (
+    _resolved_execution_mode,
+    _strip_implicit_config_options,
+    build_command,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -283,3 +287,21 @@ def test_launcher_forwards_preflight_without_creating_legacy_output():
     )
     assert "--preflight-only" in command
     assert "--outfile_prefix1" not in command
+
+
+def test_launcher_announces_data_flywheel_mode_from_yaml():
+    args = type(
+        "Args",
+        (),
+        {
+            "execution_mode": "eval",
+            "config": str(MINI_FLYWHEEL_CONFIG),
+            "environment": None,
+            "override": [],
+        },
+    )()
+
+    mode, source = _resolved_execution_mode(args, ["--config", args.config])
+
+    assert mode == "data_flywheel"
+    assert source == "config"

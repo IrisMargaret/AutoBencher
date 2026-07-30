@@ -4898,6 +4898,25 @@ def _run_autobencher(args, agent_info, evaluator_info):
             iteration_question_counts.append(
                 len(read_json_records(path))
             )
+        baseline_summary = cycle_record.get("fixed_test", {}).get(
+            "baseline",
+            {},
+        )
+        trained_cycle_summaries = [
+            item
+            for item in cycle_record.get("cycles", [])
+            if item.get("finetune_status") == "completed"
+            and isinstance(item.get("fixed_test"), dict)
+        ]
+        final_fixed_summary = (
+            trained_cycle_summaries[-1]["fixed_test"]
+            if trained_cycle_summaries
+            else {}
+        )
+        training_sample_count = sum(
+            int(item.get("training_sample_count", 0) or 0)
+            for item in cycle_record.get("cycles", [])
+        )
         experiment_summary = {
             **args.research_run.metadata(),
             "status": "completed",
@@ -4907,6 +4926,10 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "hard_pool_size": len(
                 read_json_records(os.path.join(output_root, "hard_pool.json"))
             ),
+            "training_sample_count": training_sample_count,
+            "baseline_accuracy": baseline_summary.get("accuracy"),
+            "final_accuracy": final_fixed_summary.get("accuracy"),
+            "accuracy_delta": final_fixed_summary.get("accuracy_delta"),
             "active_test_taker_model": current_test_taker_model,
             "fixed_test": cycle_record.get("fixed_test", {}),
         }
@@ -4921,6 +4944,28 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 "iteration_count": experiment_summary["iteration_count"],
                 "active_test_taker_model": current_test_taker_model,
             },
+        )
+        print(
+            "[MathFlywheel] run_completed "
+            + json.dumps(
+                {
+                    "status": "completed",
+                    "run_dir": str(args.research_run.run_dir).replace(
+                        "\\",
+                        "/",
+                    ),
+                    "training_sample_count": training_sample_count,
+                    "baseline_accuracy": experiment_summary[
+                        "baseline_accuracy"
+                    ],
+                    "final_accuracy": experiment_summary["final_accuracy"],
+                    "accuracy_delta": experiment_summary["accuracy_delta"],
+                    "active_test_taker_model": current_test_taker_model,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            flush=True,
         )
     return 0
 

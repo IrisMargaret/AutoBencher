@@ -92,6 +92,22 @@ def _strip_implicit_config_options(command, argv):
     return stripped
 
 
+def _resolved_execution_mode(args, argv):
+    """Report the same execution mode that the child process will resolve."""
+    if _option_present(argv, "--mode"):
+        return str(args.execution_mode), "cli"
+    if args.config:
+        from autobencher.config import load_resolved_config
+
+        config, _ = load_resolved_config(
+            args.config,
+            environment_path=args.environment,
+            temporary_overrides=args.override,
+        )
+        return str(config["experiment"]["mode"]), "config"
+    return str(args.execution_mode), "launcher_default"
+
+
 # [ADDED] Parse explicit Boolean CLI values consistently.
 def parse_bool(value):
     if isinstance(value, bool):
@@ -319,9 +335,14 @@ def main():
             parser.error(f"--{name} must be at least 1")
     if args.disk_warning_threshold < 0:
         parser.error("--disk_warning_threshold cannot be negative")
-    # [MODIFIED] Announce the selected math execution mode and core metrics.
+    # [MODIFIED] Announce the effective mode after YAML/environment/override
+    # resolution instead of the launcher's implicit argparse default.
+    execution_mode, mode_source = _resolved_execution_mode(
+        args,
+        sys.argv[1:],
+    )
     print(
-        f"[MathFlywheel] mode={args.execution_mode}; metrics: "
+        f"[MathFlywheel] mode={execution_mode} source={mode_source}; metrics: "
         "global_accuracy, subcategory_coverage, hard_samples"
     )
     model = args.model or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")

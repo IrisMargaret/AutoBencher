@@ -413,6 +413,7 @@ def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(
     tmp_path,
     config,
     monkeypatch,
+    capsys,
 ):
     config["experiment"]["mode"] = "data_flywheel"
     config["fixed_test"]["enabled"] = False
@@ -510,6 +511,9 @@ def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(
     assert result == 0
     assert finalized["status"] == "completed"
     assert finalized["summary"]["iteration_count"] == 1
+    output = capsys.readouterr().out
+    assert "[MathFlywheel] run_completed" in output
+    assert '"training_sample_count": 0' in output
 
 
 def test_error_attribution_review_export_and_metrics(tmp_path):

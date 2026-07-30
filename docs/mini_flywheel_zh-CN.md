@@ -129,6 +129,8 @@ find "$RUN_DIR/models" -name config.json -type f -print
 
 通过标准：
 
+- 终端最后输出 `[MathFlywheel] run_completed`，其中包含训练样本数、
+  baseline accuracy、微调后 accuracy、accuracy delta 和模型目录。
 - `cycle_record.json` 的最终状态为 `completed`。
 - `training_sample_count` 大于 0。
 - `finetune_status` 为 `completed`。
