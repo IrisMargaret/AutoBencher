@@ -35,7 +35,29 @@
         "required": [
           "response_span",
           "reason"
-        ]
+        ],
+        "properties": {
+          "response_span": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "check_name": {
+            "type": "string"
+          },
+          "expected": {
+            "type": "string"
+          },
+          "observed": {
+            "type": "string"
+          },
+          "step_index": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       }
     },
     "attribution_confidence": {
@@ -48,6 +70,22 @@
     },
     "deterministic_checks": {
       "type": "object"
+    },
+    "attribution_method": {
+      "type": "string"
+    },
+    "verification_tier": {
+      "type": "string"
+    },
+    "first_error_step": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "taxonomy_version": {
+      "type": "string"
     }
   },
   "additionalProperties": false

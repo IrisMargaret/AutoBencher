@@ -85,6 +85,7 @@ def test_mixed_number_alias_normalizes_to_rational(config):
         ("answer", "7/9", "rational"),
         ("result_kind", "12 kg", "unit_value"),
         ("custom_kind", "{1, 2}", "set"),
+        ("auto", r"\frac{7}{9}", "symbolic_expression"),
         ("unknown", "plain response", "text"),
     ],
 )
@@ -323,6 +324,123 @@ def test_low_confidence_attribution_becomes_unknown(config):
     result = attribute_error({"question": "What is 5 + 3?"}, parsed, equivalent, config)
     assert result["primary_error_tag"] == "unknown_error"
     assert result["needs_review"] is True
+
+
+def test_attribution_locates_first_invalid_arithmetic_step(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": [
+                "First compute 5 + 3 = 9.",
+                "Therefore the answer is 9.",
+            ],
+            "final_answer": "9",
+        },
+    }
+    equivalent = answers_equivalent("8", "9", "integer", config)
+    result = attribute_error(
+        {
+            "question": "What is 5 + 3?",
+            "canonical_answer": "8",
+            "answer_type": "integer",
+        },
+        parsed,
+        equivalent,
+        config,
+    )
+    assert result["primary_error_tag"] == "arithmetic_computation_error"
+    assert result["first_error_step"] == 0
+    assert result["attribution_confidence"] == pytest.approx(0.98)
+    assert result["evidence"][0]["check_name"] == (
+        "reasoning_arithmetic_equality"
+    )
+
+
+def test_attribution_detects_answer_transfer_after_valid_reasoning(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": ["Compute 5 + 3 = 8."],
+            "final_answer": "9",
+        },
+    }
+    equivalent = answers_equivalent("8", "9", "integer", config)
+    result = attribute_error(
+        {
+            "question": "What is 5 + 3?",
+            "canonical_answer": "8",
+            "answer_type": "integer",
+        },
+        parsed,
+        equivalent,
+        config,
+    )
+    assert result["primary_error_tag"] == "answer_transfer_error"
+    assert result["evidence"][0]["check_name"] == (
+        "reasoning_to_final_answer_consistency"
+    )
+
+
+def test_attribution_uses_truth_solver_constraint_evidence(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": ["Substitute the proposed pair."],
+            "final_answer": "(1, 1)",
+        },
+    }
+    equivalent = answers_equivalent(
+        "(2, 3)",
+        "(1, 1)",
+        "ordered_tuple",
+        config,
+    )
+    result = attribute_error(
+        {
+            "canonical_answer": "(2, 3)",
+            "answer_type": "ordered_tuple",
+            "test_taker_truth_validation": {
+                "substitution_passed": False,
+                "equations_total": 2,
+                "substitution_details": [
+                    {
+                        "equation": "x + y = 5",
+                        "passed": False,
+                        "residual": "-3",
+                    }
+                ],
+            },
+        },
+        parsed,
+        equivalent,
+        config,
+    )
+    assert result["primary_error_tag"] == "constraint_violation"
+    assert result["evidence"][0]["check_name"] == (
+        "truth_solver_substitution"
+    )
+
+
+def test_attribution_rejects_choice_outside_available_options(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": ["Select an option."],
+            "final_answer": "Z",
+        },
+    }
+    equivalent = answers_equivalent("B", "Z", "multiple_choice", config)
+    result = attribute_error(
+        {
+            "canonical_answer": "B",
+            "answer_type": "multiple_choice",
+            "choices": ["1", "2", "3", "4"],
+        },
+        parsed,
+        equivalent,
+        config,
+    )
+    assert result["primary_error_tag"] == "invalid_multiple_choice"
 
 
 def test_generated_question_schema_accepts_complete_record():

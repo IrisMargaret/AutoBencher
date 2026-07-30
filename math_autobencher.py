@@ -22,7 +22,7 @@ import os, argparse, ast, json, tqdm
 from pydantic import BaseModel, Extra, root_validator
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 from time import sleep
-from collections import defaultdict
+from collections import Counter, defaultdict
 import numpy as np
 
 from autobencher.config import (
@@ -31,6 +31,7 @@ from autobencher.config import (
     load_project_config,
     str2bool,
 )
+from autobencher.attribution_eval import export_review_sample
 from autobencher.coverage import coverage_metrics, generation_schedule
 from autobencher.dataset import (
     build_training_dataset,
@@ -2389,19 +2390,55 @@ def _ask_question_v3(
                 hard_pool.get_variant_context(
                     plan_line["category"],
                     plan_line["sub_category"],
+                    confidence_threshold=float(
+                        research_config["error_attribution"][
+                            "confidence_threshold"
+                        ]
+                    ),
                 )
                 if enable_hard_sample_guidance and is_hard_variant and hard_pool
                 else ""
             )
             if is_hard_variant and hard_pool:
-                references = [
-                    sample.get("unique_key", "")[:16]
+                matching_samples = [
+                    sample
                     for sample in hard_pool.samples
                     if sample.get("sample_grade") == "train_eligible"
                     and sample.get("category") == plan_line["category"]
                     and sample.get("sub_category") == plan_line["sub_category"]
+                ]
+                references = [
+                    sample.get("unique_key", "")[:16]
+                    for sample in matching_samples
                 ][:12]
                 plan_line["reference_hard_sample_ids"] = references
+                error_counts = Counter(
+                    tag
+                    for sample in matching_samples
+                    if (
+                        sample.get("verification_tier") == "deterministic"
+                        and float(
+                            sample.get(
+                                "attribution_confidence",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                        >= float(
+                            research_config["error_attribution"][
+                                "confidence_threshold"
+                            ]
+                        )
+                        and bool(sample.get("evidence"))
+                    )
+                    for tag in sample.get("error_tags", [])
+                    if tag and tag != "unknown_error"
+                )
+                plan_line["target_error_type"] = (
+                    error_counts.most_common(1)[0][0]
+                    if error_counts
+                    else None
+                )
             question_json = _generate_question_text_with_truth(
                 plan_line,
                 agent_lm,
@@ -2974,6 +3011,9 @@ def test_and_eval(
                 candidate_truth_check = truth_solver.validate_candidate(
                     standardized["question"],
                     standardized["test_taker_response"],
+                )
+                standardized["test_taker_truth_validation"] = (
+                    candidate_truth_check
                 )
                 if candidate_truth_check.get("failure_type") == (
                     FailureType.PARTIAL_SOLUTION.value
@@ -3994,6 +4034,10 @@ def _run_math_iteration(
                     1.0,
                 ),
                 "needs_review": record.get("needs_review", False),
+                "attribution_method": record.get("attribution_method"),
+                "verification_tier": record.get("verification_tier"),
+                "first_error_step": record.get("first_error_step"),
+                "taxonomy_version": record.get("taxonomy_version"),
                 "deterministic_checks": record.get(
                     "deterministic_checks",
                     {},
@@ -4039,6 +4083,32 @@ def _run_math_iteration(
             ),
             "cache_status": "hit" if migrated_records else "generated",
         }
+        attribution_config = research_config["error_attribution"]
+        if bool(attribution_config.get("export_review_csv", False)):
+            review_path = (
+                research_run.iteration_dir(cycle_number, iter_number)
+                / "error_attribution_review.csv"
+            )
+            review_count = export_review_sample(
+                json_dict,
+                review_path,
+                sample_size=int(
+                    attribution_config.get("review_sample_size", 100)
+                ),
+                seed=(
+                    int(research_config["experiment"].get("seed", 42))
+                    + global_iter_number
+                ),
+            )
+            iteration_summary.update(
+                {
+                    "attribution_review_sample_count": review_count,
+                    "attribution_review_path": _relative_json_path(
+                        str(review_path),
+                        paths["output_root"],
+                    ),
+                }
+            )
         if not bool(args.clean_cycle_cache):
             research_run.export_iteration(
                 cycle_number,

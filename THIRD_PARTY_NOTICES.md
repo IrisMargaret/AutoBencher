@@ -112,3 +112,54 @@ data flywheel.
 - Use in this repository: optional Hugging Face Trainer metrics reporting.
   AutoBencher defaults to W&B offline mode; network upload requires explicitly
   selecting online mode in YAML.
+
+## OpenAI GSM8K
+
+- Project: https://github.com/openai/grade-school-math
+- License: MIT
+- Use in this repository: the public `test` split is sampled deterministically
+  as one component of the immutable arithmetic and word-problem holdout.
+  Worked solutions are not copied into model prompts or the transformed
+  benchmark; only the final answer and a solution hash are retained.
+
+## Hendrycks MATH
+
+- Project: https://github.com/hendrycks/math
+- License: MIT
+- Use in this repository: balanced deterministic samples from all seven public
+  subject configurations in the `test` split provide harder algebra, geometry,
+  number-theory, probability, and precalculus coverage.
+
+## Hendrycks MMLU
+
+- Project: https://github.com/hendrycks/test
+- License: MIT
+- Use in this repository: five mathematics-related `test` tasks provide a
+  fixed multiple-choice component. The benchmark renderer preserves the option
+  order and stores only the correct option label as the canonical answer.
+
+## DeepMind Mathematics Dataset
+
+- Project: https://github.com/google-deepmind/mathematics_dataset
+- License: Apache License 2.0
+- Use in this repository: optional local interpolation and extrapolation files
+  may be added to the fixed suite. Training files are rejected, and the local
+  copy must remain below the configured VEPFS data root.
+
+## Stanford DSPy
+
+- Project: https://github.com/stanfordnlp/dspy
+- License: MIT
+- Use in this repository: design reference for separating declarative
+  prediction contracts, modules, and measurable optimization objectives.
+  Error attribution remains deterministic at runtime; DSPy source code and a
+  DSPy runtime dependency are not vendored.
+
+## Ragas
+
+- Project: https://github.com/vibrantlabsai/ragas
+- License: Apache License 2.0
+- Use in this repository: design reference for decomposing quality into
+  independently measurable signals. Attribution audits report accuracy,
+  selective coverage, evidence coverage, inter-annotator agreement, macro-F1,
+  confidence calibration, and accuracy by verification tier.

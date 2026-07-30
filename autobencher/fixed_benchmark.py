@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -149,6 +149,10 @@ def load_fixed_test_set(
     metadata = {
         "schema_version": str(payload.get("schema_version", "1.0")),
         "name": str(payload.get("name", path.stem)),
+        "description": str(payload.get("description", "")),
+        "builder_manifest_sha256": payload.get(
+            "builder_manifest_sha256"
+        ),
         "path": str(path).replace("\\", "/"),
         "sha256": fixed_test_sha256(path),
         "question_count": len(questions),
@@ -158,6 +162,16 @@ def load_fixed_test_set(
             {"category": category, "sub_category": subcategory}
             for category, subcategory in missing
         ],
+        "source_counts": dict(
+            sorted(
+                Counter(
+                    str(record.get("source_dataset", "project_native"))
+                    for record in questions
+                ).items()
+            )
+        ),
+        "source_manifests": list(payload.get("sources", [])),
+        "selection_policy": dict(payload.get("selection_policy", {})),
     }
     return questions, metadata
 
@@ -178,6 +192,9 @@ def fixed_benchmark_summary(
     subcategory_groups: dict[tuple[str, str], dict[str, int]] = defaultdict(
         lambda: {"total": 0, "correct": 0}
     )
+    source_groups: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"total": 0, "correct": 0}
+    )
     parsed_confidences = []
     reasoning_record_count = 0
     semantic_judge_success_count = 0
@@ -194,6 +211,11 @@ def fixed_benchmark_summary(
         group = subcategory_groups[(category, subcategory)]
         group["total"] += 1
         group["correct"] += int(bool(record.get("is_correct")))
+        source = str(record.get("source_dataset", "project_native"))
+        source_groups[source]["total"] += 1
+        source_groups[source]["correct"] += int(
+            bool(record.get("is_correct"))
+        )
         parsed = record.get("parsed_response")
         if isinstance(parsed, Mapping):
             reasoning = parsed.get("reasoning_summary")
@@ -241,6 +263,18 @@ def fixed_benchmark_summary(
             subcategory_groups.items()
         )
     ]
+    source_statistics = [
+        {
+            "source_dataset": source,
+            **counts,
+            "accuracy": (
+                counts["correct"] / counts["total"]
+                if counts["total"]
+                else 0.0
+            ),
+        }
+        for source, counts in sorted(source_groups.items())
+    ]
     return {
         "stage": str(stage),
         "model_name": str(model_name).replace("\\", "/"),
@@ -266,4 +300,5 @@ def fixed_benchmark_summary(
         ),
         "answer_type_statistics": answer_type_statistics,
         "subcategory_statistics": subcategory_statistics,
+        "source_statistics": source_statistics,
     }

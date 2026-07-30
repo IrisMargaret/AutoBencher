@@ -390,10 +390,14 @@ SAFE_DEFAULTS: dict[str, Any] = {
     "error_attribution": {
         "enabled": True,
         "confidence_threshold": 0.70,
+        "rounding_relative_tolerance": 0.01,
+        "rounding_absolute_tolerance": 0.01,
         "allow_multiple_tags": True,
         "require_primary_tag": True,
         "require_evidence": True,
         "low_confidence_tag": "unknown_error",
+        "export_review_csv": True,
+        "review_sample_size": 100,
     },
     "dataset": {
         "exact_dedup": True,
@@ -984,6 +988,7 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "models.evaluator.max_retries",
         "models.test_taker.max_retries",
         "evaluator_pipeline.max_parallel_questions",
+        "error_attribution.review_sample_size",
     ):
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -1154,6 +1159,7 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "fixed_test.evaluate_baseline",
         "fixed_test.evaluate_after_each_training_cycle",
         "fixed_test.fail_on_training_leakage",
+        "error_attribution.export_review_csv",
     ):
         if not isinstance(_get(config, path), bool):
             raise ConfigurationError(path, "must be a Boolean")
@@ -1275,6 +1281,8 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "dataset.text_dedup_similarity_threshold",
         "dataset.holdout_text_dedup_similarity_threshold",
         "error_attribution.confidence_threshold",
+        "error_attribution.rounding_relative_tolerance",
+        "error_attribution.rounding_absolute_tolerance",
         "evaluator_pipeline.semantic_judge_confidence_threshold",
     ):
         value = _get(config, path)

@@ -1,0 +1,57 @@
+schema_version: "1.0"
+name: open_math_fixed_suite_v1
+description: >-
+  Reproducible evaluation-only union of public test splits. Selection is
+  deterministic, source solutions never enter model prompts, and all downloaded
+  data must be stored under the configured VEPFS data root.
+
+sources:
+  - type: gsm8k
+    dataset: openai/gsm8k
+    config: main
+    split: test
+    samples: 100
+    seed: 1701
+    revision: main
+
+  - type: math
+    dataset: EleutherAI/hendrycks_math
+    split: test
+    configs:
+      - algebra
+      - counting_and_probability
+      - geometry
+      - intermediate_algebra
+      - number_theory
+      - prealgebra
+      - precalculus
+    samples_per_config: 35
+    seed: 2701
+    revision: main
+
+  - type: mmlu_math
+    dataset: cais/mmlu
+    split: test
+    configs:
+      - abstract_algebra
+      - college_mathematics
+      - elementary_mathematics
+      - high_school_mathematics
+      - high_school_statistics
+    samples_per_config: 50
+    seed: 3701
+    revision: main
+
+  # Optional adapter for pre-generated interpolation/extrapolation files from
+  # google-deepmind/mathematics_dataset. It is disabled by default because the
+  # official release is very large; enable it only after placing it on VEPFS.
+  - type: deepmind_mathematics_local
+    dataset: google-deepmind/mathematics_dataset
+    enabled: false
+    optional: true
+    local_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/datasets/deepmind_mathematics
+    patterns:
+      - interpolate/*.txt
+      - extrapolate/*.txt
+    samples: 270
+    seed: 4701

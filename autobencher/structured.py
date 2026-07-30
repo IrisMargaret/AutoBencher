@@ -71,6 +71,20 @@ ANSWER_TYPE_ALIASES = {
 }
 
 ERROR_TAGS = (
+    # Evidence-backed mathematical failure modes.
+    "arithmetic_computation_error",
+    "sign_error",
+    "reciprocal_error",
+    "scale_or_percentage_error",
+    "rounding_error",
+    "off_by_one_error",
+    "answer_transfer_error",
+    "constraint_violation",
+    "incomplete_solution",
+    "unit_mismatch",
+    "symbolic_manipulation_error",
+    "invalid_multiple_choice",
+    # Compatibility and deliberately broad fallbacks.
     "concept_confusion",
     "formula_memory_error",
     "calculation_error",
@@ -146,6 +160,12 @@ def _infer_answer_type(canonical_answer: Any) -> str:
         return "decimal"
     if lowered in {"true", "false", "yes", "no", "\u662f", "\u5426"}:
         return "boolean"
+    if re.search(
+        r"\\(?:d?frac|tfrac|sqrt|pi|log|ln|sin|cos|tan|cot|sec|csc|"
+        r"cdot|times|pm|infty)\b",
+        text,
+    ):
+        return "symbolic_expression"
     if re.search(r"[A-Za-z]", text) and re.search(r"[+\-*/^()]", text):
         return "symbolic_expression"
     return "text"
@@ -1094,47 +1114,466 @@ def attribute_error(
     equivalence: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Attribute an error only when its supporting evidence is reproducible.
+
+    Protocol failures, normalization failures, failed arithmetic equalities,
+    numeric error signatures, unit mismatches, and partial solutions are
+    deterministic.  When those checks cannot identify a cause, this function
+    abstains with ``unknown_error`` instead of guessing from superficial
+    features such as reasoning length or the presence of the word "formula".
+    """
     status = str(parse_result.get("parse_status", "parse_failed"))
-    evidence = []
+    evidence: list[dict[str, Any]] = []
+    checks = dict(equivalence.get("deterministic_checks", {}))
+    first_error_step = None
+    verification_tier = "deterministic"
+    method = "evidence_rules_v2"
+
+    def add_evidence(
+        response_span: Any,
+        reason: str,
+        *,
+        check_name: str,
+        expected: Any = None,
+        observed: Any = None,
+        step_index: int | None = None,
+    ) -> None:
+        item = {
+            "response_span": str(response_span or "")[:300],
+            "reason": reason,
+            "check_name": check_name,
+        }
+        if expected is not None:
+            item["expected"] = str(expected)[:200]
+        if observed is not None:
+            item["observed"] = str(observed)[:200]
+        if step_index is not None:
+            item["step_index"] = int(step_index)
+        evidence.append(item)
+
+    def numeric_value(normalized: Mapping[str, Any]) -> float | None:
+        if not normalized.get("success"):
+            return None
+        value = normalized.get("value")
+        if isinstance(value, bool):
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return numeric if math.isfinite(numeric) else None
+
+    def arithmetic_equalities(
+        steps: list[Any],
+    ) -> tuple[list[dict[str, Any]], float | None]:
+        """Validate constant-only equalities and return the last valid RHS."""
+        findings = []
+        last_valid_rhs = None
+        for step_index, raw_step in enumerate(steps):
+            step = str(raw_step or "")
+            candidates = re.findall(
+                r"(?<![A-Za-z_])"
+                r"[-+*/^().\d\s%]+=[-+*/^().\d\s%=]+",
+                step,
+            )
+            for candidate in candidates:
+                parts = [
+                    part.strip(" \t\r\n.,:;")
+                    for part in candidate.split("=")
+                    if part.strip(" \t\r\n.,:;")
+                ]
+                for left, right in zip(parts, parts[1:]):
+                    if (
+                        not left
+                        or not right
+                        or len(left) > 120
+                        or len(right) > 120
+                    ):
+                        continue
+                    try:
+                        left_expression = _symbolic_scalar(left)
+                        right_expression = _symbolic_scalar(right)
+                        if (
+                            left_expression.free_symbols
+                            or right_expression.free_symbols
+                        ):
+                            continue
+                        valid = bool(
+                            __import__("sympy").simplify(
+                                left_expression - right_expression
+                            )
+                            == 0
+                        )
+                        right_numeric = complex(
+                            __import__("sympy").N(
+                                right_expression,
+                                30,
+                            )
+                        )
+                        if (
+                            abs(right_numeric.imag) <= 1e-12
+                            and math.isfinite(right_numeric.real)
+                        ):
+                            last_valid_rhs = (
+                                float(right_numeric.real)
+                                if valid
+                                else last_valid_rhs
+                            )
+                    except Exception:
+                        continue
+                    findings.append(
+                        {
+                            "step_index": step_index,
+                            "span": f"{left} = {right}",
+                            "left": left,
+                            "right": right,
+                            "valid": valid,
+                        }
+                    )
+        return findings, last_valid_rhs
+
     confidence = 1.0
     if status == "tool_violation":
         primary = "tool_violation"
+        add_evidence(
+            parse_result.get("raw_response", ""),
+            "The structured parser detected a prohibited external-tool call.",
+            check_name="tool_policy",
+            expected="no external tool use",
+            observed="tool-call marker",
+        )
     elif status == "prompt_echo":
         primary = "prompt_echo"
+        add_evidence(
+            parse_result.get("raw_response", ""),
+            "The response reproduced protected prompt content.",
+            check_name="prompt_echo_detection",
+        )
     elif status == "irrelevant_output":
         primary = "irrelevant_output"
+        add_evidence(
+            parse_result.get("raw_response", ""),
+            "The structured parser detected content unrelated to the answer.",
+            check_name="relevance_contract",
+        )
     elif status != "success":
         primary = "parse_failed"
+        add_evidence(
+            parse_result.get("raw_response", ""),
+            f"The response failed the structured-output contract: {status}.",
+            check_name="structured_output_parse",
+            expected="valid answer JSON",
+            observed=status,
+        )
     elif equivalence.get("equivalent"):
         primary = None
     elif not equivalence.get("predicted_normalized", {}).get("success"):
         primary = "format_output_error"
-    else:
-        question = str(record.get("question", "")).lower()
-        reasoning = " ".join(
-            parse_result.get("parsed_response", {}).get("reasoning_summary", [])
-        ).lower()
-        if any(token in question for token in ("domain", "unit", "positive", "integer")):
-            primary = "condition_missing"
-            confidence = 0.78
-        elif any(token in reasoning for token in ("formula", "identity", "theorem")):
-            primary = "formula_memory_error"
-            confidence = 0.76
-        elif len(parse_result.get("parsed_response", {}).get("reasoning_summary", [])) >= 3:
-            primary = "multi_step_logic_error"
-            confidence = 0.74
-        elif any(char.isdigit() for char in reasoning):
-            primary = "calculation_error"
-            confidence = 0.72
-        else:
-            primary = "concept_confusion"
-            confidence = 0.65
-        evidence.append(
-            {
-                "response_span": reasoning[:240],
-                "reason": "Deterministic rule selected from output validity, answer equivalence, and response structure.",
-            }
+        add_evidence(
+            parse_result.get("parsed_response", {}).get(
+                "final_answer",
+                record.get("test_taker_response", ""),
+            ),
+            "The final answer cannot be normalized as the declared answer type.",
+            check_name="answer_normalization",
+            expected=record.get("answer_type", "text"),
+            observed=equivalence.get("predicted_normalized"),
         )
+    else:
+        parsed_response = parse_result.get("parsed_response", {})
+        reasoning_steps = list(
+            parsed_response.get("reasoning_summary", [])
+            if isinstance(parsed_response, Mapping)
+            else []
+        )
+        predicted_text = (
+            parsed_response.get("final_answer")
+            if isinstance(parsed_response, Mapping)
+            else None
+        ) or record.get("test_taker_response", "")
+        gold_text = record.get(
+            "canonical_answer",
+            record.get("gold_answer", ""),
+        )
+        answer_type = normalize_answer_type(
+            record.get("answer_type", "text"),
+            gold_text,
+        )
+        failure_type = str(record.get("failure_type", ""))
+        candidate_truth = record.get(
+            "test_taker_truth_validation",
+            {},
+        )
+        if failure_type == "partial_solution":
+            primary = "incomplete_solution"
+            confidence = 0.99
+            add_evidence(
+                predicted_text,
+                "TruthSolver found that the response satisfies only part of the required solution set.",
+                check_name="truth_solver_candidate_validation",
+                expected=gold_text,
+                observed=predicted_text,
+            )
+        elif (
+            isinstance(candidate_truth, Mapping)
+            and int(candidate_truth.get("equations_total", 0) or 0) > 0
+            and not bool(candidate_truth.get("substitution_passed"))
+        ):
+            primary = "constraint_violation"
+            confidence = 0.99
+            substitution_details = candidate_truth.get(
+                "substitution_details",
+                [],
+            )
+            if not isinstance(substitution_details, list):
+                substitution_details = []
+            first_failed = next(
+                (
+                    item
+                    for item in substitution_details
+                    if isinstance(item, Mapping)
+                    and not bool(item.get("passed"))
+                ),
+                {},
+            )
+            add_evidence(
+                first_failed.get("equation", predicted_text),
+                "Substitution into the original equation system violates at least one required constraint.",
+                check_name="truth_solver_substitution",
+                expected=first_failed.get("expected", "equation satisfied"),
+                observed=first_failed.get(
+                    "observed",
+                    first_failed.get("residual", predicted_text),
+                ),
+            )
+        elif checks.get("unit_consistent") is False:
+            primary = "unit_mismatch"
+            confidence = 0.99
+            add_evidence(
+                predicted_text,
+                "The numerical value may be plausible, but the normalized unit differs from the reference unit.",
+                check_name="unit_consistency",
+                expected=equivalence.get("gold_normalized"),
+                observed=equivalence.get("predicted_normalized"),
+            )
+        elif answer_type == "multiple_choice" and (
+            not re.fullmatch(
+                r"[A-Z]",
+                str(predicted_text).strip().upper(),
+            )
+            or (
+                record.get("choices")
+                and str(predicted_text).strip().upper()
+                not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[
+                    : len(record.get("choices", []))
+                ]
+            )
+        ):
+            primary = "invalid_multiple_choice"
+            confidence = 0.99
+            add_evidence(
+                predicted_text,
+                "The benchmark requires one option letter, but the response is not a valid option label.",
+                check_name="multiple_choice_contract",
+                expected="one uppercase option letter",
+                observed=predicted_text,
+            )
+        else:
+            equality_findings, last_valid_rhs = arithmetic_equalities(
+                reasoning_steps
+            )
+            has_mathematical_reasoning = any(
+                re.search(r"\d|[=+\-*/^%]", str(step or ""))
+                for step in reasoning_steps
+            )
+            invalid = next(
+                (
+                    finding
+                    for finding in equality_findings
+                    if not finding["valid"]
+                ),
+                None,
+            )
+            gold_value = numeric_value(
+                equivalence.get("gold_normalized", {})
+            )
+            predicted_value = numeric_value(
+                equivalence.get("predicted_normalized", {})
+            )
+            if invalid is not None:
+                primary = "arithmetic_computation_error"
+                confidence = 0.98
+                first_error_step = int(invalid["step_index"])
+                add_evidence(
+                    invalid["span"],
+                    "The two constant expressions in this equality are not mathematically equal.",
+                    check_name="reasoning_arithmetic_equality",
+                    expected=invalid["left"],
+                    observed=invalid["right"],
+                    step_index=first_error_step,
+                )
+            elif (
+                gold_value is not None
+                and predicted_value is not None
+                and last_valid_rhs is not None
+                and _numeric_equal(last_valid_rhs, gold_value, config)
+                and not _numeric_equal(
+                    last_valid_rhs,
+                    predicted_value,
+                    config,
+                )
+            ):
+                primary = "answer_transfer_error"
+                confidence = 0.97
+                add_evidence(
+                    predicted_text,
+                    "A verified reasoning result matches the reference answer, but the final answer field contains a different value.",
+                    check_name="reasoning_to_final_answer_consistency",
+                    expected=last_valid_rhs,
+                    observed=predicted_value,
+                )
+            elif (
+                has_mathematical_reasoning
+                and
+                gold_value is not None
+                and predicted_value is not None
+                and _numeric_equal(predicted_value, -gold_value, config)
+            ):
+                primary = "sign_error"
+                confidence = 0.95
+                add_evidence(
+                    predicted_text,
+                    "The predicted value is the additive inverse of the verified answer.",
+                    check_name="numeric_error_signature",
+                    expected=gold_value,
+                    observed=predicted_value,
+                )
+            elif (
+                has_mathematical_reasoning
+                and
+                gold_value not in {None, 0.0}
+                and predicted_value not in {None, 0.0}
+                and _numeric_equal(
+                    predicted_value,
+                    1.0 / gold_value,
+                    config,
+                )
+            ):
+                primary = "reciprocal_error"
+                confidence = 0.94
+                add_evidence(
+                    predicted_text,
+                    "The predicted value is the reciprocal of the verified answer.",
+                    check_name="numeric_error_signature",
+                    expected=gold_value,
+                    observed=predicted_value,
+                )
+            elif (
+                has_mathematical_reasoning
+                and
+                gold_value is not None
+                and predicted_value is not None
+                and (
+                    _numeric_equal(
+                        predicted_value,
+                        gold_value * 100.0,
+                        config,
+                    )
+                    or _numeric_equal(
+                        predicted_value,
+                        gold_value / 100.0,
+                        config,
+                    )
+                )
+            ):
+                primary = "scale_or_percentage_error"
+                confidence = 0.95
+                add_evidence(
+                    predicted_text,
+                    "The predicted value differs from the verified answer by a factor of 100.",
+                    check_name="numeric_error_signature",
+                    expected=gold_value,
+                    observed=predicted_value,
+                )
+            elif (
+                has_mathematical_reasoning
+                and
+                gold_value is not None
+                and predicted_value is not None
+                and abs(predicted_value - gold_value) == 1.0
+            ):
+                primary = "off_by_one_error"
+                confidence = 0.90
+                add_evidence(
+                    predicted_text,
+                    "The predicted integer differs from the verified answer by exactly one.",
+                    check_name="numeric_error_signature",
+                    expected=gold_value,
+                    observed=predicted_value,
+                )
+            elif (
+                has_mathematical_reasoning
+                and
+                gold_value is not None
+                and predicted_value is not None
+                and math.isclose(
+                    predicted_value,
+                    gold_value,
+                    rel_tol=float(
+                        config["error_attribution"].get(
+                            "rounding_relative_tolerance",
+                            0.01,
+                        )
+                    ),
+                    abs_tol=float(
+                        config["error_attribution"].get(
+                            "rounding_absolute_tolerance",
+                            0.01,
+                        )
+                    ),
+                )
+            ):
+                primary = "rounding_error"
+                confidence = 0.88
+                add_evidence(
+                    predicted_text,
+                    "The answer is outside the grading tolerance but within the configured diagnostic rounding band.",
+                    check_name="diagnostic_rounding_band",
+                    expected=gold_value,
+                    observed=predicted_value,
+                )
+            elif (
+                answer_type
+                in {
+                    "symbolic_expression",
+                    "equation",
+                    "inequality",
+                }
+                and checks.get("answer_parse_success")
+                and not checks.get("symbolic_equivalence")
+            ):
+                primary = "symbolic_manipulation_error"
+                confidence = 0.82
+                add_evidence(
+                    predicted_text,
+                    "Both expressions parse, but symbolic equivalence checks reject the transformation.",
+                    check_name="symbolic_equivalence",
+                    expected=gold_text,
+                    observed=predicted_text,
+                )
+            else:
+                primary = str(
+                    config["error_attribution"]["low_confidence_tag"]
+                )
+                confidence = 0.0
+                verification_tier = "abstained"
+                add_evidence(
+                    predicted_text,
+                    "No deterministic check isolates a defensible causal error type.",
+                    check_name="attribution_abstention",
+                    expected=gold_text,
+                    observed=predicted_text,
+                )
     threshold = float(config["error_attribution"]["confidence_threshold"])
     needs_review = primary is not None and confidence < threshold
     if needs_review:
@@ -1146,5 +1585,9 @@ def attribute_error(
         "evidence": evidence,
         "attribution_confidence": confidence,
         "needs_review": needs_review,
-        "deterministic_checks": equivalence.get("deterministic_checks", {}),
+        "deterministic_checks": checks,
+        "attribution_method": method,
+        "verification_tier": verification_tier,
+        "first_error_step": first_error_step,
+        "taxonomy_version": "math_error_taxonomy_v2",
     }

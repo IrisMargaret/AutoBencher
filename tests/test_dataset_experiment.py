@@ -23,6 +23,7 @@ from autobencher.experiment import (
     atomic_json,
 )
 from tool_util import (
+    HardSamplePool,
     canonicalize_math_record,
     dump_standard_json,
     generate_math_inference,
@@ -344,6 +345,45 @@ def test_hard_pool_resume_is_idempotent(tmp_path):
     manage_hard_pool(inference, hard_pool, source_iter=1, source_cycle=1)
     pool = json.loads(hard_pool.read_text(encoding="utf-8"))
     assert pool[0]["occurrences"] == 1
+
+
+def test_hard_pool_guidance_suppresses_unverified_error_labels(tmp_path):
+    pool_path = tmp_path / "hard_pool.json"
+    dump_standard_json(
+        [
+            {
+                **record("What is 2 + 3?", "5"),
+                "sample_grade": "train_eligible",
+                "difficulty": 2,
+                "error_tags": ["sign_error"],
+                "verification_tier": "abstained",
+                "attribution_confidence": 0.2,
+                "evidence": [{"check_name": "attribution_abstention"}],
+            },
+            {
+                **record("What is 7 + 4?", "11"),
+                "sample_grade": "train_eligible",
+                "difficulty": 3,
+                "error_tags": ["arithmetic_computation_error"],
+                "verification_tier": "deterministic",
+                "attribution_confidence": 0.98,
+                "evidence": [
+                    {"check_name": "reasoning_arithmetic_equality"}
+                ],
+            },
+        ],
+        pool_path,
+    )
+    context = HardSamplePool(pool_path).get_variant_context(
+        "Arithmetic",
+        "Integer Operations",
+        confidence_threshold=0.70,
+    )
+    assert "observed_failure: arithmetic_computation_error" in context
+    assert "verified_evidence_checks: reasoning_arithmetic_equality" in context
+    assert "observed_failure: sign_error" not in context
+    assert "observed_failure: unknown_error" in context
+    assert "never reveal the reference answer" in context
 
 
 def test_old_irrelevant_cache_is_reparsed_without_model_call(

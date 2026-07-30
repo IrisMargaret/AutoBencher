@@ -20,3 +20,9 @@ logging:
   progress_enabled: true
   progress_leave: false
   progress_dynamic_ncols: true
+
+# The preparation command writes this immutable, multi-source evaluation suite
+# to VEPFS before preflight or training. Public training splits are never used.
+fixed_test:
+  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/open_math_fixed_suite.json
+  require_all_subcategories: false

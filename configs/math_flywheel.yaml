@@ -302,10 +302,14 @@ answer_normalization:
 error_attribution:
   enabled: true
   confidence_threshold: 0.70
+  rounding_relative_tolerance: 0.01
+  rounding_absolute_tolerance: 0.01
   allow_multiple_tags: true
   require_primary_tag: true
   require_evidence: true
   low_confidence_tag: unknown_error
+  export_review_csv: true
+  review_sample_size: 100
 
 dataset:
   exact_dedup: true

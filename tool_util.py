@@ -14,7 +14,11 @@ from collections import defaultdict
 import numpy as np
 from util import gen_from_prompt
 from autobencher.output_schemas import TestTakerOutput
-from autobencher.structured import parse_test_taker_output, test_taker_prompt
+from autobencher.structured import (
+    ERROR_TAGS as STRUCTURED_ERROR_TAGS,
+    parse_test_taker_output,
+    test_taker_prompt,
+)
 
 
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
@@ -61,19 +65,7 @@ MATH_CATEGORIES = (
     "Composite Comprehensive",
 )
 
-ERROR_TAGS = (
-    "calculation_error",
-    "formula_memory_error",
-    "condition_missing",
-    "multi-step_logic_error",
-    "concept_confusion",
-    "format_output_error",
-    "tool_violation",
-    "irrelevant_output",
-    "prompt_echo",
-    "parse_failed",
-    "unknown_error",
-)
+ERROR_TAGS = STRUCTURED_ERROR_TAGS
 
 SAMPLE_GRADES = (
     "train_eligible",
@@ -394,6 +386,13 @@ def canonicalize_math_record(record, index=0):
         "reference_hard_sample_ids",
         "target_error_type",
         "generation_strategy",
+        "choices",
+        "source_dataset",
+        "source_config",
+        "source_split",
+        "source_index",
+        "source_question_sha256",
+        "source_solution_sha256",
         # [ADDED] Preserve the evaluator's independent gold-answer audit
         # through inference, evaluation, hard-pool, and research exports.
         "gold_answer_validation",
@@ -426,6 +425,10 @@ def canonicalize_math_record(record, index=0):
         "deterministic_checks",
         "primary_error_tag",
         "secondary_error_tags",
+        "attribution_method",
+        "verification_tier",
+        "first_error_step",
+        "taxonomy_version",
         "evidence",
         "attribution_confidence",
         "needs_review",
@@ -719,6 +722,13 @@ def manage_hard_pool(
             "gold_answer": canonical["gold_answer"],
             "test_taker_response": canonical["test_taker_response"],
             "error_tags": canonical["error_tags"] or classify_error_tags(sample),
+            "primary_error_tag": canonical.get("primary_error_tag"),
+            "evidence": canonical.get("evidence", []),
+            "attribution_confidence": canonical.get(
+                "attribution_confidence",
+                0.0,
+            ),
+            "verification_tier": canonical.get("verification_tier"),
             "difficulty": canonical["difficulty"],
             "unique_key": canonical["unique_key"],
             "sample_grade": grade,
@@ -750,6 +760,13 @@ def manage_hard_pool(
             "gold_answer": record["gold_answer"],
             "test_taker_response": record["test_taker_response"],
             "error_tags": record["error_tags"] or classify_error_tags(record),
+            "primary_error_tag": record.get("primary_error_tag"),
+            "evidence": record.get("evidence", []),
+            "attribution_confidence": record.get(
+                "attribution_confidence",
+                0.0,
+            ),
+            "verification_tier": record.get("verification_tier"),
             "difficulty": record["difficulty"],
             "unique_key": record["unique_key"],
             "sample_grade": sample_grade,
@@ -770,6 +787,12 @@ def manage_hard_pool(
                     "last_seen_cycle": int(source_cycle),
                     "test_taker_response": sample["test_taker_response"],
                     "error_tags": sample["error_tags"],
+                    "primary_error_tag": sample["primary_error_tag"],
+                    "evidence": sample["evidence"],
+                    "attribution_confidence": sample[
+                        "attribution_confidence"
+                    ],
+                    "verification_tier": sample["verification_tier"],
                     "sample_grade": sample_grade,
                     "accuracy_bucket": accuracy_bucket,
                     "sub_category_accuracy": sub_category_accuracy,
@@ -1126,7 +1149,13 @@ class HardSamplePool:
                 )
         return "\n".join(lines)
 
-    def get_variant_context(self, category, sub_category, max_samples=12):
+    def get_variant_context(
+        self,
+        category,
+        sub_category,
+        max_samples=12,
+        confidence_threshold=0.70,
+    ):
         samples = [
             sample
             for sample in self.samples
@@ -1141,15 +1170,55 @@ class HardSamplePool:
                 if sample.get("sample_grade") == "train_eligible"
                 and sample.get("category") == category
             ]
+        samples.sort(
+            key=lambda sample: (
+                str(sample.get("verification_tier")) == "deterministic",
+                float(sample.get("attribution_confidence", 0.0) or 0.0),
+                int(sample.get("occurrences", 1) or 1),
+                int(sample.get("last_seen_cycle", 0) or 0),
+                int(sample.get("last_seen_iter", 0) or 0),
+            ),
+            reverse=True,
+        )
         lines = []
-        for sample in samples[-max_samples:]:
+        for sample in samples[:max_samples]:
+            verified_attribution = (
+                str(sample.get("verification_tier")) == "deterministic"
+                and float(
+                    sample.get("attribution_confidence", 0.0) or 0.0
+                )
+                >= float(confidence_threshold)
+                and bool(sample.get("evidence"))
+            )
+            tags = (
+                ",".join(
+                    tag
+                    for tag in sample.get("error_tags", [])
+                    if tag != "unknown_error"
+                )
+                if verified_attribution
+                else ""
+            ) or "unknown_error"
+            evidence_checks = ",".join(
+                sorted(
+                    {
+                        str(item.get("check_name"))
+                        for item in sample.get("evidence", [])
+                        if isinstance(item, dict) and item.get("check_name")
+                    }
+                )
+            ) if verified_attribution else ""
+            evidence_checks = evidence_checks or "none"
             lines.append(
                 f"- hard_sample_id: {sample.get('unique_key', '')[:16]} | "
                 f"subcategory: {sample.get('sub_category', '')} | "
                 f"difficulty: {sample.get('difficulty', 5)} | "
+                f"observed_failure: {tags} | "
+                f"verified_evidence_checks: {evidence_checks} | "
                 f"structural_pattern: {sample.get('sub_category', '')} problem | "
                 "variation_requirements: change all values and wording; "
-                "preserve the reasoning trap; do not copy the source"
+                "preserve the verified error mechanism when known; "
+                "do not copy the source; never reveal the reference answer"
             )
         return "\n".join(lines)
 
