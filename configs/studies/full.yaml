@@ -1,0 +1,15 @@
+extends: ../experiments/math_flywheel.yaml
+
+study:
+  policy: full
+  variant: full
+  components:
+    adaptive_allocation: true
+    global_difficulty: true
+    observed_difficulty: true
+    coverage_priority: true
+    uncertainty_priority: true
+    persistent_error_priority: true
+    retention_priority: true
+    hard_pool_variants: true
+    error_type_targeting: true

@@ -1,0 +1,16 @@
+extends: ../experiments/math_flywheel.yaml
+
+study:
+  policy: error_only
+  variant: error_only
+  error_only_epsilon: 0.05
+  components:
+    adaptive_allocation: true
+    global_difficulty: false
+    observed_difficulty: true
+    coverage_priority: false
+    uncertainty_priority: false
+    persistent_error_priority: true
+    retention_priority: false
+    hard_pool_variants: false
+    error_type_targeting: false

@@ -55,6 +55,7 @@ from autobencher.fixed_benchmark import (
     fixed_benchmark_summary,
     load_fixed_test_set,
 )
+from autobencher.policies import policy_runtime_descriptor
 from autobencher.similarity import build_similarity_batch
 from autobencher.structured import (
     answers_equivalent,
@@ -2182,9 +2183,11 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "sub_category": sub_category,
                 "difficulty": effective_difficulty,
                 "target_difficulty": requested_difficulty,
+                "requested_difficulty": requested_difficulty,
                 "observed_difficulty": int(
                     difficulty_profile["score"]
                 ),
+                "effective_difficulty": effective_difficulty,
                 "difficulty_profile": difficulty_profile,
                 "question": question_text,
                 "answer_type": answer_type,
@@ -2497,11 +2500,18 @@ def _ask_question_v3(
                     for sample in matching_samples
                 ][:12]
                 plan_line["reference_hard_sample_ids"] = references
+                error_type_targeting_enabled = bool(
+                    (generation_plan or {})
+                    .get("component_state", {})
+                    .get("error_type_targeting", True)
+                )
                 error_counts = Counter(
                     tag
                     for sample in matching_samples
                     if (
-                        sample.get("verification_tier") == "deterministic"
+                        error_type_targeting_enabled
+                        and sample.get("verification_tier")
+                        == "deterministic"
                         and float(
                             sample.get(
                                 "attribution_confidence",
@@ -3311,6 +3321,10 @@ def _build_iteration_paths(outfile_prefix1, iter_number, cycle_number=None):
         "iteration_prefix": iteration_prefix,
         "legacy_prefix": legacy_prefix,
         "plan_file": f"{iteration_prefix}.question_plan_with_aim.json",
+        "generation_plan_file": os.path.join(
+            iteration_dir,
+            "generation_plan.json",
+        ),
         "inference_file": f"{iteration_prefix}.test_taker_inference.json",
         "compare_file": f"{iteration_prefix}.compare_answers.json",
         "hard_pool_file": os.path.join(output_root, "hard_pool.json"),
@@ -3440,6 +3454,7 @@ def _cleanup_iteration_cache(args, cycle_number, iter_number):
             paths["iteration_dir"],
             preserve_json_paths=(
                 paths["plan_file"],
+                paths["generation_plan_file"],
                 paths["compare_file"],
                 paths["inference_file"],
             ),
@@ -3646,6 +3661,19 @@ def _sanitize_traceback(exc):
     return formatted.strip()[-12000:]
 
 
+def _study_runtime_metadata(config, question_budget=None):
+    """Return the effective strategy state used by manifests and logs."""
+    metadata = dict(policy_runtime_descriptor(config))
+    metadata["component_state"] = dict(metadata["component_state"])
+    metadata["seed"] = int(config["experiment"]["seed"])
+    metadata["question_budget"] = int(
+        config["experiment"]["questions_per_iteration"]
+        if question_budget is None
+        else question_budget
+    )
+    return metadata
+
+
 def _save_research_cycle_manifest(args, cycle_entry):
     research_run = getattr(args, "research_run", None)
     if research_run is None:
@@ -3842,10 +3870,21 @@ def _run_math_iteration(
                 if iter_number > 1 and history_dict
                 else []
             ),
+            cycle=cycle_number,
+            seed=int(research_config["experiment"]["seed"]),
+            question_budget=int(
+                research_config["experiment"]["questions_per_iteration"]
+            ),
         )
-        generation_plan["cycle"] = cycle_number
         should_direct_generation = bool(
             generation_plan["hard_pool_injection_enabled"]
+        )
+        atomic_json(
+            {
+                **research_run.metadata(),
+                **generation_plan,
+            },
+            paths["generation_plan_file"],
         )
         research_run.logger.event(
             "INFO",
@@ -3870,8 +3909,32 @@ def _run_math_iteration(
                 "previous_round_accuracy_state": generation_plan[
                     "previous_round_accuracy_state"
                 ],
+                "policy_name": generation_plan["policy_name"],
+                "policy_version": generation_plan["policy_version"],
+                "variant": generation_plan["variant"],
+                "component_state": generation_plan["component_state"],
+                "seed": generation_plan["seed"],
+                "question_budget": generation_plan["question_budget"],
             },
         )
+        if generation_plan.get("diagnostics", {}).get(
+            "hard_pool_disabled_by_ablation"
+        ):
+            research_run.logger.event(
+                "INFO",
+                "Generate",
+                "hard_pool_disabled_by_ablation",
+                (
+                    "hard_pool_disabled_by_ablation "
+                    f"variant={generation_plan['variant']}"
+                ),
+                cycle=cycle_number,
+                iteration=iter_number,
+                metrics={
+                    "source_budget": generation_plan["source_budget"],
+                    "component_state": generation_plan["component_state"],
+                },
+            )
     else:
         should_direct_generation = (
             (iter_number >= 3 and triggered)
@@ -3947,6 +4010,13 @@ def _run_math_iteration(
                 research_config=research_config,
             )
             if research_run:
+                atomic_json(
+                    {
+                        **research_run.metadata(),
+                        **generation_plan,
+                    },
+                    paths["generation_plan_file"],
+                )
                 generation_result = (
                     generation_plan.get("generation_result", {})
                     if generation_plan
@@ -4216,6 +4286,21 @@ def _run_math_iteration(
                 else 0
             ),
             "cache_status": "hit" if migrated_records else "generated",
+            **(
+                {
+                    key: generation_plan[key]
+                    for key in (
+                        "policy_name",
+                        "policy_version",
+                        "variant",
+                        "component_state",
+                        "seed",
+                        "question_budget",
+                    )
+                }
+                if generation_plan
+                else _study_runtime_metadata(research_config)
+            ),
         }
         attribution_config = research_config["error_attribution"]
         if bool(attribution_config.get("export_review_csv", False)):
@@ -4475,6 +4560,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
     output_root = _output_root(args.outfile_prefix1)
     os.makedirs(output_root, exist_ok=True)
     cycle_record_path = _cycle_record_file(args)
+    study_runtime = _study_runtime_metadata(args.research_run.config)
     run_config = {
         "mode": args.mode,
         "agent_model": args.agent_modelname,
@@ -4491,6 +4577,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
             if getattr(args, "research_run", None)
             else None
         ),
+        **study_runtime,
     }
     cycle_record = _load_cycle_record(cycle_record_path)
     if cycle_record.get("run_config") != run_config:
@@ -4568,6 +4655,65 @@ def _run_autobencher(args, agent_info, evaluator_info):
             )
             return 1
 
+    if study_runtime["policy_name"] == "base":
+        cycle_record["status"] = "completed"
+        cycle_record["active_test_taker_model"] = args.test_taker_modelname
+        cycle_record["evaluation_only"] = True
+        cycle_record.update(study_runtime)
+        _save_cycle_record(cycle_record_path, cycle_record)
+        baseline_accuracy = (
+            baseline_fixed_summary.get("accuracy")
+            if baseline_fixed_summary
+            else None
+        )
+        experiment_summary = {
+            **args.research_run.metadata(),
+            **study_runtime,
+            "status": "completed",
+            "evaluation_only": True,
+            "cycle_count": 0,
+            "iteration_count": 0,
+            "generated_question_count": 0,
+            "total_questions": (
+                int(baseline_fixed_summary.get("total_questions", 0))
+                if baseline_fixed_summary
+                else 0
+            ),
+            "hard_pool_size": 0,
+            "training_sample_count": 0,
+            "baseline_accuracy": baseline_accuracy,
+            "final_accuracy": baseline_accuracy,
+            "accuracy_delta": 0.0 if baseline_accuracy is not None else None,
+            "active_test_taker_model": args.test_taker_modelname,
+            "fixed_test": cycle_record.get("fixed_test", {}),
+        }
+        atomic_json(
+            experiment_summary,
+            args.research_run.run_dir / "experiment_summary.json",
+        )
+        args.research_run.finalize(
+            "completed",
+            {
+                **study_runtime,
+                "evaluation_only": True,
+                "cycle_count": 0,
+                "iteration_count": 0,
+                "training_sample_count": 0,
+                "baseline_accuracy": baseline_accuracy,
+            },
+        )
+        args.research_run.logger.event(
+            "INFO",
+            "Study",
+            "base_evaluation_completed",
+            (
+                "policy=base evaluation_only=true "
+                "generation=false training_export=false finetune=false"
+            ),
+            metrics=experiment_summary,
+        )
+        return 0
+
     current_test_taker_model = cycle_record.get(
         "active_test_taker_model",
         args.test_taker_modelname,
@@ -4605,6 +4751,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "finetune_output": None,
             "finetune_status": "not_started",
             "next_test_taker_model": current_test_taker_model,
+            **study_runtime,
         }
         if getattr(args, "research_run", None):
             _save_research_cycle_manifest(args, cycle_entry)
@@ -4723,8 +4870,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 selected, dataset_manifest, rejected = build_training_dataset(
                     candidates,
                     args.research_run.config,
-                    seed=int(args.research_run.config["experiment"]["seed"])
-                    + cycle_number,
+                    seed=int(args.research_run.config["experiment"]["seed"]),
                     holdout_records=fixed_questions,
                 )
                 if (
@@ -4797,6 +4943,9 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         "learning_rate": args.research_run.config[
                             "finetune"
                         ]["learning_rate"],
+                        "seed": int(
+                            args.research_run.config["experiment"]["seed"]
+                        ),
                     },
                     training_dir / "finetune_config.json",
                 )
@@ -4949,6 +5098,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     if getattr(args, "research_run", None)
                     else False
                 ),
+                seed=(
+                    int(args.research_run.config["experiment"]["seed"])
+                    if getattr(args, "research_run", None)
+                    else 42
+                ),
             )
             if not result["success"]:
                 raise RuntimeError(
@@ -5020,6 +5174,9 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         "base_model": cycle_entry["test_taker_model"],
                         "dataset_path": str(export_path).replace("\\", "/"),
                         "output_path": current_test_taker_model.replace("\\", "/"),
+                        "seed": int(
+                            args.research_run.config["experiment"]["seed"]
+                        ),
                     },
                     training_dir / "finetune_summary.json",
                 )
@@ -5028,6 +5185,9 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         **args.research_run.metadata(),
                         "cycle_id": cycle_number,
                         "status": "completed",
+                        "seed": int(
+                            args.research_run.config["experiment"]["seed"]
+                        ),
                         "merged_model_path": current_test_taker_model.replace(
                             "\\",
                             "/",
@@ -5123,6 +5283,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
         )
         experiment_summary = {
             **args.research_run.metadata(),
+            **study_runtime,
             "status": "completed",
             "cycle_count": cycle_limit,
             "iteration_count": len(iteration_question_counts),
@@ -5144,6 +5305,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
         args.research_run.finalize(
             "completed",
             {
+                **study_runtime,
                 "cycle_count": experiment_summary["cycle_count"],
                 "iteration_count": experiment_summary["iteration_count"],
                 "active_test_taker_model": current_test_taker_model,

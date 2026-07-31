@@ -1,0 +1,21 @@
+extends: ../experiments/math_flywheel.yaml
+
+experiment:
+  mode: eval
+
+study:
+  policy: base
+  variant: base
+  components:
+    adaptive_allocation: false
+    global_difficulty: false
+    observed_difficulty: false
+    coverage_priority: false
+    uncertainty_priority: false
+    persistent_error_priority: false
+    retention_priority: false
+    hard_pool_variants: false
+    error_type_targeting: false
+
+finetune:
+  enabled: false

@@ -177,6 +177,25 @@ def environment_snapshot() -> dict[str, Any]:
     }
 
 
+def study_manifest_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return declared study settings alongside the resolved runtime policy."""
+    # Import lazily to keep experiment primitives independent of policy module
+    # import order and to avoid a future coverage/experiment import cycle.
+    from autobencher.policies import policy_runtime_descriptor
+
+    config_snapshot = thaw_config(config["study"])
+    runtime = thaw_config(policy_runtime_descriptor(config))
+    runtime.setdefault("seed", int(config["experiment"]["seed"]))
+    runtime.setdefault(
+        "question_budget",
+        int(config["experiment"]["questions_per_iteration"]),
+    )
+    return {
+        "config_snapshot": config_snapshot,
+        **runtime,
+    }
+
+
 class ExperimentLogger:
     def __init__(
         self,
@@ -362,6 +381,7 @@ class ResearchRun:
 
     def initialize(self, cli_args: Mapping[str, Any]) -> None:
         resolved_payload = thaw_config(self.config)
+        study_snapshot = study_manifest_snapshot(self.config)
         atomic_json(resolved_payload, self.run_dir / "resolved_config.json")
         atomic_yaml(resolved_payload, self.run_dir / "resolved_config.yaml")
         atomic_json(
@@ -394,6 +414,14 @@ class ResearchRun:
                 **self.metadata(),
                 "status": "running",
                 "cli_args": dict(cli_args),
+                "study": study_snapshot,
+                "study_config_snapshot": study_snapshot["config_snapshot"],
+                "policy_name": study_snapshot.get("policy_name"),
+                "policy_version": study_snapshot.get("policy_version"),
+                "variant": study_snapshot.get("variant"),
+                "component_state": study_snapshot.get("component_state", {}),
+                "seed": study_snapshot["seed"],
+                "question_budget": study_snapshot["question_budget"],
                 "prompt_version": "math_structured_v1",
                 "prompt_hash": hashlib.sha256(
                     b"math_structured_v1"

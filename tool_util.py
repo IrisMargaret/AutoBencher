@@ -922,6 +922,7 @@ def call_local_finetune(
     wandb_group=None,
     wandb_tags=None,
     wandb_log_model=False,
+    seed=None,
 ):
     script_path = Path(__file__).resolve().with_name("train_llm.py")
     if not script_path.is_file():
@@ -954,6 +955,7 @@ def call_local_finetune(
         ("--config_hash", config_hash),
         ("--max_seq_length", max_seq_length),
         ("--learning_rate", learning_rate),
+        ("--seed", seed),
         ("--wandb_mode", wandb_mode),
         ("--wandb_project", wandb_project),
         ("--wandb_entity", wandb_entity),

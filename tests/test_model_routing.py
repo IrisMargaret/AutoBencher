@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import requests
 import run_scripts
+import tool_util
 import train_llm
 import util
 
@@ -273,6 +274,65 @@ class OllamaRoutingTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_finetune_seed_reaches_training_arguments(self):
+        parsed = train_llm.build_parser().parse_args(
+            [
+                "--model_name_or_path",
+                "model",
+                "--dataset_path",
+                "train.jsonl",
+                "--output_path",
+                "output",
+                "--seed",
+                "17",
+            ]
+        )
+
+        class FakeTrainingArguments:
+            def __init__(self, seed=None, data_seed=None, **kwargs):
+                self.values = {
+                    "seed": seed,
+                    "data_seed": data_seed,
+                    **kwargs,
+                }
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.TrainingArguments = FakeTrainingArguments
+        fake_trl = types.ModuleType("trl")
+        with patch.dict(
+            sys.modules,
+            {"transformers": fake_transformers, "trl": fake_trl},
+        ):
+            training_config = train_llm._training_config(
+                parsed,
+                Path("adapter"),
+                use_bfloat16=False,
+            )
+
+        self.assertEqual(parsed.seed, 17)
+        self.assertEqual(training_config.values["seed"], 17)
+        self.assertEqual(training_config.values["data_seed"], 17)
+
+    def test_local_finetune_forwards_optional_seed(self):
+        process = Mock()
+        process.stdout = []
+        process.wait.return_value = 0
+        with patch("tool_util.subprocess.Popen", return_value=process) as popen:
+            result = tool_util.call_local_finetune(
+                "model",
+                "train.jsonl",
+                "0",
+                1,
+                1,
+                4,
+                "output",
+                seed=23,
+            )
+
+        command = popen.call_args.args[0]
+        self.assertTrue(result["success"])
+        self.assertEqual(command[command.index("--seed") + 1], "23")
+
     def test_finetune_parser_accepts_offline_wandb_tracking(self):
         args = train_llm.build_parser().parse_args(
             [

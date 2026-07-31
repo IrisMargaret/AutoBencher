@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import warnings
@@ -17,6 +18,105 @@ import yaml
 REQUIRED_DATA_ROOT = (
     "/vepfs-mlp2/queue010/20262202597/math_flywheel"
 )
+
+STUDY_POLICY_NAMES = (
+    "base",
+    "random",
+    "uniform",
+    "error_only",
+    "full",
+)
+
+STUDY_VARIANT_NAMES = (
+    "base",
+    "random",
+    "uniform",
+    "error_only",
+    "full",
+    "full_no_hard_pool",
+    "full_no_observed_difficulty",
+)
+
+STUDY_COMPONENT_NAMES = (
+    "adaptive_allocation",
+    "global_difficulty",
+    "observed_difficulty",
+    "coverage_priority",
+    "uncertainty_priority",
+    "persistent_error_priority",
+    "retention_priority",
+    "hard_pool_variants",
+    "error_type_targeting",
+)
+
+STUDY_VARIANT_POLICIES = {
+    "base": "base",
+    "random": "random",
+    "uniform": "uniform",
+    "error_only": "error_only",
+    "full": "full",
+    "full_no_hard_pool": "full",
+    "full_no_observed_difficulty": "full",
+}
+
+STUDY_COMPONENT_PRESETS = {
+    "base": {
+        name: False
+        for name in STUDY_COMPONENT_NAMES
+    },
+    "random": {
+        "adaptive_allocation": False,
+        "global_difficulty": False,
+        "observed_difficulty": True,
+        "coverage_priority": False,
+        "uncertainty_priority": False,
+        "persistent_error_priority": False,
+        "retention_priority": False,
+        "hard_pool_variants": False,
+        "error_type_targeting": False,
+    },
+    "uniform": {
+        "adaptive_allocation": False,
+        "global_difficulty": False,
+        "observed_difficulty": True,
+        "coverage_priority": False,
+        "uncertainty_priority": False,
+        "persistent_error_priority": False,
+        "retention_priority": False,
+        "hard_pool_variants": False,
+        "error_type_targeting": False,
+    },
+    "error_only": {
+        "adaptive_allocation": True,
+        "global_difficulty": False,
+        "observed_difficulty": True,
+        "coverage_priority": False,
+        "uncertainty_priority": False,
+        "persistent_error_priority": True,
+        "retention_priority": False,
+        "hard_pool_variants": False,
+        "error_type_targeting": False,
+    },
+    "full": {
+        name: True
+        for name in STUDY_COMPONENT_NAMES
+    },
+    "full_no_hard_pool": {
+        **{
+            name: True
+            for name in STUDY_COMPONENT_NAMES
+        },
+        "hard_pool_variants": False,
+        "error_type_targeting": False,
+    },
+    "full_no_observed_difficulty": {
+        **{
+            name: True
+            for name in STUDY_COMPONENT_NAMES
+        },
+        "observed_difficulty": False,
+    },
+}
 
 
 class ConfigurationError(RuntimeError):
@@ -186,6 +286,23 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "clean_cycle_cache": True,
         "resume": True,
         "disk_warning_threshold_gb": 10,
+    },
+    "study": {
+        "policy": "full",
+        "variant": "full",
+        "uniform_difficulty": 4,
+        "error_only_epsilon": 0.05,
+        "components": {
+            "adaptive_allocation": True,
+            "global_difficulty": True,
+            "observed_difficulty": True,
+            "coverage_priority": True,
+            "uncertainty_priority": True,
+            "persistent_error_priority": True,
+            "retention_priority": True,
+            "hard_pool_variants": True,
+            "error_type_targeting": True,
+        },
     },
     "compatibility": {
         "use_helm": False,
@@ -859,12 +976,65 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "question budget must be a positive integer",
             budget,
         )
+    experiment_seed = _get(config, "experiment.seed")
+    if (
+        not isinstance(experiment_seed, int)
+        or isinstance(experiment_seed, bool)
+        or experiment_seed < 0
+    ):
+        raise ConfigurationError(
+            "experiment.seed",
+            "must be a non-negative integer",
+            experiment_seed,
+        )
     mode = _get(config, "experiment.mode")
     if mode not in {"eval", "data_flywheel"}:
         raise ConfigurationError(
             "experiment.mode",
             "must be eval or data_flywheel",
             mode,
+        )
+    study_policy = _get(config, "study.policy")
+    if (
+        not isinstance(study_policy, str)
+        or study_policy not in STUDY_POLICY_NAMES
+    ):
+        raise ConfigurationError(
+            "study.policy",
+            "must be one of: " + ", ".join(STUDY_POLICY_NAMES),
+            study_policy,
+        )
+    study_variant = _get(config, "study.variant")
+    if (
+        not isinstance(study_variant, str)
+        or study_variant not in STUDY_VARIANT_NAMES
+    ):
+        raise ConfigurationError(
+            "study.variant",
+            "must be one of: " + ", ".join(STUDY_VARIANT_NAMES),
+            study_variant,
+        )
+    expected_policy = STUDY_VARIANT_POLICIES[study_variant]
+    if study_policy != expected_policy:
+        raise ConfigurationError(
+            "study.variant",
+            (
+                f"{study_variant} requires study.policy={expected_policy}; "
+                f"received {study_policy}"
+            ),
+            study_variant,
+        )
+    error_only_epsilon = _get(config, "study.error_only_epsilon")
+    if (
+        not isinstance(error_only_epsilon, (int, float))
+        or isinstance(error_only_epsilon, bool)
+        or not math.isfinite(float(error_only_epsilon))
+        or float(error_only_epsilon) <= 0
+    ):
+        raise ConfigurationError(
+            "study.error_only_epsilon",
+            "must be a finite number greater than zero",
+            error_only_epsilon,
         )
     enforce_data_root = _get(config, "paths.enforce_data_root")
     if not isinstance(enforce_data_root, bool):
@@ -1072,6 +1242,26 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
                 "difficulty bounds must satisfy 1 <= minimum <= maximum <= 10",
                 [minimum, maximum],
             )
+    uniform_difficulty = _get(config, "study.uniform_difficulty")
+    if not isinstance(uniform_difficulty, int) or isinstance(
+        uniform_difficulty,
+        bool,
+    ):
+        raise ConfigurationError(
+            "study.uniform_difficulty",
+            "must be an integer",
+            uniform_difficulty,
+        )
+    if study_policy == "uniform" and not (
+        generation_difficulty[0]
+        <= uniform_difficulty
+        <= generation_difficulty[1]
+    ):
+        raise ConfigurationError(
+            "study.uniform_difficulty",
+            "must be an integer within the generation difficulty bounds",
+            uniform_difficulty,
+        )
     validation_timeout = _get(
         config,
         "generation.truth_solver_timeout_seconds",
@@ -1177,9 +1367,73 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "error_attribution.export_review_csv",
         "difficulty.reject_outside_generation_bounds",
         "difficulty.use_observed_score_for_adaptive_sampling",
+        "hard_pool.enabled",
+        "error_attribution.enabled",
+        "finetune.enabled",
     ):
         if not isinstance(_get(config, path), bool):
             raise ConfigurationError(path, "must be a Boolean")
+    study_components = _get(config, "study.components")
+    for component_name in STUDY_COMPONENT_NAMES:
+        component_value = _get(
+            config,
+            f"study.components.{component_name}",
+        )
+        if not isinstance(component_value, bool):
+            raise ConfigurationError(
+                f"study.components.{component_name}",
+                "must be a Boolean",
+                component_value,
+            )
+    if (
+        not bool(study_components["hard_pool_variants"])
+        and bool(study_components["error_type_targeting"])
+    ):
+        raise ConfigurationError(
+            "study.components.error_type_targeting",
+            "must be false when hard_pool_variants is false",
+            True,
+        )
+    expected_components = STUDY_COMPONENT_PRESETS[study_variant]
+    for component_name, expected_value in expected_components.items():
+        actual_value = bool(study_components[component_name])
+        if actual_value != expected_value:
+            raise ConfigurationError(
+                f"study.components.{component_name}",
+                (
+                    f"must be {str(expected_value).lower()} for "
+                    f"study.variant={study_variant}"
+                ),
+                actual_value,
+            )
+    if study_policy == "base" and bool(_get(config, "finetune.enabled")):
+        raise ConfigurationError(
+            "finetune.enabled",
+            "must be false when study.policy is base",
+            True,
+        )
+    if study_policy == "base" and mode != "eval":
+        raise ConfigurationError(
+            "experiment.mode",
+            "must be eval when study.policy is base",
+            mode,
+        )
+    if study_policy == "base" and not bool(
+        _get(config, "fixed_test.enabled")
+    ):
+        raise ConfigurationError(
+            "fixed_test.enabled",
+            "must be true when study.policy is base",
+            False,
+        )
+    if study_policy == "base" and not bool(
+        _get(config, "fixed_test.evaluate_baseline")
+    ):
+        raise ConfigurationError(
+            "fixed_test.evaluate_baseline",
+            "must be true when study.policy is base",
+            False,
+        )
     difficulty_rubric = str(
         _get(config, "difficulty.rubric_version")
     ).strip()

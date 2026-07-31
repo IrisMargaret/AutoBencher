@@ -1,6 +1,6 @@
-# 开源固定测试集与证据化错题归因
+# 项目原生固定测试集与证据化错题归因
 
-本文说明如何构建不可变的开源数学测试集、运行完整数据飞轮，以及如何审计错误归因。所有下载数据、缓存、运行产物、训练集、模型和人工复核文件都必须位于：
+本文说明如何安装不可变的项目原生数学测试集、运行完整数据飞轮，以及如何审计错误归因。所有运行产物、训练集、模型和人工复核文件都必须位于：
 
 ```text
 /vepfs-mlp2/queue010/20262202597/math_flywheel
@@ -10,27 +10,23 @@
 
 ## 1. 固定测试集的组成
 
-默认清单是 `configs/benchmarks/open_math_fixed_suite.yaml`，名义规模为 595 题：
+当前唯一生效的题目文件是仓库内置的
+`benchmarks/fixed_math_test_set.json`。它覆盖配置中的 9 个数学大类和 27 个细分题型，
+只保存题目、规范答案、答案类型、难度与项目原生题号。
 
-| 来源 | 固定切分 | 数量 | 用途 |
-|---|---:|---:|---|
-| GSM8K | test | 100 | 小学算术、多步应用题 |
-| MATH | test | 245 | 7 个主题各 35 题 |
-| MMLU 数学子集 | test | 250 | 5 个数学任务各 50 题 |
-| DeepMind Mathematics | interpolate / extrapolate | 默认关闭 | 可选的分布内/外泛化测试 |
+GSM8K、Hendrycks MATH、MMLU 等 Hugging Face 托管数据集已经从生效配置、准备命令
+和文档入口中移除。加载器与安装器还会按 `source_dataset` 做拒绝检查，防止旧文件
+被误接回固定评测链路。
 
-选择过程不是按数据原始顺序截断，而是用“随机种子 + 样本内容 SHA-256”排序后确定性抽样。生成的 JSON 保存数据集配置、切分、原始索引、问题哈希、Hugging Face fingerprint、许可、上游地址、构建清单哈希和最终文件哈希。
+安装器有以下硬约束：
 
-构建器有以下硬约束：
+- 不联网，不调用 Hugging Face Dataset API，也不需要数据集缓存。
+- 安装前验证 JSON schema、题号/题面唯一性、答案类型、难度范围和 27 子类覆盖。
+- 输出必须位于 `allowed_data_root` 下。
+- 已存在且 SHA-256 相同则幂等成功；内容不同则默认拒绝覆盖。
+- 同时生成 `.manifest.json`，记录题数、覆盖数、来源策略与 SHA-256。
 
-- GSM8K、MATH、MMLU 只接受 `test`，填入 `train` 或 `validation` 会在下载前失败。
-- DeepMind 本地适配器只接受 `interpolate/` 和 `extrapolate/`，拒绝 `train*`。
-- 输出目录、Hugging Face 缓存和 DeepMind 本地数据都必须位于 VEPFS 数据根目录。
-- 已生成的固定集默认不可覆盖；清单发生变化时必须换一个带版本号的输出文件。`--allow-overwrite` 只用于明确放弃旧实验的情况。
-- 任一来源的可用题数低于清单配额时会失败，不会静默生成缩水测试集。
-- GSM8K/MATH 的完整推理过程不会进入固定集和模型提示，仅保存最终答案及源解答哈希。
-
-## 2. 首次构建固定测试集
+## 2. 首次安装固定测试集
 
 在服务器执行：
 
@@ -38,18 +34,11 @@
 cd /root/code/AutoBencher
 
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
-export HF_HOME="$AUTOBENCHER_DATA_ROOT/cache/huggingface"
-export HF_DATASETS_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/datasets"
-export HUGGINGFACE_HUB_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/hub"
-export TRANSFORMERS_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/transformers"
 export TMPDIR="$AUTOBENCHER_DATA_ROOT/temp"
-mkdir -p "$HF_DATASETS_CACHE" "$HUGGINGFACE_HUB_CACHE" \
-  "$TRANSFORMERS_CACHE" "$TMPDIR" "$AUTOBENCHER_DATA_ROOT/benchmarks"
+mkdir -p "$TMPDIR" "$AUTOBENCHER_DATA_ROOT/benchmarks"
 
-python prepare_open_math_benchmark.py \
-  --manifest configs/benchmarks/open_math_fixed_suite.yaml \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json" \
-  --cache-dir "$HF_DATASETS_CACHE" \
+python prepare_fixed_math_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -58,31 +47,22 @@ python prepare_open_math_benchmark.py \
 ```bash
 jq '{
   name,
-  question_count,
-  source_counts,
-  subcategory_counts,
-  builder_manifest_sha256,
-  selection_policy
-}' "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json"
+  question_count: (.questions | length)
+}' "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json"
 
 sha256sum \
-  "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json" \
-  "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json.manifest.json"
+  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
+  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json.manifest.json"
 ```
 
-首次构建后，应把两个 SHA-256 写入实验记录。后续实验复用同一个文件，不要重新下载和构建。若确实要改变题量或来源，应生成诸如 `open_math_fixed_suite_v2.json` 的新文件，并把它视为一个新实验。
+首次安装后，应把题集与清单 SHA-256 写入实验记录。后续实验复用同一文件。若确实
+修改题目，应使用新文件名并视为一个新基准，不能与旧分数直接比较。
 
-若服务器不能联网、但缓存已经齐全，可在构建命令后追加 `--local-files-only`。
+## 3. 外部题集策略
 
-## 3. 可选的 DeepMind Mathematics
-
-把数据解压到：
-
-```text
-/vepfs-mlp2/queue010/20262202597/math_flywheel/source_data/deepmind_mathematics
-```
-
-然后把清单中的 `deepmind_mathematics_local.enabled` 改为 `true`。不要把训练目录加入 `patterns`。建议将 `interpolate` 作为额外分布内测试，将 `extrapolate` 单独报告为分布外泛化指标，不要把二者与主测试集准确率混为一个数字。
+当前主链路不接受 Hugging Face 或其他外部题库。若未来研究需要加入新的第三方固定
+测试集，应单独建立实验分支、版本化来源与许可清单，并与当前项目原生基准分开报告；
+不得直接替换同名文件或混合准确率。
 
 ## 4. 完整链路入口
 
@@ -127,7 +107,9 @@ python run_scripts.py math \
   --run-id production-open-holdout
 ```
 
-每次固定集评测的 `summary.json` 都包含总准确率、答案类型、子类别以及 `source_statistics` 分来源准确率。论文分析应同时报告 GSM8K、MATH 和 MMLU 数学子集结果，不能只报告混合总分。
+每次固定集评测的 `summary.json` 都包含总准确率、答案类型、子类别以及
+`source_statistics`。当前来源固定为 `project_native`，论文分析应重点报告 27 个
+细分题型与难度分层结果，不能只报告混合总分。
 
 ## 5. 难度定义及其作用
 

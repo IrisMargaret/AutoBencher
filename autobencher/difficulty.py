@@ -407,9 +407,19 @@ def assess_difficulty(
         difficulty_config["minimum_profile_confidence"]
     )
     trusted = float(profile["confidence"]) >= minimum_confidence
+    study = config.get("study", {})
+    components = (
+        study.get("components", {})
+        if isinstance(study, Mapping)
+        else {}
+    )
     use_observed = bool(
         difficulty_config["use_observed_score_for_adaptive_sampling"]
-    )
+    ) and bool(components.get("observed_difficulty", True))
+    if isinstance(study, Mapping) and study.get("variant") == (
+        "full_no_observed_difficulty"
+    ):
+        use_observed = False
     effective = observed if trusted and use_observed else requested
     lower = int(config["generation"]["minimum_difficulty"])
     upper = int(config["generation"]["maximum_difficulty"])
@@ -427,6 +437,11 @@ def assess_difficulty(
             "within_generation_bounds": lower <= observed <= upper,
             "profile_trusted": trusted,
             "effective_score": effective,
+            "effective_score_source": (
+                "observed"
+                if trusted and use_observed
+                else "requested"
+            ),
             "mismatch_action": str(
                 difficulty_config["mismatch_action"]
             ),

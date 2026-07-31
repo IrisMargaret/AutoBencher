@@ -2,6 +2,8 @@
 
 少量题目生成、SymPy 金标、微调和固定集复测的完整操作步骤见
 [`docs/mini_flywheel_zh-CN.md`](docs/mini_flywheel_zh-CN.md)。
+七种基线与消融方法、组件矩阵和运行清单检查见
+[`docs/baselines_and_ablations_zh-CN.md`](docs/baselines_and_ablations_zh-CN.md)。
 
 简体中文 | [English](README.md)
 
@@ -29,8 +31,8 @@ Multilingual 入口已移除。
   时才归因；证据不足时明确输出 `unknown_error`。
 - 每个 Cycle 的训练集只使用本 Cycle 数据，严格由 25% 做对题和 75% 本轮错题组成；
   每条导出样本都包含已验证的正确答案和非空安全解题步骤。
-- 启动时用多来源开源固定测试集评测原始 test-taker，每轮训练后评测合并后的新模型，
-  并报告总分、分来源、分题型、分答案类型和分难度结果。
+- 启动时用项目原生固定测试集评测原始 test-taker，每轮训练后评测合并后的新模型，
+  并报告总分、分题型、分答案类型和分难度结果；Hugging Face 数据集不再提供题目。
 - 使用精确/模板检查、参考 Text-Dedup 的 datasketch MinHash/LSH 和
   Sentence-Transformers 语义相似度，拒绝与固定测试集相同或高度相似的训练题。
 - 直接加载的本地模型可使用 Outlines 做 token 级 JSON 约束，并以 Guidance
@@ -73,8 +75,8 @@ AutoBencher/
 │   ├── difficulty.py
 │   ├── evaluator.py
 │   ├── fixed_benchmark.py
-│   ├── open_benchmark.py
 │   ├── output_schemas.py
+│   ├── policies.py
 │   ├── reasoning.py
 │   ├── similarity.py
 │   ├── structured.py
@@ -82,9 +84,9 @@ AutoBencher/
 ├── benchmarks/
 │   └── fixed_math_test_set.json
 ├── configs/
-│   ├── benchmarks/open_math_fixed_suite.yaml
 │   ├── environments/
 │   ├── experiments/
+│   ├── studies/
 │   └── math_flywheel.yaml
 ├── docs/
 ├── prompts/
@@ -95,7 +97,7 @@ AutoBencher/
 │   └── tora_evaluator_strategy.txt
 ├── tests/
 ├── evaluate_error_attribution.py
-├── prepare_open_math_benchmark.py
+├── prepare_fixed_math_benchmark.py
 ├── math_autobencher.py
 ├── run_scripts.py
 ├── train_llm.py
@@ -183,6 +185,7 @@ CLI、`--override`。未知字段和不安全值会在加载模型前直接报�
 
 | 节点 | 用途 |
 | --- | --- |
+| `study` | 采样策略、命名 variant、基线参数与组件开关。 |
 | `generation` | 默认允许难度 2–6、推理步数、重试与 Quota 修复。 |
 | `difficulty` | 客观难度量表、维度权重、目标容差、重标/拒绝策略和采样分数来源。 |
 | `evaluator_pipeline` | 主求解、盲审、裁决和语义提示词路径，以及 Python 限制与重试。 |
@@ -197,6 +200,23 @@ CLI、`--override`。未知字段和不安全值会在加载模型前直接报�
 | `tracking.wandb` | W&B 模式、项目、分组、标签与模型记录。 |
 
 evaluator 与出题器的难度边界必须一致；默认配置禁止竞赛级题目。
+
+### 基线与消融实验
+
+统一策略接口支持 `base`、`random`、`uniform`、`error_only`、`full`、
+`full_no_hard_pool` 和 `full_no_observed_difficulty`。配置位于
+`configs/studies/`；默认仍为 `full`，因此旧配置继续使用完整自适应行为。
+
+```bash
+python run_scripts.py math \
+  --config configs/studies/uniform.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --override experiment.seed=42 \
+  --run-id uniform-seed-42
+```
+
+方法定义、公平比较约束、更多命令和 manifest 检查见
+[`docs/baselines_and_ablations_zh-CN.md`](docs/baselines_and_ablations_zh-CN.md)。
 
 ### 客观难度定义
 
@@ -253,23 +273,20 @@ Beta-Binomial 后验会把这条观测计入难度 3，而不是错误地计入�
 
 ## 运行
 
-服务器首次运行前先构建带版本和哈希的多来源开源固定测试集：
+服务器首次运行前，将仓库内置的项目原生固定测试集离线安装到 VEPFS。该命令不会
+访问 Hugging Face 数据集：
 
 ```bash
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
-export HF_DATASETS_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/datasets"
 
-python prepare_open_math_benchmark.py \
-  --manifest configs/benchmarks/open_math_fixed_suite.yaml \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json" \
-  --cache-dir "$HF_DATASETS_CACHE" \
+python prepare_fixed_math_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
-默认配额完整时固定为 595 题：GSM8K test 100 题、MATH 七主题 test 245 题、
-MMLU 五个数学任务 test 250 题。DeepMind Mathematics 的
-interpolate/extrapolate 可从 VEPFS 选择性加入。构建器拒绝训练/验证切分、静默缩减
-配额、清单漂移和意外覆盖。
+安装器会检查 schema、27 个子类覆盖、题号唯一性、答案字段和题目来源，明确拒绝
+GSM8K、Hendrycks MATH 与 MMLU 来源；写入时同时生成 SHA-256 清单。相同文件重复
+执行是幂等的，不同文件默认拒绝覆盖。
 
 只评测、不训练：
 
@@ -376,10 +393,10 @@ Cohen's kappa、证据覆盖率、Brier Score 和分验证层级准确率。只�
 
 ## 固定测试集与泄漏防护
 
-服务器环境使用 VEPFS 中不可变的
-`benchmarks/open_math_fixed_suite.json`，由 GSM8K、MATH 七个主题和 MMLU 五个数学
-任务的固定公开 test 子集组成。仓库中的 `benchmarks/fixed_math_test_set.json`
-保留为本地测试使用的小型项目原生 fixture。
+服务器环境使用 VEPFS 中不可变的项目原生
+`benchmarks/fixed_math_test_set.json`。它由仓库内置基准离线复制得到，不执行数据集
+下载；GSM8K、Hendrycks MATH、MMLU 以及其他 Hugging Face 托管题目均不进入当前
+评测链路。
 
 - 启动时先评测原始 test-taker 并保存基线正确率。
 - 每轮训练成功后，用同一测试集评测合并后的新模型。
@@ -493,12 +510,7 @@ Apache-2.0 兼容 MinHash 独立后备实现、MIT 许可的
 [TRL](https://github.com/huggingface/trl)，实验追踪使用可配置的
 [Weights & Biases](https://github.com/wandb/wandb)。
 
-固定开源测试集使用
-[GSM8K](https://github.com/openai/grade-school-math)、
-[MATH](https://github.com/hendrycks/math) 和
-[MMLU](https://github.com/hendrycks/test) 的数学任务，并可选加入
-[DeepMind Mathematics](https://github.com/google-deepmind/mathematics_dataset)
-插值/外推数据。错误归因合同借鉴
+固定测试集完全采用项目原生题目，不导入外部数据集题目。错误归因合同借鉴
 [DSPy](https://github.com/stanfordnlp/dspy) 的声明式职责拆分；人工审计把准确率、覆盖率、
 证据、一致性和置信度校准分开报告，借鉴了
 [Ragas](https://github.com/vibrantlabsai/ragas) 的可组合评测思想。DSPy 和 Ragas

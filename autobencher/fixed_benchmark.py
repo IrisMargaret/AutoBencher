@@ -4,13 +4,115 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .config import DEFAULT_TAXONOMY
 from .difficulty import analyze_difficulty
+from .experiment import atomic_json
 from .structured import ANSWER_TYPES, normalize_answer_type
+
+
+PROJECT_FIXED_TEST_SET = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "fixed_math_test_set.json"
+)
+EXCLUDED_EXTERNAL_QUESTION_SOURCES = frozenset(
+    {
+        "openai/gsm8k",
+        "eleutherai/hendrycks_math",
+        "cais/mmlu",
+    }
+)
+
+
+def _assert_project_native_questions(
+    questions: Iterable[Mapping[str, Any]],
+) -> None:
+    """Reject records carrying provenance from removed external question sets."""
+    excluded = []
+    for record in questions:
+        source = str(record.get("source_dataset", "project_native")).strip()
+        if source.lower() in EXCLUDED_EXTERNAL_QUESTION_SOURCES:
+            excluded.append(
+                f"{record.get('question_id', '<unknown>')}={source}"
+            )
+    if excluded:
+        raise ValueError(
+            "Fixed test set contains excluded Hugging Face question sources: "
+            + ", ".join(excluded)
+        )
+
+
+def install_project_fixed_test_set(
+    output: str | Path,
+    *,
+    allowed_data_root: str | Path,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Install the checked-in, project-native holdout without network access."""
+    output_path = Path(output).expanduser().resolve()
+    allowed_root = Path(allowed_data_root).expanduser().resolve()
+    if not output_path.is_relative_to(allowed_root):
+        raise ValueError(
+            f"Output must be beneath allowed data root {allowed_root}"
+        )
+
+    validation_config = {
+        "fixed_test": {
+            "dataset_path": PROJECT_FIXED_TEST_SET.as_posix(),
+            "require_all_subcategories": True,
+        }
+    }
+    questions, source_metadata = load_fixed_test_set(validation_config)
+    _assert_project_native_questions(questions)
+    source_bytes = PROJECT_FIXED_TEST_SET.read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+
+    if output_path.is_file():
+        existing_sha256 = fixed_test_sha256(output_path)
+        if existing_sha256 == source_sha256:
+            status = "already_installed"
+        elif not overwrite:
+            raise FileExistsError(
+                f"Refusing to replace different fixed test set: {output_path}. "
+                "Use --overwrite only when intentionally starting a new "
+                "benchmark version."
+            )
+        else:
+            status = "replaced"
+    else:
+        status = "installed"
+
+    if status != "already_installed":
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output_path.with_name(output_path.name + ".tmp")
+        temporary.write_bytes(source_bytes)
+        os.replace(temporary, output_path)
+
+    manifest = {
+        "schema_version": "1.0",
+        "name": source_metadata["name"],
+        "question_source": "project_native",
+        "network_access": False,
+        "excluded_question_sources": sorted(
+            EXCLUDED_EXTERNAL_QUESTION_SOURCES
+        ),
+        "output_path": output_path.as_posix(),
+        "sha256": source_sha256,
+        "question_count": source_metadata["question_count"],
+        "covered_subcategory_count": source_metadata[
+            "covered_subcategory_count"
+        ],
+        "required_subcategory_count": source_metadata[
+            "required_subcategory_count"
+        ],
+    }
+    atomic_json(manifest, output_path.with_suffix(output_path.suffix + ".manifest.json"))
+    return {"status": status, **manifest}
 
 
 def resolve_fixed_test_path(
@@ -210,6 +312,7 @@ def load_fixed_test_set(
             }
         ),
     }
+    _assert_project_native_questions(questions)
     return questions, metadata
 
 

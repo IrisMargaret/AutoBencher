@@ -66,6 +66,12 @@ def build_parser():
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed used by Transformers and the training dataloader.",
+    )
     parser.add_argument("--metrics_path")
     parser.add_argument("--run_id", default="")
     parser.add_argument("--config_hash", default="")
@@ -270,8 +276,8 @@ def _training_config(args, adapter_output, use_bfloat16):
         "disable_tqdm": False,
         "remove_unused_columns": False,
         "dataloader_pin_memory": True,
-        "seed": 42,
-        "data_seed": 42,
+        "seed": args.seed,
+        "data_seed": args.seed,
     }
     try:
         from trl import SFTConfig
@@ -305,9 +311,13 @@ def train_and_merge(args, model_source, records):
         AutoTokenizer,
         BitsAndBytesConfig,
         TrainerCallback,
+        set_seed,
     )
     from trl import SFTTrainer
 
+    # Seed before model and adapter construction so LoRA initialization,
+    # dataset iteration, and Trainer sampling share the experiment seed.
+    set_seed(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for 4-bit bitsandbytes QLoRA")
     use_bfloat16 = bool(
@@ -404,6 +414,7 @@ def train_and_merge(args, model_source, records):
                         "schema_version": "1.0",
                         "run_id": args.run_id,
                         "config_hash": args.config_hash,
+                        "seed": args.seed,
                         "timestamp": time.time(),
                         "epoch": state.epoch,
                         "step": state.global_step,
@@ -425,11 +436,15 @@ def train_and_merge(args, model_source, records):
             **_supported_kwargs(SFTTrainer.__init__, trainer_values)
         )
         LOGGER.info(
-            "stage=train samples=%d epochs=%d effective_batch=%d lora_rank=%d",
+            (
+                "stage=train samples=%d epochs=%d effective_batch=%d "
+                "lora_rank=%d seed=%d"
+            ),
             len(records),
             args.epoch,
             args.batch,
             args.lora_rank,
+            args.seed,
         )
         trainer.train()
         trainer.model.save_pretrained(
@@ -544,10 +559,11 @@ def main(argv=None):
         return 4
     try:
         LOGGER.info(
-            "stage=start model=%s dataset=%s gpu=%s",
+            "stage=start model=%s dataset=%s gpu=%s seed=%d",
             model_source,
             Path(args.dataset_path).resolve(),
             args.gpu,
+            args.seed,
         )
         train_and_merge(args, model_source, records)
     except Exception as exc:

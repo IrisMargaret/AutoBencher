@@ -13,6 +13,22 @@ experiment:
   resume: true
   disk_warning_threshold_gb: 10
 
+study:
+  policy: full
+  variant: full
+  uniform_difficulty: 4
+  error_only_epsilon: 0.05
+  components:
+    adaptive_allocation: true
+    global_difficulty: true
+    observed_difficulty: true
+    coverage_priority: true
+    uncertainty_priority: true
+    persistent_error_priority: true
+    retention_priority: true
+    hard_pool_variants: true
+    error_type_targeting: true
+
 compatibility:
   use_helm: false
   preserve_existing_cli: true

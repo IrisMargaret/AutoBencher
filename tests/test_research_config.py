@@ -27,6 +27,20 @@ MINI_FLYWHEEL_CONFIG = (
     ROOT / "configs" / "experiments" / "mini_flywheel_8.yaml"
 )
 VOLCENGINE_CONFIG = ROOT / "configs" / "environments" / "volcengine.yaml"
+STUDY_ROOT = ROOT / "configs" / "studies"
+STUDY_CONFIGS = {
+    "base": STUDY_ROOT / "base.yaml",
+    "random": STUDY_ROOT / "random.yaml",
+    "uniform": STUDY_ROOT / "uniform.yaml",
+    "error_only": STUDY_ROOT / "error_only.yaml",
+    "full": STUDY_ROOT / "full.yaml",
+    "full_no_hard_pool": (
+        STUDY_ROOT / "ablations" / "full_no_hard_pool.yaml"
+    ),
+    "full_no_observed_difficulty": (
+        STUDY_ROOT / "ablations" / "full_no_observed_difficulty.yaml"
+    ),
+}
 
 
 def test_default_config_loads_and_contains_nine_categories():
@@ -335,3 +349,76 @@ def test_launcher_announces_data_flywheel_mode_from_yaml():
 
     assert mode == "data_flywheel"
     assert source == "config"
+
+
+@pytest.mark.parametrize(
+    ("variant", "policy"),
+    [
+        ("base", "base"),
+        ("random", "random"),
+        ("uniform", "uniform"),
+        ("error_only", "error_only"),
+        ("full", "full"),
+        ("full_no_hard_pool", "full"),
+        ("full_no_observed_difficulty", "full"),
+    ],
+)
+def test_study_profiles_resolve_strict_runtime_identity(variant, policy):
+    config, _ = load_resolved_config(STUDY_CONFIGS[variant])
+    assert config["study"]["policy"] == policy
+    assert config["study"]["variant"] == variant
+    if variant == "base":
+        assert config["experiment"]["mode"] == "eval"
+        assert config["finetune"]["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("config_path", "override", "message"),
+    [
+        (
+            STUDY_CONFIGS["full"],
+            "study.policy=unknown",
+            "study.policy",
+        ),
+        (
+            STUDY_CONFIGS["full"],
+            "study.variant=random",
+            "requires study.policy",
+        ),
+        (
+            STUDY_CONFIGS["uniform"],
+            "study.uniform_difficulty=10",
+            "uniform_difficulty",
+        ),
+        (
+            STUDY_CONFIGS["error_only"],
+            "study.error_only_epsilon=0",
+            "error_only_epsilon",
+        ),
+        (
+            STUDY_CONFIGS["full_no_hard_pool"],
+            "study.components.error_type_targeting=true",
+            "error_type_targeting",
+        ),
+        (
+            STUDY_CONFIGS["base"],
+            "finetune.enabled=true",
+            "finetune.enabled",
+        ),
+        (
+            STUDY_CONFIGS["full"],
+            "experiment.seed=-1",
+            "experiment.seed",
+        ),
+    ],
+)
+def test_invalid_study_configuration_fails_closed(
+    config_path,
+    override,
+    message,
+):
+    with pytest.raises(ConfigurationError, match=message):
+        load_resolved_config(
+            config_path,
+            temporary_overrides=[override],
+        )

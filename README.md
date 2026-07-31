@@ -9,6 +9,9 @@ answer judging, holdout evaluation, and cache retention explicit and auditable.
 
 The maintained entry point is `math_autobencher.py`. The former Wiki and
 Multilingual entry points have been removed from this math-only repository.
+See [Baselines and ablations](docs/baselines_and_ablations_zh-CN.md) for the
+seven reproducible study methods, component matrix, commands, and manifest
+checks.
 
 ## What the pipeline does
 
@@ -33,8 +36,8 @@ Multilingual entry points have been removed from this math-only repository.
   answered examples and 75% incorrectly answered examples. Every exported
   sample contains a verified gold answer and safe, non-empty solution steps.
 - Evaluates the original model and every trained cycle on one immutable,
-  multi-source open holdout and reports overall, source, subcategory, answer
-  type, and difficulty-stratum accuracy.
+  project-native holdout and reports overall, subcategory, answer type, and
+  difficulty-stratum accuracy. No Hugging Face dataset supplies questions.
 - Rejects training questions that are identical or highly similar to the fixed
   test set using exact/template checks, datasketch MinHash/LSH informed by
   Text-Dedup, and Sentence-Transformers semantic similarity.
@@ -83,22 +86,22 @@ AutoBencher/
 |   |-- difficulty.py
 |   |-- evaluator.py
 |   |-- fixed_benchmark.py
-|   |-- open_benchmark.py
+|   |-- policies.py
 |   |-- similarity.py
 |   |-- structured.py
 |   `-- truth_solver.py
 |-- benchmarks/
 |   `-- fixed_math_test_set.json
 |-- configs/
-|   |-- benchmarks/open_math_fixed_suite.yaml
 |   |-- environments/
 |   |-- experiments/
+|   |-- studies/
 |   `-- math_flywheel.yaml
 |-- docs/
 |-- prompts/
 |-- tests/
 |-- evaluate_error_attribution.py
-|-- prepare_open_math_benchmark.py
+|-- prepare_fixed_math_benchmark.py
 |-- math_autobencher.py
 |-- run_scripts.py
 |-- train_llm.py
@@ -190,6 +193,7 @@ Important sections in `configs/math_flywheel.yaml`:
 
 | Section | Purpose |
 | --- | --- |
+| `study` | Sampling policy, named variant, baseline parameters, and component switches. |
 | `generation` | Allowed difficulty range 2–6 by default, reasoning limit, retries, quota repair. |
 | `difficulty` | Observable rubric, dimension weights, target tolerance, relabel/reject policy, and sampler score source. |
 | `evaluator_pipeline` | Prompt paths, Python timeout/size limits, retries, semantic-judge threshold. |
@@ -205,6 +209,26 @@ Important sections in `configs/math_flywheel.yaml`:
 
 The evaluator and generation difficulty bounds must match. The validated
 defaults prohibit competition-level questions.
+
+### Baselines and ablations
+
+The unified policy interface supports `base`, `random`, `uniform`,
+`error_only`, `full`, `full_no_hard_pool`, and
+`full_no_observed_difficulty`. Study profiles live under `configs/studies/`;
+the default remains `full`, so existing resolved configurations keep the
+complete adaptive behavior.
+
+```bash
+python run_scripts.py math \
+  --config configs/studies/uniform.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --override experiment.seed=42 \
+  --run-id uniform-seed-42
+```
+
+Definitions, fair-comparison controls, additional commands, and manifest
+inspection are documented in
+[docs/baselines_and_ablations_zh-CN.md](docs/baselines_and_ablations_zh-CN.md).
 
 ### Observable difficulty definition
 
@@ -270,25 +294,21 @@ scored at 3 teaches the sampler about difficulty 3.
 
 ## Running
 
-Build the versioned multi-source open holdout before the first server run:
+Install the checked-in project-native holdout into VEPFS before the first
+server run. This command is offline and does not access Hugging Face datasets:
 
 ```bash
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
-export HF_DATASETS_CACHE="$AUTOBENCHER_DATA_ROOT/cache/huggingface/datasets"
 
-python prepare_open_math_benchmark.py \
-  --manifest configs/benchmarks/open_math_fixed_suite.yaml \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/open_math_fixed_suite.json" \
-  --cache-dir "$HF_DATASETS_CACHE" \
+python prepare_fixed_math_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
-The default suite contains exactly 595 questions when all quotas are
-satisfied: 100 GSM8K test questions, 245 MATH test questions, and 250
-mathematics-related MMLU test questions. Optional DeepMind Mathematics
-interpolation/extrapolation data can be enabled only from the VEPFS data root.
-The builder rejects training/validation splits, silent quota shrinkage,
-manifest drift, and accidental overwrite.
+The installer validates schema, taxonomy coverage, unique IDs, answers, and
+question provenance before writing. It rejects GSM8K, Hendrycks MATH, and MMLU
+provenance, writes the exact immutable bytes plus a SHA-256 manifest, refuses
+an accidental overwrite, and is idempotent when the same file already exists.
 
 For the complete low-cost 8-question path (baseline -> SymPy-verified
 generation -> QLoRA -> fixed-set re-evaluation), see
@@ -441,12 +461,11 @@ hard-pool question generation.
 
 ## Fixed test and leakage protection
 
-The server environment uses the immutable
-`benchmarks/open_math_fixed_suite.json` artifact under VEPFS. It combines fixed
-public test subsets from GSM8K, all seven MATH subjects, and five
-mathematics-related MMLU tasks. The checked-in
-`benchmarks/fixed_math_test_set.json` remains a small project-native fixture for
-local tests.
+The server environment uses the immutable project-native
+`benchmarks/fixed_math_test_set.json` artifact under VEPFS. It is copied from
+the checked-in benchmark without any dataset download. GSM8K, Hendrycks MATH,
+MMLU, and other Hugging Face-hosted questions are excluded from the active
+evaluation chain.
 
 - At startup, the original test taker is evaluated and its baseline accuracy is
   stored.
@@ -582,13 +601,9 @@ Local constrained JSON uses
 [TRL](https://github.com/huggingface/trl), and configurable experiment tracking
 uses [Weights & Biases](https://github.com/wandb/wandb).
 
-The fixed open holdout is built from
-[GSM8K](https://github.com/openai/grade-school-math),
-[MATH](https://github.com/hendrycks/math), and the mathematical tasks in
-[MMLU](https://github.com/hendrycks/test), with optional
-[DeepMind Mathematics](https://github.com/google-deepmind/mathematics_dataset)
-interpolation/extrapolation data. Error-attribution contracts follow the
-declarative separation encouraged by
+The fixed holdout is project-native and does not import questions from external
+datasets. Error-attribution contracts follow the declarative separation
+encouraged by
 [DSPy](https://github.com/stanfordnlp/dspy), while the audit report decomposes
 accuracy, coverage, evidence, agreement, and confidence calibration in the
 spirit of [Ragas](https://github.com/vibrantlabsai/ragas). DSPy and Ragas are

@@ -21,8 +21,8 @@ logging:
   progress_leave: false
   progress_dynamic_ncols: true
 
-# The preparation command writes this immutable, multi-source evaluation suite
-# to VEPFS before preflight or training. Public training splits are never used.
+# The offline preparation command copies the immutable project-native suite to
+# VEPFS before preflight or training. No external question dataset is accessed.
 fixed_test:
-  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/open_math_fixed_suite.json
-  require_all_subcategories: false
+  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_test_set.json
+  require_all_subcategories: true

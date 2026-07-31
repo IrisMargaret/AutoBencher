@@ -6,9 +6,6 @@ import math
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
-from .difficulty import target_difficulty_profile
-
-
 def taxonomy_items(config: Mapping[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
     default_quota = int(config["coverage"]["default_min_quota"])
     items = []
@@ -305,225 +302,32 @@ def generation_schedule(
     hard_pool_size: int,
     hard_pool_records: Iterable[Mapping[str, Any]] | None = None,
     previous_round_records: Iterable[Mapping[str, Any]] | None = None,
+    *,
+    cycle: int = 0,
+    seed: int | None = None,
+    question_budget: int | None = None,
 ) -> dict[str, Any]:
-    records = list(records)
-    previous_round_records = list(previous_round_records or [])
-    items = taxonomy_items(config)
-    metrics = coverage_metrics(records, config)
-    state = beta_binomial_state(records, config)
-    global_accuracy_state = previous_round_accuracy_state(
-        previous_round_records,
-        config,
-    )
-    latest_difficulty: dict[str, int] = {}
-    for record in records:
-        subcategory = _record_subcategory(record)
-        if subcategory:
-            latest_difficulty[subcategory] = int(
-                record.get(
-                    "difficulty",
-                    config["adaptive_sampling"]["initial_difficulty"],
-                )
-            )
-    priorities = []
-    for category, subcategory, metadata in items:
-        difficulty = latest_difficulty.get(
-            subcategory,
-            int(config["adaptive_sampling"]["initial_difficulty"]),
-        )
-        item = adaptive_priority(
-            subcategory,
-            difficulty,
-            int(metrics["subcategory_counts"][subcategory]),
-            int(metadata["min_quota"]),
-            state,
-            config,
-        )
-        local_selected_difficulty = int(item["selected_difficulty"])
-        combined_delta = (
-            local_selected_difficulty
-            - difficulty
-            + int(global_accuracy_state["difficulty_delta"])
-        )
-        maximum_change = int(
-            config["adaptive_sampling"]["max_difficulty_change_per_iteration"]
-        )
-        combined_delta = max(-maximum_change, min(maximum_change, combined_delta))
-        item["local_selected_difficulty"] = local_selected_difficulty
-        item["global_difficulty_delta"] = int(
-            global_accuracy_state["difficulty_delta"]
-        )
-        item["combined_difficulty_delta"] = combined_delta
-        item["sampling_reason"].append(global_accuracy_state["reason"])
-        item["selected_difficulty"] = difficulty + combined_delta
-        item["selected_difficulty"] = max(
-            int(config["generation"]["minimum_difficulty"]),
-            min(
-                int(config["generation"]["maximum_difficulty"]),
-                int(item["selected_difficulty"]),
-            ),
-        )
-        item["category"] = category
-        item["base_weight"] = float(metadata.get("base_weight", 1.0))
-        item["current_count"] = int(metrics["subcategory_counts"][subcategory])
-        item["min_quota"] = int(metadata["min_quota"])
-        priorities.append(item)
-    budget = int(config["experiment"]["questions_per_iteration"])
-    injection_start = int(config["hard_pool"]["injection_start_iteration"])
-    injection_enabled = global_iteration >= injection_start and hard_pool_size > 0
-    if injection_enabled:
-        source_budget = largest_remainder(
-            budget,
-            {
-                "hard_pool_variant": float(
-                    config["generation_mix"]["hard_pool_variants"]
-                ),
-                "coverage_deficit": float(
-                    config["generation_mix"]["coverage_deficit"]
-                ),
-                "retention_known": float(
-                    config["generation_mix"]["retention_known"]
-                ),
-            },
-        )
-    else:
-        source_budget = {
-            "hard_pool_variant": 0,
-            "coverage_deficit": budget,
-            "retention_known": 0,
-        }
-    hard_pool_records = list(hard_pool_records or [])
-    eligible_hard_keys = {
-        (
-            str(record.get("category", "")),
-            _record_subcategory(record),
-        )
-        for record in hard_pool_records
-        if record.get("sample_grade") in {None, "train_eligible"}
-    }
-    if hard_pool_records and not eligible_hard_keys:
-        injection_enabled = False
-        source_budget = {
-            "hard_pool_variant": 0,
-            "coverage_deficit": budget,
-            "retention_known": 0,
-        }
-    allocations = []
-    actual_subcategory_budget: Counter[str] = Counter()
-    max_questions_per_prompt = int(
-        config["generation"]["max_questions_per_prompt"]
-    )
-    for source in (
-        "hard_pool_variant",
-        "coverage_deficit",
-        "retention_known",
-    ):
-        source_total = source_budget[source]
-        if source_total <= 0:
-            continue
-        source_items = priorities
-        if source == "hard_pool_variant" and eligible_hard_keys:
-            source_items = [
-                item
-                for item in priorities
-                if (item["category"], item["subcategory"]) in eligible_hard_keys
-            ]
-        source_weights = {
-            f"{item['category']}|||{item['subcategory']}": max(
-                1e-9,
-                item["priority_score"] * item["base_weight"],
-            )
-            for item in source_items
-        }
-        source_allocation = largest_remainder(source_total, source_weights)
-        by_key = {
-            f"{item['category']}|||{item['subcategory']}": item
-            for item in source_items
-        }
-        for key, source_count in source_allocation.items():
-            if not source_count:
-                continue
-            item = by_key[key]
-            actual_subcategory_budget[item["subcategory"]] += source_count
-            remaining_count = source_count
-            while remaining_count:
-                chunk_count = min(remaining_count, max_questions_per_prompt)
-                allocations.append(
-                    {
-                        "category": item["category"],
-                        "sub_category": item["subcategory"],
-                        "question_count": chunk_count,
-                        "difficulty": item["selected_difficulty"],
-                        "target_difficulty_profile": (
-                            target_difficulty_profile(
-                                item["selected_difficulty"],
-                                config,
-                            )
-                        ),
-                        "generation_source": source,
-                        "generation_strategy": (
-                            "numeric_structure_variant"
-                            if source == "hard_pool_variant"
-                            else (
-                                "quota_repair"
-                                if source == "coverage_deficit"
-                                else "retention_probe"
-                            )
-                        ),
-                        "priority_score": item["priority_score"],
-                    }
-                )
-                remaining_count -= chunk_count
-    required_minimum = sum(item["min_quota"] for item in priorities)
-    remaining_minimum_before = sum(
-        max(0, item["min_quota"] - item["current_count"])
-        for item in priorities
-    )
-    unsatisfied = [
-        item["subcategory"]
-        for item in priorities
-        if item["current_count"] + actual_subcategory_budget[item["subcategory"]]
-        < item["min_quota"]
-    ]
-    if sum(item["question_count"] for item in allocations) != budget:
-        raise RuntimeError("generation allocation did not conserve the question budget")
-    if global_iteration < injection_start and source_budget["hard_pool_variant"] != 0:
-        raise RuntimeError("hard pool injection occurred during warmup")
-    if injection_enabled and source_budget["hard_pool_variant"] <= 0:
-        raise RuntimeError("directed generation budget must be positive after injection")
-    if remaining_minimum_before == 0:
-        cumulative_quota_status = "complete"
-    elif budget >= remaining_minimum_before:
-        cumulative_quota_status = "scheduled_this_iteration"
-    else:
-        cumulative_quota_status = "multi_iteration_progress"
-    return {
-        "global_iteration": global_iteration,
-        "question_budget": budget,
-        # Compatibility field: the current integer allocation is valid. Full
-        # taxonomy quotas are intentionally cumulative across iterations.
-        "quota_feasible": True,
-        "cumulative_quota_status": cumulative_quota_status,
-        "cumulative_quota_completion_possible_this_iteration": (
-            budget >= remaining_minimum_before
+    # Local import prevents a module cycle: policies intentionally reuse the
+    # pure calculations defined above.
+    from .policies import PolicyContext, create_policy
+
+    context = PolicyContext(
+        config=config,
+        history_records=tuple(records),
+        previous_round_records=tuple(previous_round_records or ()),
+        hard_pool_records=tuple(hard_pool_records or ()),
+        global_iteration=int(global_iteration),
+        cycle=int(cycle),
+        seed=(
+            int(config["experiment"].get("seed", 42))
+            if seed is None
+            else int(seed)
         ),
-        "minimum_questions_for_full_quota": required_minimum,
-        "remaining_questions_for_full_quota_before_iteration": (
-            remaining_minimum_before
+        question_budget=(
+            int(config["experiment"]["questions_per_iteration"])
+            if question_budget is None
+            else int(question_budget)
         ),
-        "unsatisfied_subcategories": unsatisfied,
-        "hard_pool_injection_enabled": injection_enabled,
-        "hard_pool_reference_count": min(
-            hard_pool_size,
-            int(config["hard_pool"]["max_reference_samples"]),
-        ) if injection_enabled else 0,
-        "directed_generation_question_count": source_budget["hard_pool_variant"],
-        "coverage_repair_question_count": source_budget["coverage_deficit"],
-        "retention_question_count": source_budget["retention_known"],
-        "source_budget": source_budget,
-        "allocations": allocations,
-        "adaptive_sampler_state": priorities,
-        "previous_round_accuracy_state": global_accuracy_state,
-        "coverage_before_generation": metrics,
-        "fallbacks": [],
-    }
+        hard_pool_size=int(hard_pool_size),
+    )
+    return create_policy(config).build_plan(context).to_dict()
