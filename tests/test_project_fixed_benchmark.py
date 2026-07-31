@@ -51,7 +51,7 @@ def test_project_fixed_installer_rejects_output_outside_data_root(tmp_path):
 
 
 def test_runtime_bootstrap_installs_only_managed_development_set(tmp_path):
-    target = tmp_path / "data" / "benchmarks" / "fixed_math_test_set_v3.json"
+    target = tmp_path / "data" / "benchmarks" / "fixed_math_dev_v3.json"
     config = {
         "fixed_test": {"enabled": True, "dataset_path": target.as_posix()},
         "evaluation_sets": {"active_set": "development_regression_v3"},
@@ -66,6 +66,12 @@ def test_runtime_bootstrap_installs_only_managed_development_set(tmp_path):
     )
     assert result["status"] == "installed"
     assert target.read_bytes() == PROJECT_FIXED_TEST_SET.read_bytes()
+    manifest = json.loads(
+        target.with_suffix(".json.manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["name"] == "fixed_math_dev_v3"
+    assert manifest["benchmark_role"] == "dev_regression"
+    assert "training_example" in manifest["forbidden_uses"]
 
     config["evaluation_sets"]["active_set"] = "official_fixed_v1"
     target.unlink()
@@ -93,6 +99,7 @@ def test_all_active_configs_exclude_external_fixed_question_suite():
         assert Path(fixed_test["dataset_path"]).name in {
             "fixed_math_test_set.json",
             "fixed_math_test_set_v3.json",
+            "fixed_math_dev_v3.json",
         }, path
         assert fixed_test.get("require_all_subcategories") is True, path
 

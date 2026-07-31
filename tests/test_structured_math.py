@@ -8,6 +8,7 @@ from autobencher.structured import (
     answers_equivalent,
     attribute_error,
     clean_answer_candidate,
+    fuse_equivalence_with_semantic_judge,
     normalize_answer_type,
     normalize_generated_gold_contract,
     parse_test_taker_output,
@@ -252,6 +253,89 @@ def test_answer_equivalence_types(config, gold, predicted, answer_type):
     )["equivalent"] is True
 
 
+@pytest.mark.parametrize(
+    ("gold", "predicted", "answer_type"),
+    [
+        ("[[5, 4], [4, 5]]", "[[5, 6], [6, 5]]", "matrix"),
+        ("[5, 5, -5]", "(5, 4, -5)", "vector"),
+        ("(4, 3)", "(3, 4)", "ordered_tuple"),
+        (
+            "(x^2 + 2*x + 1)*exp(x)",
+            "(2x + 1)*exp(x) + (x^2 + 1)*exp(x)",
+            "symbolic_expression",
+        ),
+    ],
+)
+def test_typed_equivalence_rejects_structural_false_positives(
+    config, gold, predicted, answer_type
+):
+    result = answers_equivalent(gold, predicted, answer_type, config)
+    assert result["equivalent"] is False
+    assert result["backend_results"]["typed"]["authoritative"] is True
+
+
+def test_symbolic_implicit_multiplication_equivalent_product(config):
+    result = answers_equivalent(
+        "(x^2 + 2*x + 1)*exp(x)",
+        "exp(x)*(x^2 + 2x + 1)",
+        "symbolic_expression",
+        config,
+    )
+    assert result["equivalent"] is True
+
+
+def test_math_verify_cannot_override_typed_rejection(config, monkeypatch):
+    monkeypatch.setattr(
+        "autobencher.structured._math_verify_equal",
+        lambda gold, predicted: (True, True),
+    )
+    result = answers_equivalent(
+        "[[5, 4], [4, 5]]",
+        "[[5, 6], [6, 5]]",
+        "matrix",
+        config,
+    )
+    assert result["equivalent"] is False
+    assert result["status"] == "equivalence_backend_disagreement"
+    assert result["disagreement"] is True
+    assert result["needs_review"] is True
+
+
+def test_semantic_judge_cannot_override_typed_rejection(config):
+    equivalence = answers_equivalent("8", "9", "integer", config)
+    fused = fuse_equivalence_with_semantic_judge(
+        equivalence,
+        judge_is_correct=True,
+        judge_valid=True,
+        judge_confidence=1.0,
+        confidence_threshold=0.8,
+        require_semantic_judge=True,
+    )
+    assert fused == {
+        "is_correct": False,
+        "status": "judge_deterministic_disagreement",
+        "judge_conflict": True,
+    }
+
+
+def test_semantic_judge_only_resolves_typed_parse_ambiguity(config):
+    equivalence = answers_equivalent(
+        "an exact prose answer", "same meaning", "text", config
+    )
+    equivalence["deterministic_checks"]["typed_parse_success"] = False
+    equivalence["status"] = "ambiguous"
+    fused = fuse_equivalence_with_semantic_judge(
+        equivalence,
+        judge_is_correct=True,
+        judge_valid=True,
+        judge_confidence=0.95,
+        confidence_threshold=0.8,
+        require_semantic_judge=True,
+    )
+    assert fused["is_correct"] is True
+    assert fused["status"] == "semantic_equivalent_ambiguous"
+
+
 def test_exact_irrational_gold_stays_symbolic():
     contract = normalize_generated_gold_contract(
         "Find the exact diagonal of a unit square.",
@@ -470,7 +554,7 @@ def test_attribution_detects_wrong_irrational_approximation(config):
         config,
     )
     assert result["primary_error_tag"] == "numeric_approximation_error"
-    assert result["taxonomy_version"] == "math_error_taxonomy_v3"
+    assert result["taxonomy_version"] == "math_error_taxonomy_v4"
     assert result["evidence"][0]["check_name"] == (
         "exact_to_numeric_approximation"
     )
@@ -514,6 +598,69 @@ def test_attribution_uses_truth_solver_constraint_evidence(config):
     assert result["evidence"][0]["check_name"] == (
         "truth_solver_substitution"
     )
+
+
+def test_attribution_identifies_matrix_element_mismatch(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {"reasoning_summary": [], "final_answer": "[[1,3]]"},
+    }
+    equivalence = answers_equivalent("[[1,2]]", "[[1,3]]", "matrix", config)
+    result = attribute_error(
+        {"canonical_answer": "[[1,2]]", "answer_type": "matrix"},
+        parsed,
+        equivalence,
+        config,
+    )
+    assert result["primary_error_tag"] == "matrix_element_error"
+    assert result["verification_tier"] == "deterministic"
+    assert result["evidence"][0]["column_index"] == 1
+
+
+def test_attribution_marks_proper_subexpression_as_strong_heuristic(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": [],
+            "final_answer": "x + 1",
+        },
+    }
+    equivalence = answers_equivalent(
+        "(x + 1)*(x + 2)", "x + 1", "symbolic_expression", config
+    )
+    result = attribute_error(
+        {
+            "canonical_answer": "(x + 1)*(x + 2)",
+            "answer_type": "symbolic_expression",
+        },
+        parsed,
+        equivalence,
+        config,
+    )
+    assert result["primary_error_tag"] == "incomplete_expression_evaluation"
+    assert result["verification_tier"] == "strong_heuristic"
+    assert result["needs_review"] is True
+
+
+def test_attribution_separates_format_only_difference(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {"reasoning_summary": [], "final_answer": "2*x"},
+    }
+    equivalence = answers_equivalent(
+        "x + x", "2*x", "symbolic_expression", config
+    )
+    result = attribute_error(
+        {
+            "canonical_answer": "x + x",
+            "answer_type": "symbolic_expression",
+        },
+        parsed,
+        equivalence,
+        config,
+    )
+    assert result["primary_error_tag"] is None
+    assert result["secondary_error_tags"] == ["format_only_difference"]
 
 
 def test_attribution_rejects_choice_outside_available_options(config):

@@ -103,7 +103,12 @@ def install_project_fixed_test_set(
 
     manifest = {
         "schema_version": "1.0",
-        "name": source_metadata["name"],
+        "name": (
+            "fixed_math_dev_v3"
+            if output_path.name == "fixed_math_dev_v3.json"
+            else source_metadata["name"]
+        ),
+        "benchmark_role": "dev_regression",
         "question_source": "project_native",
         "network_access": False,
         "excluded_question_sources": sorted(
@@ -117,6 +122,16 @@ def install_project_fixed_test_set(
         ],
         "required_subcategory_count": source_metadata[
             "required_subcategory_count"
+        ],
+        "allowed_uses": [
+            "baseline_evaluation",
+            "cycle_evaluation",
+            "debugging",
+            "regression_testing",
+        ],
+        "forbidden_uses": [
+            "training_example",
+            "gold_prompt_context",
         ],
     }
     atomic_json(manifest, output_path.with_suffix(output_path.suffix + ".manifest.json"))
@@ -352,6 +367,8 @@ def load_fixed_test_set(
                 ),
                 "difficulty_profile": dict(difficulty_profile),
                 "fixed_test": True,
+                "evaluation_set_id": evaluation_spec["id"],
+                "evaluation_role": evaluation_spec["role"],
                 "truth_validation_details": {
                     "source_question_sha256": hashlib.sha256(
                         question_text.encode("utf-8")

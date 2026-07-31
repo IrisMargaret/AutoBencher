@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from autobencher.fingerprints import artifact_fingerprint
+import yaml
+
+from autobencher.experiment import atomic_json, git_commit
+from autobencher.fingerprints import artifact_fingerprint, file_sha256
 from autobencher.result_schema import ExperimentRecord, validate_registry
 from autobencher.study_runner import validate_experiment_completion
 
@@ -19,6 +24,10 @@ def _json(path: Path):
 
 def _override(name, value):
     return f"{name}={json.dumps(value, ensure_ascii=False)}"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def main(argv=None) -> int:
@@ -70,6 +79,47 @@ def main(argv=None) -> int:
         if checkpoint != bound_path:
             raise SystemExit("checkpoint_path is not the source run's selected model")
 
+    raw_config = yaml.safe_load(
+        Path(args.config).expanduser().resolve().read_text(encoding="utf-8")
+    )
+    active_set = str(
+        (raw_config.get("evaluation_sets") or {}).get("active_set", "")
+    )
+    blind_receipt_path = None
+    blind_receipt = None
+    if active_set == "blind_final_v1":
+        benchmark_sha = os.environ.get(
+            "AUTOBENCHER_BLIND_TEST_SHA256", ""
+        ).strip().lower()
+        if len(benchmark_sha) != 64:
+            raise SystemExit("blind benchmark SHA-256 is not provisioned")
+        data_root = Path(
+            os.environ.get(
+                "AUTOBENCHER_DATA_ROOT",
+                "/vepfs-mlp2/queue010/20262202597/math_flywheel",
+            )
+        ).expanduser().resolve()
+        receipt_dir = data_root / "blind_receipts"
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        blind_receipt_path = receipt_dir / f"{observed_sha}-{benchmark_sha}.json"
+        if blind_receipt_path.exists():
+            raise SystemExit(
+                "this model snapshot and blind benchmark have already been evaluated"
+            )
+        blind_receipt = {
+            "schema_version": "1.0",
+            "status": "running",
+            "model_sha256": observed_sha,
+            "benchmark_sha256": benchmark_sha,
+            "config_sha256": file_sha256(Path(args.config).resolve()),
+            "git_commit": git_commit(Path(__file__).resolve().parent),
+            "run_id": args.run_id,
+            "started_at": _utc_now(),
+        }
+        atomic_json(blind_receipt, blind_receipt_path)
+        if os.name != "nt":
+            os.chmod(blind_receipt_path, 0o600)
+
     command = [
         sys.executable,
         "-B",
@@ -102,12 +152,27 @@ def main(argv=None) -> int:
     )
     print(subprocess.list2cmdline(command))
     if args.dry_run:
+        if blind_receipt_path is not None:
+            blind_receipt_path.unlink(missing_ok=True)
         return 0
-    return subprocess.run(
+    return_code = subprocess.run(
         command,
         cwd=Path(__file__).resolve().parent,
         check=False,
     ).returncode
+    if blind_receipt_path is not None and blind_receipt is not None:
+        atomic_json(
+            {
+                **blind_receipt,
+                "status": "completed" if return_code == 0 else "failed",
+                "completed_at": _utc_now(),
+                "return_code": return_code,
+            },
+            blind_receipt_path,
+        )
+        if os.name != "nt":
+            os.chmod(blind_receipt_path, 0o600)
+    return return_code
 
 
 if __name__ == "__main__":

@@ -1,0 +1,23 @@
+extends: ../math_flywheel.yaml
+
+schema_version: "1.0"
+
+experiment:
+  name: development_static_540_v1
+  mode: eval
+  max_cycles: 1
+
+evaluation_sets:
+  active_set: development_static_540_v1
+  phase: development
+  allow_blind_evaluation: false
+
+finetune:
+  enabled: false
+
+fixed_test:
+  enabled: true
+  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_development_static_540_v1.json
+  evaluate_baseline: true
+  evaluate_after_each_training_cycle: false
+  require_all_subcategories: true

@@ -313,8 +313,8 @@ adaptive_sampling:
   # applied before the original per-subcategory Beta-Binomial allocation.
   initial_difficulty: 4
   global_accuracy_enabled: true
-  global_accuracy_low: 0.35
-  global_accuracy_high: 0.70
+  global_accuracy_low: 0.30
+  global_accuracy_high: 0.60
   global_accuracy_min_observations: 10
   global_difficulty_step: 1
   max_difficulty_change_per_iteration: 1

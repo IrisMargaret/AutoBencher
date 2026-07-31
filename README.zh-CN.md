@@ -184,7 +184,7 @@ export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 export PYTHONDONTWRITEBYTECODE=1
 
 python -B prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 
 python -B run_scripts.py math \
@@ -442,9 +442,9 @@ out-of-fold 预测，不把全数据拟合指标冒充验证结果。重复的 m
 
 | 上一轮整体正确率 | 默认的下一轮难度偏置 |
 | --- | --- |
-| 低于 `0.35` | 降低 1 级 |
-| `0.35` 到 `0.70`（含边界） | 保持 |
-| 高于 `0.70` | 提高 1 级 |
+| 低于 `0.30` | 降低 1 级 |
+| `0.30` 到 `0.60`（含边界） | 保持 |
+| 高于 `0.60` | 提高 1 级 |
 
 达到 `adaptive_sampling.global_accuracy_min_observations: 10` 个有效作答后才启用。
 两个区间边界由 `global_accuracy_low` 和 `global_accuracy_high` 配置，调整步长由
@@ -469,7 +469,7 @@ Beta-Binomial 后验会把这条观测计入难度 3，而不是错误地计入�
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -646,6 +646,51 @@ Kappa ≥ 0.70、高置信度准确率 ≥ 0.80、高置信度样本不少于 50
 稳定常识、逻辑一致性和非目标字符串推理六个维度。它与开发集、所有本地可见的非盲
 评测集、冻结后的正式集一起进入训练泄漏过滤；总体与分维度遗忘率均报告 Wilson 95%
 区间。盲测题面始终不向训练进程开放。
+
+历史文件 `fixed_math_test_set_v3.json` 保留不动，新的日常运行使用
+`fixed_math_dev_v3.json`，其清单明确标记为 81 题开发回归集，禁止作为训练样本或
+Gold Prompt 上下文。需要更低方差的开发评测时，可在 VEPFS 生成 27×20=540 题的
+静态压力回归集：
+
+```bash
+python -B prepare_large_development_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_development_static_540_v1.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+
+python -B run_scripts.py math \
+  --config configs/experiments/development_static_540_eval.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id dev-static-540-v1
+```
+
+该 540 题集合为项目原创的确定性公式题，只借鉴 GSM8K、MATH 与 DeepMind
+Mathematics Dataset 的覆盖设计，不复制外部题目，也不能替代正式集或盲测集。
+
+旧运行可在完全离线、保持原文件不变的前提下重新评分：
+
+```bash
+python -B regrade_run.py \
+  --run-dir "$AUTOBENCHER_DATA_ROOT/run_mini-chain-v2_62e2915f6644" \
+  --evaluator-version typed_equivalence_v2 \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+盲测集从独立候选池一次性筛选，并与开发集、训练集和全部历史生成记录执行精确文本、
+近文本、参数模板和数学结构去重。Seed 文件只通过环境变量传入，不打印、不写清单：
+
+```bash
+export AUTOBENCHER_BLIND_SEED_FILE=/secure/blind_seed.bin
+python -B prepare_blind_math_benchmark.py \
+  --candidates "$AUTOBENCHER_DATA_ROOT/benchmarks/blind_candidates.json" \
+  --contamination-data "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
+  --contamination-data "$AUTOBENCHER_DATA_ROOT/audits/all_training_and_generation.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/blind/fixed_math_blind_v1.json" \
+  --manifest-output "$AUTOBENCHER_DATA_ROOT/benchmarks/blind/fixed_math_blind_v1.manifest.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+绑定式盲测会写入私有 receipt；同一模型目录哈希与盲测集哈希的组合默认只允许执行
+一次。
 
 正式集和盲测只能由 checkpoint 绑定入口启动。直接加载对应 YAML 会因缺少来源信息
 而失败；入口会把 source study/method/seed/run ID、checkpoint 路径及目录 SHA 与已完成

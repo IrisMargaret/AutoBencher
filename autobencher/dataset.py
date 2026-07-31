@@ -282,6 +282,17 @@ def _rejection_reasons(
 ) -> list[str]:
     reasons = []
     dataset_config = config["dataset"]
+    evaluation_role = str(
+        record.get("evaluation_role", record.get("benchmark_role", ""))
+    ).strip()
+    if evaluation_role in {"official_fixed", "blind_final"}:
+        reasons.append(f"prohibited_{evaluation_role}_training_source")
+    if record.get("equivalence_backend_disagreement") or record.get(
+        "equivalence_needs_review"
+    ):
+        reasons.append("equivalence_requires_review")
+    if record.get("evaluation_status") == "judge_deterministic_disagreement":
+        reasons.append("judge_deterministic_disagreement")
     if record.get("question_parse_success", True) is not True:
         reasons.append("question_parse_failed")
     if (
@@ -777,6 +788,62 @@ def build_training_dataset(
             any(reason.startswith("holdout_") for reason in item["reasons"])
             for item in rejected
         ),
+        "training_safety": {
+            "source_attribution_tier_counts": dict(
+                sorted(
+                    Counter(
+                        str(record.get("verification_tier", "unreported"))
+                        for record in source_records
+                    ).items()
+                )
+            ),
+            "selected_attribution_tier_counts": dict(
+                sorted(
+                    Counter(
+                        str(record.get("verification_tier", "unreported"))
+                        for record in selected
+                    ).items()
+                )
+            ),
+            "evaluator_disagreement_input_count": sum(
+                bool(record.get("equivalence_backend_disagreement"))
+                or record.get("evaluation_status")
+                == "judge_deterministic_disagreement"
+                for record in source_records
+            ),
+            "evaluator_disagreement_selected_count": sum(
+                bool(record.get("equivalence_backend_disagreement"))
+                or record.get("evaluation_status")
+                == "judge_deterministic_disagreement"
+                for record in selected
+            ),
+            "blind_or_official_input_count": sum(
+                str(
+                    record.get(
+                        "evaluation_role", record.get("benchmark_role", "")
+                    )
+                )
+                in {"official_fixed", "blind_final"}
+                for record in source_records
+            ),
+            "blind_or_official_selected_count": sum(
+                str(
+                    record.get(
+                        "evaluation_role", record.get("benchmark_role", "")
+                    )
+                )
+                in {"official_fixed", "blind_final"}
+                for record in selected
+            ),
+            "holdout_template_overlap_rejected_count": sum(
+                "holdout_template_overlap" in item["reasons"]
+                for item in rejected
+            ),
+            "selected_equivalence_review_count": sum(
+                bool(record.get("equivalence_needs_review"))
+                for record in selected
+            ),
+        },
         "rejection_reasons": dict(sorted(rejection_counts.items())),
         "exact_unique_count": len(exact_unique),
         "near_unique_count": len(near_unique),

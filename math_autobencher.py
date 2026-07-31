@@ -69,6 +69,7 @@ from autobencher.similarity import build_similarity_batch
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
+    fuse_equivalence_with_semantic_judge,
     normalize_generated_gold_contract,
     normalize_answer_type,
     validate_generated_question,
@@ -3398,35 +3399,21 @@ def test_and_eval(
                         "semantic_judge_confidence_threshold"
                     ]
                 )
-                semantic_accept = bool(
-                    evaluator_is_correct
-                    and float(judgment.get("confidence", 0.0))
-                    >= semantic_threshold
-                    and equivalence["deterministic_checks"].get(
-                        "format_valid",
-                        False,
-                    )
+                fusion = fuse_equivalence_with_semantic_judge(
+                    equivalence,
+                    judge_is_correct=evaluator_is_correct,
+                    judge_valid=semantic_judge_valid,
+                    judge_confidence=float(judgment.get("confidence", 0.0)),
+                    confidence_threshold=semantic_threshold,
+                    require_semantic_judge=bool(
+                        research_config["evaluator_pipeline"][
+                            "require_semantic_judge"
+                        ]
+                    ),
                 )
-                if (
-                    research_config["evaluator_pipeline"][
-                        "require_semantic_judge"
-                    ]
-                    and not semantic_judge_valid
-                ):
-                    standardized["is_correct"] = False
-                    evaluation_status = "semantic_judge_failed"
-                else:
-                    standardized["is_correct"] = bool(
-                        equivalence["equivalent"] or semantic_accept
-                    )
-                    if equivalence["equivalent"] and not semantic_accept:
-                        evaluation_status = (
-                            "deterministic_equivalent_judge_disagreement"
-                        )
-                    elif semantic_accept and not equivalence["equivalent"]:
-                        evaluation_status = "semantic_equivalent"
-                    else:
-                        evaluation_status = equivalence["status"]
+                standardized["is_correct"] = bool(fusion["is_correct"])
+                evaluation_status = str(fusion["status"])
+                judge_conflict = bool(fusion["judge_conflict"])
                 if standardized["is_correct"] and bool(
                     semantic_judge.get("format_only_difference")
                 ):
@@ -3482,6 +3469,20 @@ def test_and_eval(
                     "judge_deterministic_agreement": (
                         bool(equivalence["equivalent"])
                         == evaluator_is_correct
+                    ),
+                    "equivalence_status": equivalence["status"],
+                    "equivalence_needs_review": bool(
+                        equivalence.get("needs_review", False)
+                        or judge_conflict
+                    ),
+                    "equivalence_backend_disagreement": bool(
+                        equivalence.get("disagreement", False)
+                    ),
+                    "equivalence_backend_results": equivalence.get(
+                        "backend_results", {}
+                    ),
+                    "authoritative_equivalence_method": equivalence.get(
+                        "authoritative_method"
                     ),
                     "answer_validation_success": bool(
                         equivalence["gold_normalized"]["success"]

@@ -190,7 +190,7 @@ export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 export PYTHONDONTWRITEBYTECODE=1
 
 python -B prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 
 python -B run_scripts.py math \
@@ -480,9 +480,9 @@ holdout score—as a coarse global difficulty guardrail:
 
 | Previous-round overall accuracy | Default next-round bias |
 | --- | --- |
-| Below `0.35` | Decrease difficulty by 1 |
-| `0.35` through `0.70` | Keep difficulty |
-| Above `0.70` | Increase difficulty by 1 |
+| Below `0.30` | Decrease difficulty by 1 |
+| `0.30` through `0.60` | Keep difficulty |
+| Above `0.60` | Increase difficulty by 1 |
 
 The global rule starts after
 `adaptive_sampling.global_accuracy_min_observations: 10`. Configure the two
@@ -511,7 +511,7 @@ server run. This command is offline and does not access Hugging Face datasets:
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -960,6 +960,56 @@ See `THIRD_PARTY_NOTICES.md` for the precise reuse boundary and license notes.
 - `blind_final_v1` has no repository-visible path or hash. It loads only in
   `blind_evaluation` phase with an explicit release token and matching
   out-of-band SHA-256. Fine-tuning is rejected in that phase.
+
+The historical `fixed_math_test_set_v3.json` is not changed or deleted. New
+runs install the same 81 immutable questions as `fixed_math_dev_v3.json`, whose
+manifest explicitly permits regression/debugging and prohibits training or
+gold-prompt use. For a lower-variance development-only evaluation, create the
+deterministic 540-item static stress set (20 items per subcategory):
+
+```bash
+python -B prepare_large_development_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_development_static_540_v1.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+
+python -B run_scripts.py math \
+  --config configs/experiments/development_static_540_eval.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id dev-static-540-v1
+```
+
+This set is project-authored and only adopts coverage/task-design ideas from
+GSM8K, MATH, and the DeepMind Mathematics Dataset; no external question is
+copied. Its manifest marks it unsuitable for blind or paper claims. The formal
+540-item set must still pass the independent-solver, reviewer, diversity, and
+training-leakage gates in `prepare_evaluation_sets.py assemble-official`.
+
+Regrade an old run entirely offline without changing original artifacts:
+
+```bash
+python -B regrade_run.py \
+  --run-dir "$AUTOBENCHER_DATA_ROOT/run_mini-chain-v2_62e2915f6644" \
+  --evaluator-version typed_equivalence_v2 \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+Blind construction consumes a separately curated candidate pool and all known
+development/training/generation corpora. The seed path is supplied out of band
+and is neither printed nor written to the manifest:
+
+```bash
+export AUTOBENCHER_BLIND_SEED_FILE=/secure/blind_seed.bin
+python -B prepare_blind_math_benchmark.py \
+  --candidates "$AUTOBENCHER_DATA_ROOT/benchmarks/blind_candidates.json" \
+  --contamination-data "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
+  --contamination-data "$AUTOBENCHER_DATA_ROOT/audits/all_training_and_generation.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/blind/fixed_math_blind_v1.json" \
+  --manifest-output "$AUTOBENCHER_DATA_ROOT/benchmarks/blind/fixed_math_blind_v1.manifest.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+`run_formal_evaluation.py` binds the checkpoint hash and creates a private
+receipt. The same model hash × blind-set hash pair is rejected on a second run.
 
 Audit the development set and write the report only to VEPFS:
 

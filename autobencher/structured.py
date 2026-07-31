@@ -10,6 +10,7 @@ import os
 import re
 import unicodedata
 import warnings
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping
@@ -82,7 +83,12 @@ ERROR_TAGS = (
     "off_by_one_error",
     "answer_transfer_error",
     "constraint_violation",
+    "extraneous_solution",
     "incomplete_solution",
+    "incomplete_expression_evaluation",
+    "matrix_element_error",
+    "vector_component_error",
+    "format_only_difference",
     "unit_mismatch",
     "symbolic_manipulation_error",
     "invalid_multiple_choice",
@@ -912,22 +918,102 @@ def _numeric_equal(left: float, right: float, config: Mapping[str, Any]) -> bool
     )
 
 
+_SYMBOLIC_IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+_SYMBOLIC_FORBIDDEN = re.compile(
+    r"__|[\[\]{};'\"`]|\b(?:import|exec|eval|lambda|open|compile)\b"
+)
+
+
+def _safe_symbolic_expression(value: Any):
+    """Parse a scalar expression with implicit multiplication, fail closed.
+
+    SymPy's general parser is intentionally not exposed directly to model
+    output.  Attribute access, strings, containers and Python keywords are
+    rejected, while unknown identifiers are materialized only as Symbols.
+    """
+    import sympy
+    from sympy.parsing.sympy_parser import (
+        convert_xor,
+        implicit_multiplication_application,
+        parse_expr,
+        standard_transformations,
+    )
+
+    text = clean_answer_candidate(value)
+    text = _clean_text(text).strip("$")
+    text = text.replace("π", "pi").replace("蟺", "pi")
+    text = re.sub(r"\bln\s*\(", "log(", text, flags=re.IGNORECASE)
+    if not text or len(text) > 2_000 or _SYMBOLIC_FORBIDDEN.search(text):
+        raise ValueError("unsafe or empty symbolic expression")
+    if re.search(r"[A-Za-z_]\w*\s*\.", text):
+        raise ValueError("attribute access is not allowed")
+
+    functions = {
+        "sin": sympy.sin,
+        "cos": sympy.cos,
+        "tan": sympy.tan,
+        "asin": sympy.asin,
+        "acos": sympy.acos,
+        "atan": sympy.atan,
+        "sinh": sympy.sinh,
+        "cosh": sympy.cosh,
+        "tanh": sympy.tanh,
+        "exp": sympy.exp,
+        "log": sympy.log,
+        "sqrt": sympy.sqrt,
+        "Abs": sympy.Abs,
+        "abs": sympy.Abs,
+    }
+    constants = {"pi": sympy.pi, "E": sympy.E, "e": sympy.E, "I": sympy.I}
+    local_dict: dict[str, Any] = {**functions, **constants}
+    for identifier in _SYMBOLIC_IDENTIFIER.findall(text):
+        if identifier not in local_dict:
+            local_dict[identifier] = sympy.Symbol(identifier)
+    global_dict = {
+        "Symbol": sympy.Symbol,
+        "Integer": sympy.Integer,
+        "Float": sympy.Float,
+        "Rational": sympy.Rational,
+    }
+    return parse_expr(
+        text,
+        local_dict=local_dict,
+        global_dict=global_dict,
+        transformations=(
+            *standard_transformations,
+            convert_xor,
+            implicit_multiplication_application,
+        ),
+        evaluate=True,
+    )
+
+
 def _symbolic_equal(left: str, right: str) -> bool:
     try:
         import sympy
 
-        return sympy.simplify(
-            sympy.sympify(left.replace("^", "**"))
-            - sympy.sympify(right.replace("^", "**"))
-        ) == 0
+        left_expression = _safe_symbolic_expression(left)
+        right_expression = _safe_symbolic_expression(right)
+        difference = left_expression - right_expression
+        for normalizer in (
+            sympy.simplify,
+            sympy.together,
+            sympy.cancel,
+            sympy.expand,
+            sympy.trigsimp,
+        ):
+            try:
+                if normalizer(difference) == 0:
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
 
 
 def _symbolic_scalar(value: Any):
     """Parse a standalone scalar across common exact/decimal answer forms."""
-    import sympy
-
     text = clean_answer_candidate(value)
     text = _clean_text(text).strip("$")
     text = text.replace("π", "pi").replace("^", "**")
@@ -944,16 +1030,7 @@ def _symbolic_scalar(value: Any):
     )
     if text.endswith("%"):
         text = f"({text[:-1]})/100"
-    return sympy.sympify(
-        text,
-        locals={
-            "ln": sympy.log,
-            "log": sympy.log,
-            "sqrt": sympy.sqrt,
-            "pi": sympy.pi,
-            "e": sympy.E,
-        },
-    )
+    return _safe_symbolic_expression(text)
 
 
 def _scalar_mathematical_equal(
@@ -1100,13 +1177,38 @@ def _math_verify_equal(gold: Any, predicted: Any) -> tuple[bool, bool]:
             logger.setLevel(level)
 
 
-def answers_equivalent(
+@dataclass(frozen=True)
+class EquivalenceDecision:
+    equivalent: bool
+    status: str
+    confidence: float
+    needs_review: bool
+    authoritative_method: str | None
+    backend_results: dict[str, Any]
+    disagreement: bool
+    gold_normalized: dict[str, Any]
+    predicted_normalized: dict[str, Any]
+    deterministic_checks: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def evaluate_answer_equivalence(
     gold_answer: Any,
-    predicted_answer: Any,
+    candidate_answer: Any,
     answer_type: str,
     config: Mapping[str, Any],
     tolerance: float | None = None,
-) -> dict[str, Any]:
+) -> EquivalenceDecision:
+    """Evaluate an answer with a type-specific, fail-closed authority.
+
+    ``math-verify`` remains useful as an audit backend, but it is deliberately
+    unable to turn an explicit typed rejection into a correct answer.  This
+    prevents a permissive generic parser from overriding matrix, vector,
+    ordered-tuple or symbolic structure.
+    """
+    answer_type = normalize_answer_type(answer_type, gold_answer)
     comparison_config = config
     if tolerance is not None:
         comparison_config = dict(config)
@@ -1121,7 +1223,7 @@ def answers_equivalent(
         gold=True,
     )
     predicted = normalize_answer(
-        predicted_answer,
+        candidate_answer,
         answer_type,
         comparison_config,
         gold=False,
@@ -1135,170 +1237,227 @@ def answers_equivalent(
         "math_verify_equivalence": False,
         "unit_consistent": True,
         "format_valid": predicted["success"],
+        "typed_parse_success": False,
     }
-    if not checks["answer_parse_success"]:
-        if (
-            answer_type == "decimal"
-            and gold["success"]
-            and not predicted["success"]
-        ):
-            return {
-                "equivalent": False,
-                "status": "incorrect",
-                "gold_normalized": gold,
-                "predicted_normalized": predicted,
-                "deterministic_checks": checks,
-            }
-        cross_format_equal = _scalar_mathematical_equal(
-            gold_answer,
-            predicted_answer,
-            comparison_config,
-        )
-        checks["cross_format_mathematical_equivalence"] = cross_format_equal
-        if cross_format_equal:
-            return {
-                "equivalent": True,
-                "status": "correct",
-                "gold_normalized": gold,
-                "predicted_normalized": predicted,
-                "deterministic_checks": checks,
-            }
-        if comparison_config["answer_normalization"].get(
-            "math_verify_enabled",
-            False,
-        ):
-            available, verified = _math_verify_equal(
-                gold_answer,
-                predicted_answer,
+    typed_equivalent = False
+    typed_parse_success = bool(checks["answer_parse_success"])
+    left, right = gold.get("value"), predicted.get("value")
+    try:
+        if not typed_parse_success:
+            raise ValueError("typed normalization failed")
+        if answer_type in {"integer", "rational"}:
+            import sympy
+
+            typed_equivalent = bool(
+                sympy.simplify(
+                    _safe_symbolic_expression(gold_answer)
+                    - _safe_symbolic_expression(candidate_answer)
+                )
+                == 0
             )
-            checks["math_verify_available"] = available
-            checks["math_verify_equivalence"] = verified
-            if verified:
-                return {
-                    "equivalent": True,
-                    "status": "correct",
-                    "gold_normalized": gold,
-                    "predicted_normalized": predicted,
-                    "deterministic_checks": checks,
-                }
-        return {
-            "equivalent": False,
-            "status": "ambiguous",
-            "gold_normalized": gold,
-            "predicted_normalized": predicted,
-            "deterministic_checks": checks,
-        }
-    left, right = gold["value"], predicted["value"]
-    equivalent = False
-    if answer_type in {"integer", "decimal", "rational", "percentage"}:
-        equivalent = _numeric_equal(
-            float(left),
-            float(right),
-            comparison_config,
-        )
-        checks["numeric_equivalence"] = equivalent
-    elif answer_type == "matrix":
-        equivalent = (
-            len(left) == len(right)
-            and all(len(a) == len(b) for a, b in zip(left, right))
-            and all(
-                _numeric_equal(float(a), float(b), config)
+            checks["numeric_equivalence"] = typed_equivalent
+        elif answer_type in {"decimal", "percentage"}:
+            typed_equivalent = _numeric_equal(
+                float(left), float(right), comparison_config
+            )
+            checks["numeric_equivalence"] = typed_equivalent
+        elif answer_type == "matrix":
+            same_shape = len(left) == len(right) and all(
+                len(left_row) == len(right_row)
                 for left_row, right_row in zip(left, right)
-                for a, b in zip(left_row, right_row)
-                if a is not None and b is not None
             )
-            and all(
-                a is not None and b is not None
+            typed_equivalent = same_shape and all(
+                left_item is not None
+                and right_item is not None
+                and _numeric_equal(
+                    float(left_item),
+                    float(right_item),
+                    comparison_config,
+                )
                 for left_row, right_row in zip(left, right)
-                for a, b in zip(left_row, right_row)
+                for left_item, right_item in zip(left_row, right_row)
             )
-        )
-        checks["numeric_equivalence"] = equivalent
-    elif answer_type in {"ordered_tuple", "vector"}:
-        equivalent = len(left) == len(right) and all(
-            _scalar_mathematical_equal(
-                left_item,
-                right_item,
-                config,
+            checks["matrix_shape_equal"] = same_shape
+            checks["numeric_equivalence"] = typed_equivalent
+        elif answer_type in {"ordered_tuple", "vector"}:
+            typed_equivalent = len(left) == len(right) and all(
+                _scalar_mathematical_equal(
+                    left_item, right_item, comparison_config
+                )
+                for left_item, right_item in zip(left, right)
             )
-            or _clean_text(left_item) == _clean_text(right_item)
-            for left_item, right_item in zip(left, right)
+            checks["sequence_length_equal"] = len(left) == len(right)
+            checks["sequence_order_preserved"] = True
+            checks["cross_format_mathematical_equivalence"] = typed_equivalent
+        elif answer_type == "unit_value":
+            checks["unit_consistent"] = left[1] == right[1]
+            typed_equivalent = checks["unit_consistent"] and _numeric_equal(
+                float(left[0]), float(right[0]), comparison_config
+            )
+            checks["numeric_equivalence"] = typed_equivalent
+        elif answer_type == "symbolic_expression":
+            # Parse the raw strings so implicit multiplication (2x) is not
+            # accidentally tokenized as a new identifier.
+            _safe_symbolic_expression(gold_answer)
+            _safe_symbolic_expression(candidate_answer)
+            typed_equivalent = _symbolic_equal(
+                str(gold_answer), str(candidate_answer)
+            ) or _scalar_mathematical_equal(
+                gold_answer, candidate_answer, comparison_config
+            )
+            checks["symbolic_equivalence"] = typed_equivalent
+        elif answer_type == "equation":
+            typed_equivalent = _equation_equal(str(left), str(right))
+            checks["symbolic_equivalence"] = typed_equivalent
+        elif answer_type == "interval":
+            left_interval = _interval_signature(str(left))
+            right_interval = _interval_signature(str(right))
+            typed_parse_success = (
+                left_interval is not None and right_interval is not None
+            )
+            typed_equivalent = bool(
+                typed_parse_success and left_interval == right_interval
+            )
+            checks["symbolic_equivalence"] = typed_equivalent
+        elif answer_type == "inequality":
+            left_set = _inequality_set(str(left))
+            right_set = _inequality_set(str(right))
+            typed_parse_success = left_set is not None and right_set is not None
+            typed_equivalent = bool(typed_parse_success and left_set == right_set)
+            checks["symbolic_equivalence"] = typed_equivalent
+        else:
+            typed_equivalent = left == right
+    except Exception as exc:
+        typed_parse_success = False
+        checks["typed_error"] = f"{type(exc).__name__}: {exc}"[:300]
+
+    checks["typed_parse_success"] = typed_parse_success
+    checks["typed_equivalence"] = bool(typed_equivalent)
+    math_verify_available = False
+    math_verify_equivalent = False
+    if comparison_config["answer_normalization"].get(
+        "math_verify_enabled", False
+    ) and answer_type not in {"boolean", "text", "multiple_choice", "unit_value"}:
+        math_verify_available, math_verify_equivalent = _math_verify_equal(
+            gold_answer, candidate_answer
         )
-        checks["cross_format_mathematical_equivalence"] = equivalent
-    elif answer_type == "unit_value":
-        checks["unit_consistent"] = left[1] == right[1]
-        equivalent = checks["unit_consistent"] and _numeric_equal(
-            float(left[0]), float(right[0]), config
-        )
-        checks["numeric_equivalence"] = equivalent
-    elif answer_type == "symbolic_expression":
-        equivalent = _scalar_mathematical_equal(
-            gold_answer,
-            predicted_answer,
-            config,
-        ) or _symbolic_equal(str(left), str(right))
-        checks["symbolic_equivalence"] = equivalent
-    elif answer_type == "equation":
-        equivalent = _equation_equal(str(left), str(right))
-        checks["symbolic_equivalence"] = equivalent
-    elif answer_type == "interval":
-        left_interval = _interval_signature(str(left))
-        right_interval = _interval_signature(str(right))
-        equivalent = (
-            left_interval is not None
-            and right_interval is not None
-            and left_interval == right_interval
-        )
-        checks["symbolic_equivalence"] = equivalent
-    elif answer_type == "inequality":
-        try:
-            equivalent = _inequality_set(str(left)) == _inequality_set(str(right))
-        except Exception:
-            equivalent = str(left).replace(" ", "") == str(right).replace(" ", "")
-        checks["symbolic_equivalence"] = equivalent
+        checks["math_verify_available"] = math_verify_available
+        checks["math_verify_equivalence"] = math_verify_equivalent
+
+    disagreement = bool(
+        typed_parse_success
+        and not typed_equivalent
+        and math_verify_available
+        and math_verify_equivalent
+    )
+    if disagreement:
+        status = "equivalence_backend_disagreement"
+    elif not typed_parse_success:
+        status = "ambiguous"
     else:
-        equivalent = left == right
-    if (
-        not equivalent
-        and answer_type
-        not in {
-            "boolean",
-            "text",
-            "multiple_choice",
-            "unit_value",
-            "matrix",
-            "interval",
-            "inequality",
+        status = "correct" if typed_equivalent else "incorrect"
+    equivalent = bool(typed_equivalent and typed_parse_success and not disagreement)
+    backend_results = {
+        "typed": {
+            "available": True,
+            "parsed": typed_parse_success,
+            "equivalent": bool(typed_equivalent),
+            "authoritative": True,
+        },
+        "math_verify": {
+            "available": math_verify_available,
+            "equivalent": math_verify_equivalent,
+            "authoritative": False,
+        },
+    }
+    return EquivalenceDecision(
+        equivalent=equivalent,
+        status=status,
+        confidence=1.0 if typed_parse_success else 0.0,
+        needs_review=bool(disagreement or not typed_parse_success),
+        authoritative_method=f"typed_{answer_type}",
+        backend_results=backend_results,
+        disagreement=disagreement,
+        gold_normalized=gold,
+        predicted_normalized=predicted,
+        deterministic_checks=checks,
+    )
+
+
+def answers_equivalent(
+    gold_answer: Any,
+    predicted_answer: Any,
+    answer_type: str,
+    config: Mapping[str, Any],
+    tolerance: float | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible mapping wrapper around the typed evaluator."""
+    return evaluate_answer_equivalence(
+        gold_answer,
+        predicted_answer,
+        answer_type,
+        config,
+        tolerance=tolerance,
+    ).as_dict()
+
+
+def fuse_equivalence_with_semantic_judge(
+    equivalence: Mapping[str, Any],
+    *,
+    judge_is_correct: bool,
+    judge_valid: bool,
+    judge_confidence: float,
+    confidence_threshold: float,
+    require_semantic_judge: bool,
+) -> dict[str, Any]:
+    """Fuse audit signals without letting an LLM override typed mathematics."""
+    deterministic_parsed = bool(
+        equivalence.get("deterministic_checks", {}).get(
+            "typed_parse_success", False
+        )
+    )
+    deterministic_equivalent = bool(equivalence.get("equivalent"))
+    judge_conflict = bool(
+        deterministic_parsed
+        and judge_valid
+        and judge_is_correct != deterministic_equivalent
+    )
+    semantic_accept = bool(
+        judge_valid
+        and judge_is_correct
+        and judge_confidence >= confidence_threshold
+        and equivalence.get("deterministic_checks", {}).get(
+            "format_valid", False
+        )
+    )
+    if judge_conflict:
+        return {
+            "is_correct": False,
+            "status": "judge_deterministic_disagreement",
+            "judge_conflict": True,
         }
-    ):
-        equivalent = _scalar_mathematical_equal(
-            gold_answer,
-            predicted_answer,
-            config,
-        )
-        checks["cross_format_mathematical_equivalence"] = equivalent
-    if (
-        not equivalent
-        and config["answer_normalization"].get(
-            "math_verify_enabled",
-            False,
-        )
-        and answer_type
-        not in {"boolean", "text", "multiple_choice", "unit_value"}
-    ):
-        available, verified = _math_verify_equal(
-            gold_answer,
-            predicted_answer,
-        )
-        checks["math_verify_available"] = available
-        checks["math_verify_equivalence"] = verified
-        equivalent = verified
+    if require_semantic_judge and not judge_valid:
+        return {
+            "is_correct": False,
+            "status": "semantic_judge_failed",
+            "judge_conflict": False,
+        }
+    if deterministic_parsed:
+        return {
+            "is_correct": deterministic_equivalent,
+            "status": str(equivalence.get("status", "incorrect")),
+            "judge_conflict": False,
+        }
+    if semantic_accept:
+        return {
+            "is_correct": True,
+            "status": "semantic_equivalent_ambiguous",
+            "judge_conflict": False,
+        }
     return {
-        "equivalent": bool(equivalent),
-        "status": "correct" if equivalent else "incorrect",
-        "gold_normalized": gold,
-        "predicted_normalized": predicted,
-        "deterministic_checks": checks,
+        "is_correct": False,
+        "status": str(equivalence.get("status", "ambiguous")),
+        "judge_conflict": False,
     }
 
 
@@ -1321,7 +1480,7 @@ def attribute_error(
     checks = dict(equivalence.get("deterministic_checks", {}))
     first_error_step = None
     verification_tier = "deterministic"
-    method = "evidence_rules_v2"
+    method = "evidence_rules_v3"
 
     def add_evidence(
         response_span: Any,
@@ -1461,6 +1620,22 @@ def attribute_error(
         )
     elif equivalence.get("equivalent"):
         primary = None
+        gold_display = str(
+            record.get("canonical_answer", record.get("gold_answer", ""))
+        ).strip()
+        candidate_display = str(
+            parse_result.get("parsed_response", {}).get(
+                "final_answer", record.get("test_taker_response", "")
+            )
+        ).strip()
+        if gold_display and candidate_display and gold_display != candidate_display:
+            add_evidence(
+                candidate_display,
+                "The typed evaluator proves mathematical equivalence; only the presentation differs.",
+                check_name="format_only_equivalence",
+                expected=gold_display,
+                observed=candidate_display,
+            )
     elif not equivalence.get("predicted_normalized", {}).get("success"):
         primary = "format_output_error"
         add_evidence(
@@ -1498,7 +1673,49 @@ def attribute_error(
             "test_taker_truth_validation",
             {},
         )
-        if failure_type == "partial_solution":
+        gold_sequence = _sequence(gold_text)
+        predicted_sequence = _sequence(predicted_text)
+
+        def sequence_contains(
+            haystack: list[Any], needle: list[Any]
+        ) -> bool:
+            unmatched = list(haystack)
+            for expected in needle:
+                match_index = next(
+                    (
+                        index
+                        for index, observed in enumerate(unmatched)
+                        if _scalar_mathematical_equal(
+                            expected, observed, config
+                        )
+                    ),
+                    None,
+                )
+                if match_index is None:
+                    return False
+                unmatched.pop(match_index)
+            return True
+
+        has_extraneous_candidate = bool(
+            isinstance(candidate_truth, Mapping)
+            and int(candidate_truth.get("equations_total", 0) or 0) > 0
+            and not bool(candidate_truth.get("substitution_passed"))
+            and gold_sequence is not None
+            and predicted_sequence is not None
+            and len(predicted_sequence) > len(gold_sequence)
+            and sequence_contains(predicted_sequence, gold_sequence)
+        )
+        if has_extraneous_candidate:
+            primary = "extraneous_solution"
+            confidence = 0.99
+            add_evidence(
+                predicted_text,
+                "The candidate includes every reference solution plus at least one value that fails substitution into the original constraints.",
+                check_name="truth_solver_extraneous_candidate_substitution",
+                expected=gold_text,
+                observed=predicted_text,
+            )
+        elif failure_type == "partial_solution":
             primary = "incomplete_solution"
             confidence = 0.99
             add_evidence(
@@ -1540,6 +1757,79 @@ def attribute_error(
                     first_failed.get("residual", predicted_text),
                 ),
             )
+        elif answer_type == "matrix" and checks.get("answer_parse_success"):
+            gold_matrix = equivalence.get("gold_normalized", {}).get("value")
+            predicted_matrix = equivalence.get("predicted_normalized", {}).get(
+                "value"
+            )
+            mismatch = None
+            if isinstance(gold_matrix, list) and isinstance(predicted_matrix, list):
+                for row_index, (gold_row, predicted_row) in enumerate(
+                    zip(gold_matrix, predicted_matrix)
+                ):
+                    for column_index, (gold_item, predicted_item) in enumerate(
+                        zip(gold_row, predicted_row)
+                    ):
+                        if not _numeric_equal(
+                            float(gold_item), float(predicted_item), config
+                        ):
+                            mismatch = (
+                                row_index,
+                                column_index,
+                                gold_item,
+                                predicted_item,
+                            )
+                            break
+                    if mismatch is not None:
+                        break
+            primary = "matrix_element_error"
+            confidence = 0.99
+            add_evidence(
+                predicted_text,
+                "A matrix component differs from the reference at the recorded row and column.",
+                check_name="matrix_elementwise_comparison",
+                expected=(mismatch[2] if mismatch else gold_matrix),
+                observed=(mismatch[3] if mismatch else predicted_matrix),
+            )
+            if mismatch:
+                evidence[-1]["row_index"] = mismatch[0]
+                evidence[-1]["column_index"] = mismatch[1]
+        elif answer_type == "vector" and checks.get("answer_parse_success"):
+            gold_vector = equivalence.get("gold_normalized", {}).get("value")
+            predicted_vector = equivalence.get("predicted_normalized", {}).get(
+                "value"
+            )
+            mismatch_index = next(
+                (
+                    index
+                    for index, (gold_item, predicted_item) in enumerate(
+                        zip(gold_vector, predicted_vector)
+                    )
+                    if not _scalar_mathematical_equal(
+                        gold_item, predicted_item, config
+                    )
+                ),
+                None,
+            )
+            primary = "vector_component_error"
+            confidence = 0.99
+            add_evidence(
+                predicted_text,
+                "A vector component differs from the reference at the recorded index.",
+                check_name="vector_componentwise_comparison",
+                expected=(
+                    gold_vector[mismatch_index]
+                    if mismatch_index is not None
+                    else gold_vector
+                ),
+                observed=(
+                    predicted_vector[mismatch_index]
+                    if mismatch_index is not None
+                    else predicted_vector
+                ),
+            )
+            if mismatch_index is not None:
+                evidence[-1]["component_index"] = mismatch_index
         elif checks.get("unit_consistent") is False:
             primary = "unit_mismatch"
             confidence = 0.99
@@ -1825,15 +2115,48 @@ def attribute_error(
                 and checks.get("answer_parse_success")
                 and not checks.get("symbolic_equivalence")
             ):
-                primary = "symbolic_manipulation_error"
-                confidence = 0.82
-                add_evidence(
-                    predicted_text,
-                    "Both expressions parse, but symbolic equivalence checks reject the transformation.",
-                    check_name="symbolic_equivalence",
-                    expected=gold_text,
-                    observed=predicted_text,
-                )
+                proper_subexpression = False
+                if answer_type == "symbolic_expression":
+                    try:
+                        import sympy
+
+                        gold_expression = _safe_symbolic_expression(gold_text)
+                        predicted_expression = _safe_symbolic_expression(
+                            predicted_text
+                        )
+                        proper_subexpression = bool(
+                            predicted_expression != gold_expression
+                            and any(
+                                node == predicted_expression
+                                for node in sympy.preorder_traversal(
+                                    gold_expression
+                                )
+                            )
+                        )
+                    except Exception:
+                        proper_subexpression = False
+                if proper_subexpression:
+                    primary = "incomplete_expression_evaluation"
+                    confidence = 0.82
+                    verification_tier = "strong_heuristic"
+                    add_evidence(
+                        predicted_text,
+                        "The candidate is a proper structural subexpression of the verified reference expression.",
+                        check_name="proper_subexpression_match",
+                        expected=gold_text,
+                        observed=predicted_text,
+                    )
+                else:
+                    primary = "symbolic_manipulation_error"
+                    confidence = 0.82
+                    verification_tier = "strong_heuristic"
+                    add_evidence(
+                        predicted_text,
+                        "Both expressions parse, but symbolic equivalence checks reject the transformation; no specific causal step is provable.",
+                        check_name="symbolic_equivalence",
+                        expected=gold_text,
+                        observed=predicted_text,
+                    )
             else:
                 primary = str(
                     config["error_attribution"]["low_confidence_tag"]
@@ -1847,14 +2170,26 @@ def attribute_error(
                     expected=gold_text,
                     observed=predicted_text,
                 )
-    threshold = float(config["error_attribution"]["confidence_threshold"])
-    needs_review = primary is not None and confidence < threshold
-    if needs_review:
+    if primary is None:
+        verification_tier = "deterministic"
+        confidence = 1.0
+        needs_review = False
+    elif verification_tier == "strong_heuristic":
+        needs_review = True
+    elif verification_tier == "abstained":
+        confidence = 0.0
+        needs_review = True
         primary = str(config["error_attribution"]["low_confidence_tag"])
+    else:
+        needs_review = False
+        confidence = max(0.95, confidence)
+    secondary_error_tags = []
+    if primary is None and evidence:
+        secondary_error_tags.append("format_only_difference")
     return {
         "is_correct": bool(equivalence.get("equivalent")),
         "primary_error_tag": primary,
-        "secondary_error_tags": [],
+        "secondary_error_tags": secondary_error_tags,
         "evidence": evidence,
         "attribution_confidence": confidence,
         "needs_review": needs_review,
@@ -1862,5 +2197,5 @@ def attribute_error(
         "attribution_method": method,
         "verification_tier": verification_tier,
         "first_error_step": first_error_step,
-        "taxonomy_version": "math_error_taxonomy_v3",
+        "taxonomy_version": "math_error_taxonomy_v4",
     }

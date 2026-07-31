@@ -159,6 +159,38 @@ def test_dataset_exact_dedup_and_noise_filter(config):
     assert len(rejected) == 2
 
 
+def test_training_safety_rejects_blind_and_equivalence_conflicts(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    blind = record(
+        "Compute 41 plus 1.",
+        "42",
+        evaluation_role="blind_final",
+        verification_tier="deterministic",
+    )
+    disagreement = record(
+        "Compute 42 plus 1.",
+        "43",
+        equivalence_backend_disagreement=True,
+        verification_tier="strong_heuristic",
+    )
+    selected, manifest, rejected = build_training_dataset(
+        [blind, disagreement], config
+    )
+    assert selected == []
+    safety = manifest["training_safety"]
+    assert safety["blind_or_official_input_count"] == 1
+    assert safety["blind_or_official_selected_count"] == 0
+    assert safety["evaluator_disagreement_input_count"] == 1
+    assert safety["evaluator_disagreement_selected_count"] == 0
+    assert safety["source_attribution_tier_counts"] == {
+        "deterministic": 1,
+        "strong_heuristic": 1,
+    }
+    reasons = {reason for item in rejected for reason in item["reasons"]}
+    assert "prohibited_blind_final_training_source" in reasons
+    assert "equivalence_requires_review" in reasons
+
+
 def test_training_sample_requires_verified_answer_and_solution_steps(config):
     config["training_mix"]["strict_correct_incorrect_ratio"] = False
     missing_steps = record(
