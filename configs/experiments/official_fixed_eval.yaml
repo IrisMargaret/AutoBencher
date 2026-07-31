@@ -1,0 +1,40 @@
+extends: ../math_flywheel.yaml
+
+schema_version: "1.0"
+
+# Run only after methods and hyperparameters have been selected without using
+# official_fixed_v1 scores.
+experiment:
+  name: official_fixed_eval_v1
+  mode: eval
+  max_cycles: 1
+
+study:
+  policy: base
+  variant: base
+  components:
+    adaptive_allocation: false
+    global_difficulty: false
+    observed_difficulty: false
+    coverage_priority: false
+    uncertainty_priority: false
+    persistent_error_priority: false
+    retention_priority: false
+    hard_pool_variants: false
+    error_type_targeting: false
+
+evaluation_sets:
+  active_set: official_fixed_v1
+  phase: frozen
+  allow_blind_evaluation: false
+
+finetune:
+  enabled: false
+
+fixed_test:
+  enabled: true
+  evaluate_baseline: true
+  evaluate_after_each_training_cycle: false
+
+retention_test:
+  enabled: true

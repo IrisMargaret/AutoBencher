@@ -1,0 +1,64 @@
+schema_version: "1.0"
+
+# Only the registry is checked into source control. Runtime datasets and audit
+# artifacts are installed beneath the configured VEPFS data root.
+sets:
+  - id: development_regression_v3
+    role: development_regression
+    version: "3.0"
+    dataset_path: benchmarks/fixed_math_test_set.json
+    allow_fixed_test_path_override: true
+    expected_question_count: 81
+    minimum_questions_per_subcategory: 3
+    require_all_subcategories: true
+    require_explicit_validation: false
+    permissions:
+      development_comparison: true
+      method_selection: true
+      hard_pool: false
+      generator_prompt: false
+      training: false
+      threshold_tuning: true
+
+  - id: official_fixed_v1
+    role: official_fixed
+    version: "1.0"
+    dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json
+    expected_question_count: 540
+    minimum_questions_per_subcategory: 20
+    require_all_subcategories: true
+    require_explicit_validation: true
+    minimum_difficulty_bands: 3
+    minimum_answer_types: 2
+    minimum_template_clusters: 10
+    minimum_reasoning_structures: 3
+    permissions:
+      development_comparison: false
+      method_selection: false
+      hard_pool: false
+      generator_prompt: false
+      training: false
+      threshold_tuning: false
+
+  - id: blind_final_v1
+    role: blind_final
+    version: "1.0"
+    # Deliberately no path or hash in the repository.
+    dataset_path_env: AUTOBENCHER_BLIND_TEST_PATH
+    dataset_sha256_env: AUTOBENCHER_BLIND_TEST_SHA256
+    release_token_env: AUTOBENCHER_BLIND_RELEASE_TOKEN
+    expected_question_count: 540
+    minimum_questions_per_subcategory: 20
+    require_all_subcategories: true
+    require_explicit_validation: true
+    minimum_difficulty_bands: 3
+    minimum_answer_types: 2
+    minimum_template_clusters: 10
+    minimum_reasoning_structures: 3
+    permissions:
+      development_comparison: false
+      method_selection: false
+      hard_pool: false
+      generator_prompt: false
+      training: false
+      threshold_tuning: false

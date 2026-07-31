@@ -153,6 +153,16 @@ def load_results_long(index_path: str | Path) -> tuple[list[dict[str, Any]], lis
         training = ledger.get("training", {})
         efficiency = ledger.get("efficiency", {})
         totals = ledger.get("totals", {})
+        retention_final = (
+            summary.get("retention_test", {}).get("final", {})
+            if isinstance(summary.get("retention_test"), Mapping)
+            else {}
+        )
+        retention_forgetting = (
+            retention_final.get("forgetting", {})
+            if isinstance(retention_final, Mapping)
+            else {}
+        )
         run_rows.append(
             {
                 "study_id": record.study_id,
@@ -166,6 +176,15 @@ def load_results_long(index_path: str | Path) -> tuple[list[dict[str, Any]], lis
                 "baseline_accuracy": summary.get("baseline_accuracy"),
                 "final_accuracy": summary.get("final_accuracy"),
                 "accuracy_delta": summary.get("accuracy_delta"),
+                "retention_accuracy_delta": retention_forgetting.get(
+                    "accuracy_delta"
+                ),
+                "retention_forgetting_rate": retention_forgetting.get(
+                    "forgetting_rate"
+                ),
+                "retention_forgotten_count": retention_forgetting.get(
+                    "forgotten_count"
+                ),
                 "training_sample_count": training.get(
                     "final_training_sample_count"
                 ),
@@ -419,6 +438,8 @@ def build_paper_tables(index_path: str | Path, output_dir: str | Path) -> dict[s
             "worst_subcategory_accuracy",
             "learning_curve_auc",
             "forgetting_rate",
+            "retention_accuracy_delta",
+            "retention_forgetting_rate",
         ):
             values = [
                 float(run[metric])

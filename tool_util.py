@@ -942,6 +942,17 @@ def call_local_finetune(
     wandb_tags=None,
     wandb_log_model=False,
     seed=None,
+    eval_dataset_path=None,
+    internal_test_dataset_path=None,
+    max_training_tokens=None,
+    max_optimizer_steps=None,
+    evaluation_strategy=None,
+    eval_steps=None,
+    save_steps=None,
+    load_best_model_at_end=None,
+    metric_for_best_model=None,
+    greater_is_better=None,
+    early_stopping_patience=None,
 ):
     script_path = Path(__file__).resolve().with_name("train_llm.py")
     if not script_path.is_file():
@@ -976,6 +987,15 @@ def call_local_finetune(
         ("--max_seq_length", max_seq_length),
         ("--learning_rate", learning_rate),
         ("--seed", seed),
+        ("--eval_dataset_path", eval_dataset_path),
+        ("--internal_test_dataset_path", internal_test_dataset_path),
+        ("--max_training_tokens", max_training_tokens),
+        ("--max_optimizer_steps", max_optimizer_steps),
+        ("--evaluation_strategy", evaluation_strategy),
+        ("--eval_steps", eval_steps),
+        ("--save_steps", save_steps),
+        ("--metric_for_best_model", metric_for_best_model),
+        ("--early_stopping_patience", early_stopping_patience),
         ("--wandb_mode", wandb_mode),
         ("--wandb_project", wandb_project),
         ("--wandb_entity", wandb_entity),
@@ -996,6 +1016,10 @@ def call_local_finetune(
         command.append("--wandb_enabled")
     if wandb_log_model:
         command.append("--wandb_log_model")
+    if load_best_model_at_end:
+        command.append("--load_best_model_at_end")
+    if greater_is_better:
+        command.append("--greater_is_better")
     print("[FineTune] command=" + subprocess.list2cmdline(command))
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu)

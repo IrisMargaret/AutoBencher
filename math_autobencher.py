@@ -71,6 +71,7 @@ from autobencher.structured import (
 )
 from autobencher.storage import configure_runtime_storage
 from autobencher.truth_solver import FailureType, TruthSolver
+from autobencher.training_protocol import write_training_splits
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
 from tool_util import (
     DEFAULT_SYSTEM_MESSAGE,
@@ -4571,12 +4572,13 @@ def _run_fixed_test_benchmark(
     fixed_metadata,
     stage_name,
     cycle_number=None,
+    suite_name="fixed_test",
 ):
     """Evaluate one model against the immutable holdout without training it."""
     research_run = getattr(args, "research_run", None)
     if research_run is None:
         raise RuntimeError("Fixed benchmark requires a ResearchRun")
-    stage_dir = research_run.run_dir / "fixed_test" / stage_name
+    stage_dir = research_run.run_dir / str(suite_name) / stage_name
     stage_dir.mkdir(parents=True, exist_ok=True)
     records = test_and_eval(
         copy.deepcopy(fixed_questions),
@@ -4630,6 +4632,62 @@ def _run_fixed_test_benchmark(
     return summary
 
 
+def _retention_delta(baseline, current):
+    baseline_items = {
+        item["question_id"]: bool(item["is_correct"])
+        for item in (baseline or {}).get("item_outcomes", [])
+    }
+    current_items = {
+        item["question_id"]: item
+        for item in (current or {}).get("item_outcomes", [])
+    }
+    baseline_correct = {
+        identifier
+        for identifier, is_correct in baseline_items.items()
+        if is_correct
+    }
+    forgotten = sorted(
+        identifier
+        for identifier in baseline_correct
+        if identifier in current_items
+        and not bool(current_items[identifier]["is_correct"])
+    )
+    by_dimension = defaultdict(lambda: {"baseline_correct": 0, "forgotten": 0})
+    for identifier in baseline_correct:
+        item = current_items.get(identifier, {})
+        dimension = str(item.get("retention_dimension") or "unknown")
+        by_dimension[dimension]["baseline_correct"] += 1
+        by_dimension[dimension]["forgotten"] += int(identifier in forgotten)
+    return {
+        "baseline_accuracy": (baseline or {}).get("accuracy"),
+        "current_accuracy": (current or {}).get("accuracy"),
+        "accuracy_delta": (
+            float(current["accuracy"]) - float(baseline["accuracy"])
+            if baseline and current
+            else None
+        ),
+        "baseline_correct_count": len(baseline_correct),
+        "forgotten_count": len(forgotten),
+        "forgetting_rate": (
+            len(forgotten) / len(baseline_correct)
+            if baseline_correct
+            else 0.0
+        ),
+        "forgotten_question_ids": forgotten,
+        "dimension_statistics": {
+            name: {
+                **counts,
+                "forgetting_rate": (
+                    counts["forgotten"] / counts["baseline_correct"]
+                    if counts["baseline_correct"]
+                    else 0.0
+                ),
+            }
+            for name, counts in sorted(by_dimension.items())
+        },
+    }
+
+
 # [ADDED] Execute eval or the complete evaluation-training flywheel.
 def _run_autobencher(args, agent_info, evaluator_info):
     output_root = _output_root(args.outfile_prefix1)
@@ -4671,6 +4729,9 @@ def _run_autobencher(args, agent_info, evaluator_info):
     fixed_questions = []
     fixed_metadata = {}
     baseline_fixed_summary = None
+    retention_questions = []
+    retention_metadata = {}
+    baseline_retention_summary = None
     if args.research_run.config["fixed_test"]["enabled"]:
         try:
             fixed_questions, fixed_metadata = load_fixed_test_set(
@@ -4727,6 +4788,60 @@ def _run_autobencher(args, agent_info, evaluator_info):
             print(
                 "[FixedTest] baseline failed "
                 f"error={_sanitize_error(exc)}"
+            )
+            return 1
+
+    if args.research_run.config["retention_test"]["enabled"]:
+        try:
+            retention_config = {
+                "fixed_test": {
+                    "dataset_path": args.research_run.config[
+                        "retention_test"
+                    ]["dataset_path"],
+                    "require_all_subcategories": False,
+                }
+            }
+            retention_questions, retention_metadata = load_fixed_test_set(
+                retention_config,
+                args.research_run.project_root,
+            )
+            if args.research_run.config["retention_test"][
+                "evaluate_baseline"
+            ]:
+                retention_info = _load_test_taker_info(
+                    args.test_taker_modelname,
+                    args.use_helm,
+                )
+                try:
+                    baseline_retention_summary = _run_fixed_test_benchmark(
+                        args,
+                        model_name=args.test_taker_modelname,
+                        test_taker_info=retention_info,
+                        agent_info=agent_info,
+                        evaluator_info=evaluator_info,
+                        fixed_questions=retention_questions,
+                        fixed_metadata=retention_metadata,
+                        stage_name="baseline",
+                        suite_name="retention_test",
+                    )
+                finally:
+                    _release_model_info(retention_info)
+                cycle_record["retention_test"] = {
+                    "dataset": retention_metadata,
+                    "baseline": baseline_retention_summary,
+                }
+                _save_cycle_record(cycle_record_path, cycle_record)
+        except Exception as exc:
+            cycle_record["status"] = "failed"
+            cycle_record["failed_stage"] = "retention_test_baseline"
+            cycle_record["error"] = _sanitize_error(exc)
+            _save_cycle_record(cycle_record_path, cycle_record)
+            args.research_run.finalize(
+                "failed",
+                {
+                    "stage": "retention_test_baseline",
+                    "error": _sanitize_error(exc),
+                },
             )
             return 1
 
@@ -5082,6 +5197,35 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 )
                 export_path = str(training_dir / "dataset_selected.jsonl")
                 exported_count = write_alpaca_jsonl(selected, export_path)
+                split_manifest = None
+                validation_export_path = None
+                internal_test_export_path = None
+                if (
+                    selected
+                    and bool(
+                        args.research_run.config["finetune"]["enabled"]
+                    )
+                ):
+                    split_manifest = write_training_splits(
+                        selected,
+                        training_dir,
+                        args.research_run.config["finetune"][
+                            "training_split"
+                        ],
+                        seed=int(
+                            args.research_run.config["experiment"]["seed"]
+                        ),
+                    )
+                    export_path = split_manifest["paths"]["train"]
+                    validation_export_path = split_manifest["paths"][
+                        "validation"
+                    ]
+                    internal_test_export_path = split_manifest["paths"][
+                        "internal_test"
+                    ]
+                    exported_count = int(
+                        split_manifest["split_record_counts"]["train"]
+                    )
                 if hasattr(args.research_run, "budget_ledger"):
                     args.research_run.budget_ledger.record_dataset(
                         dataset_manifest,
@@ -5134,6 +5278,35 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         "learning_rate": args.research_run.config[
                             "finetune"
                         ]["learning_rate"],
+                        "training_split": split_manifest,
+                        "max_training_tokens": args.research_run.config[
+                            "finetune"
+                        ]["max_training_tokens"],
+                        "max_optimizer_steps": args.research_run.config[
+                            "finetune"
+                        ]["max_optimizer_steps"],
+                        "evaluation_strategy": args.research_run.config[
+                            "finetune"
+                        ]["evaluation_strategy"],
+                        "eval_steps": args.research_run.config["finetune"][
+                            "eval_steps"
+                        ],
+                        "save_steps": args.research_run.config["finetune"][
+                            "save_steps"
+                        ],
+                        "load_best_model_at_end": args.research_run.config[
+                            "finetune"
+                        ]["load_best_model_at_end"],
+                        "metric_for_best_model": args.research_run.config[
+                            "finetune"
+                        ]["metric_for_best_model"],
+                        "early_stopping_patience": args.research_run.config[
+                            "finetune"
+                        ]["early_stopping_patience"],
+                        "checkpoint_selection_rule": args.research_run.config[
+                            "finetune"
+                        ]["checkpoint_selection_rule"],
+                        "evaluation_set_used_for_model_selection": False,
                         "seed": int(
                             args.research_run.config["experiment"]["seed"]
                         ),
@@ -5166,6 +5339,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     os.path.join(output_root, "hard_pool.json"),
                     export_path,
                 )
+                validation_export_path = None
+                internal_test_export_path = None
             cycle_entry["training_export"] = _relative_json_path(
                 export_path,
                 output_root,
@@ -5301,6 +5476,67 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     if getattr(args, "research_run", None)
                     else 42
                 ),
+                eval_dataset_path=validation_export_path,
+                internal_test_dataset_path=internal_test_export_path,
+                max_training_tokens=(
+                    args.research_run.config["finetune"][
+                        "max_training_tokens"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                max_optimizer_steps=(
+                    args.research_run.config["finetune"][
+                        "max_optimizer_steps"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                evaluation_strategy=(
+                    args.research_run.config["finetune"][
+                        "evaluation_strategy"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                eval_steps=(
+                    args.research_run.config["finetune"]["eval_steps"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                save_steps=(
+                    args.research_run.config["finetune"]["save_steps"]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                load_best_model_at_end=(
+                    args.research_run.config["finetune"][
+                        "load_best_model_at_end"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                metric_for_best_model=(
+                    args.research_run.config["finetune"][
+                        "metric_for_best_model"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                greater_is_better=(
+                    args.research_run.config["finetune"][
+                        "greater_is_better"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                early_stopping_patience=(
+                    args.research_run.config["finetune"][
+                        "early_stopping_patience"
+                    ]
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
             )
             training_cost_summary = result.get("training_summary") or {}
             if getattr(args, "research_run", None) and hasattr(
@@ -5365,6 +5601,37 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         / "summary.json"
                     ),
                 )
+            if (
+                retention_questions
+                and args.research_run.config["retention_test"][
+                    "evaluate_after_each_training_cycle"
+                ]
+            ):
+                stage = "retention_test_evaluation"
+                retention_model_info = _load_test_taker_info(
+                    current_test_taker_model,
+                    args.use_helm,
+                )
+                try:
+                    retention_cycle_summary = _run_fixed_test_benchmark(
+                        args,
+                        model_name=current_test_taker_model,
+                        test_taker_info=retention_model_info,
+                        agent_info=agent_info,
+                        evaluator_info=evaluator_info,
+                        fixed_questions=retention_questions,
+                        fixed_metadata=retention_metadata,
+                        stage_name=f"cycle_{cycle_number}",
+                        cycle_number=cycle_number,
+                        suite_name="retention_test",
+                    )
+                finally:
+                    _release_model_info(retention_model_info)
+                retention_cycle_summary["forgetting"] = _retention_delta(
+                    baseline_retention_summary,
+                    retention_cycle_summary,
+                )
+                cycle_entry["retention_test"] = retention_cycle_summary
             if getattr(args, "research_run", None):
                 training_dir = (
                     args.research_run.cycle_root
@@ -5486,6 +5753,16 @@ def _run_autobencher(args, agent_info, evaluator_info):
             if trained_cycle_summaries
             else {}
         )
+        trained_retention_summaries = [
+            item["retention_test"]
+            for item in cycle_record.get("cycles", [])
+            if isinstance(item.get("retention_test"), dict)
+        ]
+        final_retention_summary = (
+            trained_retention_summaries[-1]
+            if trained_retention_summaries
+            else {}
+        )
         training_sample_count = sum(
             int(item.get("training_sample_count", 0) or 0)
             for item in cycle_record.get("cycles", [])
@@ -5506,6 +5783,10 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "accuracy_delta": final_fixed_summary.get("accuracy_delta"),
             "active_test_taker_model": current_test_taker_model,
             "fixed_test": cycle_record.get("fixed_test", {}),
+            "retention_test": {
+                **cycle_record.get("retention_test", {}),
+                "final": final_retention_summary,
+            },
         }
         if hasattr(args.research_run, "budget_ledger"):
             args.research_run.budget_ledger.record_accuracy(

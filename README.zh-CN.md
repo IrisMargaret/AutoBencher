@@ -4,12 +4,15 @@
 [`docs/mini_flywheel_zh-CN.md`](docs/mini_flywheel_zh-CN.md)。
 七种基线与消融方法、组件矩阵和运行清单检查见
 [`docs/baselines_and_ablations_zh-CN.md`](docs/baselines_and_ablations_zh-CN.md)。
+三级评测集、540 题正式集组装、盲测门禁、模板簇划分与内部验证选模见
+[`docs/evaluation_and_training_protocol_zh-CN.md`](docs/evaluation_and_training_protocol_zh-CN.md)。
 
 简体中文 | [English](README.md)
 
 AutoBencher 是一个自适应数学评测与本地训练数据飞轮。它保留原 AutoBencher 的
 “规划、出题、评测、收集错题、训练、再评测”框架，同时对标准答案生成、答案判定、
-固定测试集和缓存保留策略进行了可配置、可审计的加强。
+分级评测集和缓存保留策略进行了可配置、可审计的加强。原 81 题现定位为开发
+回归集；论文正式集与最终盲测集使用独立版本、权限和哈希。
 
 当前维护的入口是 `math_autobencher.py`。本仓库现已专注数学数据飞轮，原 Wiki 和
 Multilingual 入口已移除。

@@ -7,7 +7,8 @@
 3. 从 SymPy 的求解与回代证据生成训练用 `gold_reasoning_summary`。
 4. 让原始 test-taker 在生成题上作答并构建小训练集。
 5. 执行一轮 QLoRA、合并模型。
-6. 使用同一份 81 题不可变固定集，分别评测原始模型和微调后模型。
+6. 使用同一份 81 题开发回归集，分别评测原始模型和微调后模型；它只验证流程和
+   明显回归，不作为细粒度论文正式集。
 
 默认的 8 题功能测试配置是
 `configs/experiments/mini_flywheel_8.yaml`。它用于验证功能，不用于判断
@@ -125,6 +126,12 @@ jq '.accuracy, .accuracy_delta' \
   "$RUN_DIR/fixed_test/cycle_1/summary.json"
 
 find "$RUN_DIR/cycle" -path '*/training/dataset_selected.jsonl' -type f -print
+find "$RUN_DIR/cycle" -path '*/training/dataset_train.jsonl' -type f -print
+find "$RUN_DIR/cycle" -path '*/training/dataset_validation.jsonl' -type f -print
+jq '.template_overlap_count, .split_record_counts' \
+  "$RUN_DIR/cycle/cycle_1/training/split_manifest.json"
+jq '.checkpoint_selection_source, .evaluation_set_used_for_model_selection' \
+  "$RUN_DIR/cycle/cycle_1/training/training_cost_summary.json"
 find "$RUN_DIR/models" -name config.json -type f -print
 ```
 
@@ -135,6 +142,10 @@ find "$RUN_DIR/models" -name config.json -type f -print
 - `cycle_record.json` 的最终状态为 `completed`。
 - `training_sample_count` 大于 0。
 - `finetune_status` 为 `completed`。
+- `split_manifest.json` 的 `template_overlap_count` 为 0，训练、内部验证与内部
+  测试三个集合都非空。
+- `checkpoint_selection_source` 为 `internal_validation`，且
+  `evaluation_set_used_for_model_selection` 为 `false`。
 - `models/` 下存在合并模型的 `config.json`、tokenizer 和权重文件。
 - baseline 与 `cycle_1` 两份固定集 `summary.json` 都存在。
 - 保留的生成/推理记录中，`truth_validation_details.solver_backend` 为

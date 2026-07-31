@@ -203,8 +203,10 @@ Important sections in `configs/math_flywheel.yaml`:
 | `adaptive_sampling` | Previous-round global bands plus per-subcategory Beta-Binomial sampling. |
 | `dataset` | Deduplication and fixed-test similarity thresholds. |
 | `training_mix` | Exact 25/75 ratio and `current_cycle` scope. |
-| `fixed_test` | Dataset path, taxonomy coverage, baseline and post-cycle runs. |
-| `finetune` | GPU, epochs, batch, LoRA rank, sequence length, learning rate. |
+| `fixed_test` | Backward-compatible execution switches for the active evaluation set. |
+| `evaluation_sets` | Development/official/blind role registry, phase gate, and model-selection prohibition. |
+| `retention_test` | Optional instruction, format, simple-task, and non-target forgetting checks. |
+| `finetune` | GPU/LoRA settings, template-cluster split, validation selection, early stopping, and token/step caps. |
 | `structured_output` | Outlines/Guidance local JSON backends and fail policy. |
 | `tracking.wandb` | W&B mode, project, group, tags, and model logging. |
 
@@ -692,7 +694,7 @@ Local constrained JSON uses
 [TRL](https://github.com/huggingface/trl), and configurable experiment tracking
 uses [Weights & Biases](https://github.com/wandb/wandb).
 
-The fixed holdout is project-native and does not import questions from external
+The evaluation questions are project-native and do not import questions from external
 datasets. Error-attribution contracts follow the declarative separation
 encouraged by
 [DSPy](https://github.com/stanfordnlp/dspy), while the audit report decomposes
@@ -701,6 +703,55 @@ spirit of [Ragas](https://github.com/vibrantlabsai/ragas). DSPy and Ragas are
 design references, not runtime dependencies.
 
 See `THIRD_PARTY_NOTICES.md` for the precise reuse boundary and license notes.
+
+## Evaluation hierarchy and training selection
+
+`configs/evaluation_sets.yaml` gives every evaluation set an explicit role:
+
+- `development_regression_v3` is the existing 81-question fast regression set.
+  It may be used during development but is not evidence for fine-grained paper
+  claims.
+- `official_fixed_v1` requires 540 questions (20 for each of 27
+  subcategories), two validation sources per item, version metadata, and an
+  immutable file hash. It cannot enter training, the hard pool, generator
+  prompts, method selection, or threshold tuning.
+- `blind_final_v1` has no repository-visible path or hash. It loads only in
+  `blind_evaluation` phase with an explicit release token and matching
+  out-of-band SHA-256. Fine-tuning is rejected in that phase.
+
+Audit the development set and write the report only to VEPFS:
+
+```bash
+python prepare_evaluation_sets.py audit-development \
+  --config configs/math_flywheel.yaml \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/development_regression_v3.audit.json
+```
+
+The command returns exit code 2 while any item needs manual review or
+adjudication; it never silently calls a typed gold answer an independent
+re-solve. Assemble a curated official set only after every candidate has
+`validation.status: verified` and at least two validation sources:
+
+```bash
+python prepare_evaluation_sets.py assemble-official \
+  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
+  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_training_and_generation_questions.json \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json
+```
+
+Training data is split 80/10/10 by `template_signature`, never by individual
+row. `split_manifest.json` proves zero template overlap. TRL receives
+`dataset_train.jsonl` and `dataset_validation.jsonl`; early stopping and best
+checkpoint restoration use internal validation loss only.
+`dataset_internal_test.jsonl` is evaluated after selection. The training
+summary records token/step caps, actual optimizer steps, best validation
+metric, and `evaluation_set_used_for_model_selection: false`.
+
+Enable the auxiliary retention set for pilot/main runs with
+`retention_test.enabled=true`. Its baseline-correct to final-wrong transitions
+are reported as forgetting rate by instruction, format, simple-task, and
+non-target dimensions. Detailed Chinese operations are in
+[docs/evaluation_and_training_protocol_zh-CN.md](docs/evaluation_and_training_protocol_zh-CN.md).
 
 ## Verification
 

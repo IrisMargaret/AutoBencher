@@ -8,12 +8,16 @@
 
 代码可以位于 `/root/code/AutoBencher`，但程序不会把数据写入代码仓库或系统盘。
 
-## 1. 固定测试集的组成
+## 1. 开发回归集的组成与正式集边界
 
-当前唯一生效的题目文件是仓库内置的
-`benchmarks/fixed_math_test_set.json`。它覆盖配置中的 9 个数学大类和 27 个细分题型，
+仓库内置的 `benchmarks/fixed_math_test_set.json` 现在是开发回归集，不再是唯一
+正式论文测试集。它覆盖配置中的 9 个数学大类和 27 个细分题型，
 共 81 题，每个细分题型固定 3 题，并覆盖基础、中等和较难层级。题集只保存原创
 题目、规范答案、答案类型、难度、构造与校验元数据及项目原生题号。
+
+正式固定集要求每个子类别 20 题并经过双来源验证；最终盲测集只在冻结后释放。
+完整协议见
+[`evaluation_and_training_protocol_zh-CN.md`](evaluation_and_training_protocol_zh-CN.md)。
 
 GSM8K、Hendrycks MATH、MMLU 等 Hugging Face 托管数据集已经从生效配置、准备命令
 和文档入口中移除。加载器与安装器还会按 `source_dataset` 做拒绝检查，防止旧文件

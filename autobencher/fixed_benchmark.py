@@ -11,6 +11,10 @@ from typing import Any, Iterable, Mapping
 
 from .config import DEFAULT_TAXONOMY
 from .difficulty import analyze_difficulty
+from .evaluation_sets import (
+    resolve_active_evaluation_set,
+    validate_evaluation_coverage,
+)
 from .experiment import atomic_json
 from .structured import (
     ANSWER_TYPES,
@@ -146,8 +150,21 @@ def load_fixed_test_set(
     config: Mapping[str, Any],
     project_root: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Load the fixed set and fail closed on taxonomy or schema drift."""
-    path = resolve_fixed_test_path(config, project_root)
+    """Load the active evaluation set and fail closed on role/schema drift."""
+    root = (
+        Path(project_root).resolve()
+        if project_root is not None
+        else Path(__file__).resolve().parents[1]
+    )
+    evaluation_spec = resolve_active_evaluation_set(config, root)
+    configured_path = Path(
+        str(evaluation_spec.get("dataset_path", config["fixed_test"]["dataset_path"]))
+    ).expanduser()
+    path = (
+        configured_path.resolve()
+        if configured_path.is_absolute()
+        else (root / configured_path).resolve()
+    )
     if not path.is_file():
         raise FileNotFoundError(f"Fixed test set does not exist: {path}")
     try:
@@ -158,6 +175,32 @@ def load_fixed_test_set(
         payload.get("questions"), list
     ):
         raise ValueError("Fixed test set must contain a questions array")
+    release_manifest = None
+    if evaluation_spec["role"] == "official_fixed":
+        manifest_path = path.with_suffix(path.suffix + ".manifest.json")
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Official evaluation manifest does not exist: {manifest_path}"
+            )
+        try:
+            release_manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Official evaluation manifest is invalid JSON: {exc}"
+            ) from exc
+        observed_sha256 = fixed_test_sha256(path)
+        if str(release_manifest.get("sha256", "")).lower() != observed_sha256:
+            raise ValueError(
+                "Official evaluation file hash does not match its manifest"
+            )
+        if str(release_manifest.get("version", "")) != str(
+            evaluation_spec.get("version", "")
+        ):
+            raise ValueError(
+                "Official evaluation version does not match the registry"
+            )
     required = {
         "question_id",
         "category",
@@ -299,6 +342,16 @@ def load_fixed_test_set(
             "Fixed test set does not cover every subcategory: "
             + ", ".join(f"{a}/{b}" for a, b in missing)
         )
+    coverage_validation = validate_evaluation_coverage(
+        questions,
+        evaluation_spec,
+    )
+    expected_count = evaluation_spec.get("expected_question_count")
+    if expected_count is not None and len(questions) != int(expected_count):
+        raise ValueError(
+            f"Evaluation set {evaluation_spec['id']} expected "
+            f"{int(expected_count)} questions but loaded {len(questions)}"
+        )
     metadata = {
         "schema_version": str(payload.get("schema_version", "1.0")),
         "name": str(payload.get("name", path.stem)),
@@ -336,6 +389,17 @@ def load_fixed_test_set(
                 for record in questions
             }
         ),
+        "evaluation_set_id": evaluation_spec["id"],
+        "evaluation_role": evaluation_spec["role"],
+        "evaluation_version": str(evaluation_spec.get("version", "unknown")),
+        "evaluation_phase": evaluation_spec.get("phase", "legacy"),
+        "evaluation_permissions": dict(
+            evaluation_spec.get("permissions", {})
+        ),
+        "evaluation_registry_path": evaluation_spec.get("registry_path"),
+        "evaluation_registry_sha256": evaluation_spec.get("registry_sha256"),
+        "coverage_validation": coverage_validation,
+        "release_manifest": release_manifest,
     }
     _assert_project_native_questions(questions)
     return questions, metadata
@@ -528,4 +592,19 @@ def fixed_benchmark_summary(
                 if values
             },
         },
+        "item_outcomes": [
+            {
+                "question_id": str(
+                    record.get("question_id", record.get("id", ""))
+                ),
+                "is_correct": bool(record.get("is_correct")),
+                "retention_dimension": record.get("retention_dimension"),
+                "category": record.get("category"),
+                "sub_category": record.get(
+                    "sub_category",
+                    record.get("subcategory"),
+                ),
+            }
+            for record in records
+        ],
     }

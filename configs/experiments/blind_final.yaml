@@ -1,0 +1,38 @@
+extends: ../math_flywheel.yaml
+
+schema_version: "1.0"
+
+# This profile is intentionally evaluation-only. The dataset path and expected
+# hash are supplied out-of-band through environment variables after methods,
+# prompts, hyperparameters, and code have been frozen.
+experiment:
+  name: blind_final_v1
+  mode: eval
+  max_cycles: 1
+
+study:
+  policy: base
+  variant: base
+  components:
+    adaptive_allocation: false
+    global_difficulty: false
+    observed_difficulty: false
+    coverage_priority: false
+    uncertainty_priority: false
+    persistent_error_priority: false
+    retention_priority: false
+    hard_pool_variants: false
+    error_type_targeting: false
+
+evaluation_sets:
+  active_set: blind_final_v1
+  phase: blind_evaluation
+  allow_blind_evaluation: true
+
+finetune:
+  enabled: false
+
+fixed_test:
+  enabled: true
+  evaluate_baseline: true
+  evaluate_after_each_training_cycle: false

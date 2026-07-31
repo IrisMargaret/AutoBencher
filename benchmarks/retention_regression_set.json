@@ -1,0 +1,156 @@
+{
+  "schema_version": "1.0",
+  "name": "autobencher_retention_regression_v1",
+  "description": "Project-authored auxiliary set for instruction, format, simple-task, and non-target retention checks.",
+  "selection_policy": {
+    "training_use_prohibited": true,
+    "checkpoint_selection_prohibited": true,
+    "external_question_copying": false
+  },
+  "questions": [
+    {
+      "question_id": "retention-001",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Follow the instruction exactly: compute 2 + 3 and give the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "5",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-002",
+      "category": "Arithmetic",
+      "sub_category": "Fraction and Decimal Operations",
+      "difficulty": 2,
+      "question": "Compute 1/2 + 1/3. Keep the answer as an exact reduced fraction rather than a decimal.",
+      "answer_type": "rational",
+      "canonical_answer": "5/6",
+      "retention_dimension": "format_following",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-003",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Plane Geometry",
+      "difficulty": 2,
+      "question": "A square has side length 4. Return only the numerical area in the final answer.",
+      "answer_type": "integer",
+      "canonical_answer": "16",
+      "retention_dimension": "format_following",
+      "source_dataset": "project_native",
+      "verification": {"backend": "formula_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-004",
+      "category": "Algebra",
+      "sub_category": "Linear Equations",
+      "difficulty": 2,
+      "question": "Solve for x: x + 9 = 14.",
+      "answer_type": "integer",
+      "canonical_answer": "5",
+      "retention_dimension": "simple_base_capability",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-005",
+      "category": "Probability & Statistics",
+      "sub_category": "Basic Probability",
+      "difficulty": 2,
+      "question": "A fair coin is tossed once. What is the probability of heads?",
+      "answer_type": "rational",
+      "canonical_answer": "1/2",
+      "retention_dimension": "simple_base_capability",
+      "source_dataset": "project_native",
+      "verification": {"backend": "enumeration_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-006",
+      "category": "Number Theory",
+      "sub_category": "Divisibility and Factors",
+      "difficulty": 2,
+      "question": "Find the greatest common divisor of 18 and 30.",
+      "answer_type": "integer",
+      "canonical_answer": "6",
+      "retention_dimension": "simple_base_capability",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-007",
+      "category": "Calculus",
+      "sub_category": "Differentiation",
+      "difficulty": 3,
+      "question": "Differentiate x^2 with respect to x.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "2*x",
+      "retention_dimension": "untrained_math_category",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-008",
+      "category": "Linear Algebra",
+      "sub_category": "Matrix Operations",
+      "difficulty": 3,
+      "question": "Find the determinant of [[1, 2], [3, 4]].",
+      "answer_type": "integer",
+      "canonical_answer": "-2",
+      "retention_dimension": "untrained_math_category",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-009",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Trigonometric Reasoning",
+      "difficulty": 3,
+      "question": "Give the exact symbolic value of sin(pi/6); do not use a decimal.",
+      "answer_type": "rational",
+      "canonical_answer": "1/2",
+      "retention_dimension": "format_following",
+      "source_dataset": "project_native",
+      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-010",
+      "category": "Word Problems",
+      "sub_category": "Rate and Distance",
+      "difficulty": 2,
+      "question": "A runner moves at 8 kilometers per hour for 2 hours. How many kilometers are covered?",
+      "answer_type": "integer",
+      "canonical_answer": "16",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {"backend": "formula_plus_human_review", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-011",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: zero is an even integer.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {"backend": "definition_plus_two_reviewers", "canonical_parse_passed": true}
+    },
+    {
+      "question_id": "retention-012",
+      "category": "Probability & Statistics",
+      "sub_category": "Descriptive Statistics",
+      "difficulty": 2,
+      "question": "Find the arithmetic mean of 2, 4, and 6.",
+      "answer_type": "integer",
+      "canonical_answer": "4",
+      "retention_dimension": "simple_base_capability",
+      "source_dataset": "project_native",
+      "verification": {"backend": "formula_plus_human_review", "canonical_parse_passed": true}
+    }
+  ]
+}

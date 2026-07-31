@@ -92,6 +92,13 @@ def build_baseline_manifest(
         fixed_path,
         allow_missing=allow_missing_artifacts,
     )
+    evaluation_registry = artifact_fingerprint(
+        resolve_project_path(
+            root,
+            str(config["evaluation_sets"]["registry_path"]),
+        ),
+        allow_missing=allow_missing_artifacts,
+    )
     prompts = prompt_bundle_snapshot(config, root)
     config_sources = _config_source_fingerprints(provenance, root)
     resolved_config = thaw_config(config)
@@ -106,6 +113,7 @@ def build_baseline_manifest(
             **model,
         },
         "fixed_test": fixed_test,
+        "evaluation_registry": evaluation_registry,
         "config": {
             "resolved_sha256": str(provenance["config_hash"]),
             "source_files": config_sources,
@@ -123,6 +131,7 @@ def build_baseline_manifest(
             "git_commit": manifest["git"]["commit"],
             "model_sha256": model["sha256"],
             "fixed_test_sha256": fixed_test["sha256"],
+            "evaluation_registry_sha256": evaluation_registry["sha256"],
             "config_sha256": manifest["config"]["resolved_sha256"],
             "prompt_sha256": prompts["combined_sha256"],
             "environment": stable_environment,

@@ -606,6 +606,20 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "evaluate_after_each_training_cycle": True,
         "fail_on_training_leakage": True,
     },
+    "evaluation_sets": {
+        "registry_path": "configs/evaluation_sets.yaml",
+        "active_set": "development_regression_v3",
+        "phase": "development",
+        "allow_blind_evaluation": False,
+        "model_selection_source": "internal_validation",
+        "prohibit_evaluation_set_checkpoint_selection": True,
+    },
+    "retention_test": {
+        "enabled": False,
+        "dataset_path": "benchmarks/retention_regression_set.json",
+        "evaluate_baseline": True,
+        "evaluate_after_each_training_cycle": True,
+    },
     "finetune": {
         "enabled": True,
         "gpu": "0",
@@ -617,6 +631,22 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "learning_rate": 2.0e-4,
         "save_step_metrics": True,
         "merge_adapter": True,
+        "training_split": {
+            "strategy": "template_cluster",
+            "train_fraction": 0.8,
+            "validation_fraction": 0.1,
+            "internal_test_fraction": 0.1,
+        },
+        "max_training_tokens": 1000000,
+        "max_optimizer_steps": 1000,
+        "evaluation_strategy": "steps",
+        "eval_steps": 25,
+        "save_steps": 25,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+        "early_stopping_patience": 3,
+        "checkpoint_selection_rule": "minimum_internal_validation_loss",
     },
     "structured_output": {
         "enabled": True,
@@ -1378,12 +1408,19 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "fixed_test.evaluate_baseline",
         "fixed_test.evaluate_after_each_training_cycle",
         "fixed_test.fail_on_training_leakage",
+        "evaluation_sets.allow_blind_evaluation",
+        "evaluation_sets.prohibit_evaluation_set_checkpoint_selection",
+        "retention_test.enabled",
+        "retention_test.evaluate_baseline",
+        "retention_test.evaluate_after_each_training_cycle",
         "error_attribution.export_review_csv",
         "difficulty.reject_outside_generation_bounds",
         "difficulty.use_observed_score_for_adaptive_sampling",
         "hard_pool.enabled",
         "error_attribution.enabled",
         "finetune.enabled",
+        "finetune.load_best_model_at_end",
+        "finetune.greater_is_better",
     ):
         if not isinstance(_get(config, path), bool):
             raise ConfigurationError(path, "must be a Boolean")
@@ -1867,6 +1904,94 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         value = _get(config, path)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ConfigurationError(path, "must be a positive integer", value)
+    for path in (
+        "finetune.max_training_tokens",
+        "finetune.max_optimizer_steps",
+        "finetune.eval_steps",
+        "finetune.save_steps",
+        "finetune.early_stopping_patience",
+    ):
+        value = _get(config, path)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigurationError(path, "must be a positive integer", value)
+    split_strategy = str(
+        _get(config, "finetune.training_split.strategy")
+    ).strip()
+    if split_strategy != "template_cluster":
+        raise ConfigurationError(
+            "finetune.training_split.strategy",
+            "must be template_cluster",
+            split_strategy,
+        )
+    split_fractions = [
+        _get(config, f"finetune.training_split.{name}_fraction")
+        for name in ("train", "validation", "internal_test")
+    ]
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or float(value) <= 0
+        for value in split_fractions
+    ) or abs(sum(float(value) for value in split_fractions) - 1.0) > 1.0e-9:
+        raise ConfigurationError(
+            "finetune.training_split",
+            "fractions must be positive and sum to 1.0",
+            split_fractions,
+        )
+    evaluation_phase = str(_get(config, "evaluation_sets.phase")).strip()
+    if evaluation_phase not in {
+        "development",
+        "frozen",
+        "blind_evaluation",
+    }:
+        raise ConfigurationError(
+            "evaluation_sets.phase",
+            "must be development, frozen, or blind_evaluation",
+            evaluation_phase,
+        )
+    if (
+        str(_get(config, "evaluation_sets.model_selection_source")).strip()
+        != "internal_validation"
+    ):
+        raise ConfigurationError(
+            "evaluation_sets.model_selection_source",
+            "must be internal_validation",
+            _get(config, "evaluation_sets.model_selection_source"),
+        )
+    if str(_get(config, "finetune.metric_for_best_model")).strip() not in {
+        "eval_loss",
+        "eval_mean_token_accuracy",
+    }:
+        raise ConfigurationError(
+            "finetune.metric_for_best_model",
+            "must be eval_loss or eval_mean_token_accuracy",
+            _get(config, "finetune.metric_for_best_model"),
+        )
+    if str(_get(config, "finetune.evaluation_strategy")).strip() != "steps":
+        raise ConfigurationError(
+            "finetune.evaluation_strategy",
+            "must be steps",
+            _get(config, "finetune.evaluation_strategy"),
+        )
+    if (
+        str(_get(config, "finetune.checkpoint_selection_rule")).strip()
+        != "minimum_internal_validation_loss"
+    ):
+        raise ConfigurationError(
+            "finetune.checkpoint_selection_rule",
+            "must be minimum_internal_validation_loss",
+            _get(config, "finetune.checkpoint_selection_rule"),
+        )
+    if (
+        bool(_get(config, "finetune.load_best_model_at_end"))
+        and int(_get(config, "finetune.save_steps"))
+        % int(_get(config, "finetune.eval_steps"))
+    ):
+        raise ConfigurationError(
+            "finetune.save_steps",
+            "must be a multiple of eval_steps when loading the best model",
+            _get(config, "finetune.save_steps"),
+        )
     taxonomy = _get(config, "taxonomy")
     if not isinstance(taxonomy, Mapping) or not taxonomy:
         raise ConfigurationError("taxonomy", "must define at least one category")

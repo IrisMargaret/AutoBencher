@@ -354,6 +354,19 @@ class StudyRunner:
                                 str(fixed_path),
                                 allow_missing,
                             ),
+                            "evaluation_registry": self._artifact(
+                                str(
+                                    resolve_project_path(
+                                        self.project_root,
+                                        str(
+                                            config["evaluation_sets"][
+                                                "registry_path"
+                                            ]
+                                        ),
+                                    )
+                                ),
+                                allow_missing,
+                            ),
                             "prompt_bundle": prompt_bundle_snapshot(
                                 config,
                                 self.project_root,
@@ -429,6 +442,10 @@ class StudyRunner:
             fixed_hashes = {
                 item.fingerprints["fixed_test"]["sha256"] for item in group
             }
+            registry_hashes = {
+                item.fingerprints["evaluation_registry"]["sha256"]
+                for item in group
+            }
             prompt_hashes = {
                 item.fingerprints["prompt_bundle"]["combined_sha256"]
                 for item in group
@@ -440,6 +457,11 @@ class StudyRunner:
             if len(fixed_hashes) != 1:
                 raise StudyConfigurationError(
                     f"Unfair fixed-test fingerprints in matrix cell {key}."
+                )
+            if len(registry_hashes) != 1:
+                raise StudyConfigurationError(
+                    "Unfair evaluation-registry fingerprints in matrix "
+                    f"cell {key}."
                 )
             if len(prompt_hashes) != 1:
                 raise StudyConfigurationError(

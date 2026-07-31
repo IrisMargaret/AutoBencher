@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -54,6 +55,8 @@ def build_parser():
     )
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--dataset_path", required=True)
+    parser.add_argument("--eval_dataset_path")
+    parser.add_argument("--internal_test_dataset_path")
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--epoch", type=int, default=3)
     parser.add_argument(
@@ -66,6 +69,19 @@ def build_parser():
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--max_training_tokens", type=int, default=1000000)
+    parser.add_argument("--max_optimizer_steps", type=int, default=1000)
+    parser.add_argument(
+        "--evaluation_strategy",
+        choices=("steps",),
+        default="steps",
+    )
+    parser.add_argument("--eval_steps", type=int, default=25)
+    parser.add_argument("--save_steps", type=int, default=25)
+    parser.add_argument("--load_best_model_at_end", action="store_true")
+    parser.add_argument("--metric_for_best_model", default="eval_loss")
+    parser.add_argument("--greater_is_better", action="store_true")
+    parser.add_argument("--early_stopping_patience", type=int, default=3)
     parser.add_argument(
         "--seed",
         type=int,
@@ -254,9 +270,24 @@ def _supported_kwargs(callable_object, values):
     }
 
 
-def _training_config(args, adapter_output, use_bfloat16):
+def _training_config(
+    args,
+    adapter_output,
+    use_bfloat16,
+    *,
+    has_evaluation=False,
+    planned_optimizer_steps=1,
+):
     from transformers import TrainingArguments
 
+    checkpoint_steps = max(
+        1,
+        min(
+            int(args.eval_steps),
+            int(args.save_steps),
+            int(planned_optimizer_steps),
+        ),
+    )
     values = {
         "output_dir": str(adapter_output),
         "num_train_epochs": args.epoch,
@@ -264,8 +295,21 @@ def _training_config(args, adapter_output, use_bfloat16):
         "gradient_accumulation_steps": args.batch,
         "learning_rate": args.learning_rate,
         "logging_steps": 1,
-        "save_strategy": "epoch",
+        "eval_strategy": (
+            args.evaluation_strategy if has_evaluation else "no"
+        ),
+        "evaluation_strategy": (
+            args.evaluation_strategy if has_evaluation else "no"
+        ),
+        "eval_steps": checkpoint_steps,
+        "save_strategy": "steps" if has_evaluation else "epoch",
+        "save_steps": checkpoint_steps,
         "save_total_limit": 1,
+        "load_best_model_at_end": bool(
+            has_evaluation and args.load_best_model_at_end
+        ),
+        "metric_for_best_model": args.metric_for_best_model,
+        "greater_is_better": bool(args.greater_is_better),
         "optim": "paged_adamw_8bit",
         "lr_scheduler_type": "cosine",
         "warmup_ratio": 0.03,
@@ -280,6 +324,8 @@ def _training_config(args, adapter_output, use_bfloat16):
         "seed": args.seed,
         "data_seed": args.seed,
     }
+    if int(planned_optimizer_steps) > int(args.max_optimizer_steps):
+        values["max_steps"] = int(args.max_optimizer_steps)
     try:
         from trl import SFTConfig
 
@@ -302,7 +348,13 @@ def _training_config(args, adapter_output, use_bfloat16):
 
 
 # [ADDED] Train a QLoRA adapter, merge it, and save a complete local model.
-def train_and_merge(args, model_source, records):
+def train_and_merge(
+    args,
+    model_source,
+    records,
+    eval_records=None,
+    internal_test_records=None,
+):
     import torch
     import transformers
     from datasets import Dataset
@@ -311,6 +363,7 @@ def train_and_merge(args, model_source, records):
         AutoModelForCausalLM,
         AutoTokenizer,
         BitsAndBytesConfig,
+        EarlyStoppingCallback,
         TrainerCallback,
         set_seed,
     )
@@ -338,22 +391,61 @@ def train_and_merge(args, model_source, records):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    formatted_records = [
-        {"text": _format_record(tokenizer, record)}
-        for record in records
-    ]
-    dataset_token_count = sum(
-        len(
-            tokenizer(
-                item["text"],
-                add_special_tokens=False,
-                truncation=True,
-                max_length=args.max_seq_length,
-            )["input_ids"]
+    def prepare_dataset(source_records):
+        formatted = []
+        token_counts = []
+        for record in source_records or []:
+            item = {"text": _format_record(tokenizer, record)}
+            count = len(
+                tokenizer(
+                    item["text"],
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=args.max_seq_length,
+                )["input_ids"]
+            )
+            formatted.append(item)
+            token_counts.append(count)
+        return formatted, token_counts
+
+    formatted_records, train_token_counts = prepare_dataset(records)
+    per_epoch_cap = max(1, int(args.max_training_tokens) // int(args.epoch))
+    kept_count = 0
+    kept_tokens = 0
+    for count in train_token_counts:
+        if kept_count and kept_tokens + count > per_epoch_cap:
+            break
+        kept_count += 1
+        kept_tokens += count
+    if kept_count < len(formatted_records):
+        LOGGER.info(
+            "stage=token_budget requested_samples=%d retained_samples=%d "
+            "per_epoch_tokens=%d cap=%d",
+            len(formatted_records),
+            kept_count,
+            kept_tokens,
+            per_epoch_cap,
         )
-        for item in formatted_records
-    )
+        formatted_records = formatted_records[:kept_count]
+    records = records[:kept_count]
+    dataset_token_count = kept_tokens
     dataset = Dataset.from_list(formatted_records)
+    formatted_eval, eval_token_counts = prepare_dataset(eval_records)
+    formatted_internal, internal_token_counts = prepare_dataset(
+        internal_test_records
+    )
+    eval_dataset = (
+        Dataset.from_list(formatted_eval) if formatted_eval else None
+    )
+    internal_test_dataset = (
+        Dataset.from_list(formatted_internal)
+        if formatted_internal
+        else None
+    )
+    planned_optimizer_steps = max(
+        1,
+        math.ceil(len(records) / max(1, int(args.batch))) * int(args.epoch),
+    )
 
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -404,11 +496,14 @@ def train_and_merge(args, model_source, records):
             args,
             adapter_output,
             use_bfloat16,
+            has_evaluation=eval_dataset is not None,
+            planned_optimizer_steps=planned_optimizer_steps,
         )
         trainer_values = {
             "model": model,
             "args": training_args,
             "train_dataset": dataset,
+            "eval_dataset": eval_dataset,
             "processing_class": tokenizer,
             "tokenizer": tokenizer,
             "dataset_text_field": "text",
@@ -417,6 +512,16 @@ def train_and_merge(args, model_source, records):
             "peft_config": lora_config,
         }
         callbacks = []
+        if (
+            eval_dataset is not None
+            and args.load_best_model_at_end
+            and args.early_stopping_patience > 0
+        ):
+            callbacks.append(
+                EarlyStoppingCallback(
+                    early_stopping_patience=args.early_stopping_patience
+                )
+            )
         if args.metrics_path:
             metrics_path = Path(args.metrics_path).expanduser().resolve()
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,7 +569,24 @@ def train_and_merge(args, model_source, records):
         train_result = trainer.train()
         train_elapsed = time.monotonic() - train_started
         optimizer_steps = int(trainer.state.global_step)
+        completed_epochs = float(trainer.state.epoch or 0.0)
         train_metrics = dict(getattr(train_result, "metrics", {}) or {})
+        best_checkpoint = getattr(
+            trainer.state,
+            "best_model_checkpoint",
+            None,
+        )
+        best_metric = getattr(trainer.state, "best_metric", None)
+        internal_test_metrics = (
+            dict(
+                trainer.evaluate(
+                    internal_test_dataset,
+                    metric_key_prefix="internal_test",
+                )
+            )
+            if internal_test_dataset is not None
+            else {}
+        )
         trainer.model.save_pretrained(
             adapter_output,
             safe_serialization=True,
@@ -522,8 +644,14 @@ def train_and_merge(args, model_source, records):
     return {
         "schema_version": "1.0",
         "final_training_sample_count": len(records),
+        "validation_sample_count": len(eval_records or []),
+        "internal_test_sample_count": len(internal_test_records or []),
         "dataset_token_count": dataset_token_count,
-        "training_token_count": dataset_token_count * int(args.epoch),
+        "validation_token_count": sum(eval_token_counts),
+        "internal_test_token_count": sum(internal_token_counts),
+        "training_token_count": int(
+            round(dataset_token_count * completed_epochs)
+        ),
         "optimizer_steps": optimizer_steps,
         "gpu_hours": wall_time / 3600.0,
         "peak_gpu_memory_gb": (
@@ -534,6 +662,19 @@ def train_and_merge(args, model_source, records):
             train_metrics.get("train_runtime", train_elapsed)
         ),
         "epochs": int(args.epoch),
+        "completed_epochs": completed_epochs,
+        "max_training_tokens": int(args.max_training_tokens),
+        "max_optimizer_steps": int(args.max_optimizer_steps),
+        "planned_optimizer_steps": planned_optimizer_steps,
+        "best_checkpoint": (
+            Path(best_checkpoint).name if best_checkpoint else None
+        ),
+        "best_metric": best_metric,
+        "metric_for_best_model": args.metric_for_best_model,
+        "checkpoint_selection_source": "internal_validation",
+        "evaluation_set_used_for_model_selection": False,
+        "early_stopping_patience": int(args.early_stopping_patience),
+        "internal_test_metrics": internal_test_metrics,
     }
 
 
@@ -557,7 +698,17 @@ def main(argv=None):
     configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
-    for name in ("epoch", "batch", "lora_rank", "max_seq_length"):
+    for name in (
+        "epoch",
+        "batch",
+        "lora_rank",
+        "max_seq_length",
+        "max_training_tokens",
+        "max_optimizer_steps",
+        "eval_steps",
+        "save_steps",
+        "early_stopping_patience",
+    ):
         if getattr(args, name) < 1:
             parser.error(f"--{name} must be at least 1")
     if args.learning_rate <= 0:
@@ -588,6 +739,16 @@ def main(argv=None):
         return 3
     try:
         records = load_alpaca_records(args.dataset_path)
+        eval_records = (
+            load_alpaca_records(args.eval_dataset_path)
+            if args.eval_dataset_path
+            else None
+        )
+        internal_test_records = (
+            load_alpaca_records(args.internal_test_dataset_path)
+            if args.internal_test_dataset_path
+            else None
+        )
         model_source = resolve_model_source(args.model_name_or_path)
     except (OSError, ValueError) as exc:
         LOGGER.error("stage=input_validation error=%s", exc)
@@ -600,7 +761,13 @@ def main(argv=None):
             args.gpu,
             args.seed,
         )
-        summary = train_and_merge(args, model_source, records)
+        summary = train_and_merge(
+            args,
+            model_source,
+            records,
+            eval_records,
+            internal_test_records,
+        )
         if args.summary_path:
             summary_path = Path(args.summary_path).expanduser().resolve()
             summary_path.parent.mkdir(parents=True, exist_ok=True)
