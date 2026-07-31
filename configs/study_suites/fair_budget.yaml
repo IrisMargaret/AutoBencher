@@ -22,6 +22,7 @@ study_suite:
     - {left: error_only, right: full}
     - {left: full_no_hard_pool, right: full}
     - {left: full_no_error_targeting, right: full}
+    - {left: full_no_observed_difficulty_sampling, right: full}
     - {left: full_no_difficulty_module, right: full}
   seeds:
     - 42
@@ -42,3 +43,4 @@ study_suite:
   common_overrides:
     - experiment.num_iterations=5
     - experiment.max_cycles=3
+    - retention_test.enabled=true

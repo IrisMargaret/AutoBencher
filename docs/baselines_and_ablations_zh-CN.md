@@ -24,6 +24,11 @@ SymPy 金标、质量过滤、训练集构建和固定测试集评测链路；�
 保留 requested、observed 和 effective difficulty，只是 effective 使用 requested。
 `full_no_difficulty_module` 才是真正关闭完整难度模块。
 
+第一轮包含该方法的 suite 均预注册
+`full_no_observed_difficulty_sampling`（对照）与 `full`（完整方法）的直接比较，
+用于隔离“实测难度反馈是否参与后续采样”的增益，而不以二者分别相对 Base 的结果
+代替直接检验。
+
 ## 组件定义
 
 运行清单中的 `component_state` 保存实际生效状态，而不是仅复制 YAML 声明。组件含义
@@ -158,6 +163,11 @@ git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
 | `fair_budget.yaml` | Data-matched 与 Generation-token-matched × 第一轮九方法 × 三个 seed |
 | `ablation_round2.yaml` | 完整方法与四个第二轮单组件消融 |
 | `history_modes.yaml` | cumulative、cycle_reset、time_decay 后验比较 |
+
+`main.yaml`、`fair_budget.yaml` 和 `ablation_round2.yaml` 会启用 120 题保持集评测；
+其中保持集准确率变化、遗忘率和遗忘题数属于描述性能力监测，不构成正式的非劣效
+证明。81 题 `development_regression_v3` 只支持开发性结论；方法、提示词和超参数冻结后，
+确认性结论应使用 540 题 `official_fixed_v1`。
 
 先只展开矩阵并检查公平性，不启动模型：
 

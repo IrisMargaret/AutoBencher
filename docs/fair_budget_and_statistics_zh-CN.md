@@ -32,6 +32,9 @@ DeepSeek/OpenAI 兼容接口提供 usage 时使用供应商的精确 Token；供
 `generation_token_matched`。
 `question_matched` 保留原有计划题数比较，只作兼容基线。
 
+术语上，`generation_token_matched` 只能称为“生成 Token 匹配”：它不统一 Judge、
+训练 Token、API 调用、墙钟时间或 GPU 成本，因此不能称为完整的 cost-matched。
+
 ### Data-matched
 
 ```yaml
@@ -113,3 +116,7 @@ seed 计算再汇总。显著性检验只执行 suite 中的 `comparison_pairs`�
 不同 seed 的 McNemar 和 Item Bootstrap 只标为描述性结果。所有预注册运行、seed 和
 题号集合必须完整一致，否则正式聚合失败。只有显式传入
 `--allow-partial-development-results` 才允许输出不完整的开发诊断表。
+
+正式 `main`、`fair_budget` 与第二轮消融同时记录保持集准确率变化、遗忘率和遗忘题数；
+这些指标用于描述性监测微调副作用，不等同于预注册的非劣效检验。81 题开发回归集
+用于流程和方法开发，冻结方法后的确认性评测使用 540 题正式固定集。

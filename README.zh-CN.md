@@ -692,6 +692,13 @@ python -B prepare_blind_math_benchmark.py \
 绑定式盲测会写入私有 receipt；同一模型目录哈希与盲测集哈希的组合默认只允许执行
 一次。
 
+结题研究配置中，`full_no_observed_difficulty_sampling`（对照）与 `full`（完整方法）
+已作为预注册直接比较；`main`、`fair_budget` 和 `ablation_round2` 会运行 120 题保持集。
+保持集结果仅作描述性遗忘监测，不是非劣效证明。81 题
+`development_regression_v3` 只支持开发性判断，冻结方法后的确认性结论使用 540 题
+`official_fixed_v1`。`generation_token_matched` 仅表示生成 Token 匹配，不代表完整
+cost-matched。
+
 正式集和盲测只能由 checkpoint 绑定入口启动。直接加载对应 YAML 会因缺少来源信息
 而失败；入口会把 source study/method/seed/run ID、checkpoint 路径及目录 SHA 与已完成
 Registry 逐项核对：

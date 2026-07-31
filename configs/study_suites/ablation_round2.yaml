@@ -26,3 +26,5 @@ study_suite:
       path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
   budgets:
     - 1350
+  common_overrides:
+    - retention_test.enabled=true

@@ -26,6 +26,7 @@ from artifact_fixtures import write_completed_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STUDY_SUITE_DIR = ROOT / "configs" / "study_suites"
 FIRST_ROUND_METHODS = [
     "base",
     "random",
@@ -37,6 +38,79 @@ FIRST_ROUND_METHODS = [
     "full_no_observed_difficulty_sampling",
     "full_no_difficulty_module",
 ]
+
+
+def _load_study_suite(name: str) -> dict:
+    payload = yaml.safe_load(
+        (STUDY_SUITE_DIR / name).read_text(encoding="utf-8")
+    )
+    return payload["study_suite"]
+
+
+def _resolved_full_config_for_suite(name: str) -> dict:
+    suite = _load_study_suite(name)
+    config, _ = load_resolved_config(
+        ROOT / "configs" / "studies" / "full.yaml",
+        ROOT / suite["environment"],
+        temporary_overrides=suite.get("common_overrides", []),
+        validate_paths=False,
+    )
+    return config
+
+
+def test_observed_difficulty_ablation_is_preregistered_when_present():
+    expected = {
+        "left": "full_no_observed_difficulty_sampling",
+        "right": "full",
+    }
+    checked = []
+    for path in sorted(STUDY_SUITE_DIR.glob("*.yaml")):
+        suite = _load_study_suite(path.name)
+        if "full_no_observed_difficulty_sampling" not in suite["methods"]:
+            continue
+        checked.append(path.name)
+        assert suite["comparison_pairs"].count(expected) == 1, path.name
+    assert checked == [
+        "budget_curve.yaml",
+        "fair_budget.yaml",
+        "main.yaml",
+        "pilot.yaml",
+        "smoke.yaml",
+    ]
+
+
+@pytest.mark.parametrize(
+    "suite_name",
+    ["main.yaml", "fair_budget.yaml", "ablation_round2.yaml"],
+)
+def test_research_suites_enable_retention_evaluation(suite_name):
+    config = _resolved_full_config_for_suite(suite_name)
+    assert config["retention_test"]["enabled"] is True
+
+
+def test_smoke_suite_keeps_retention_evaluation_disabled():
+    config = _resolved_full_config_for_suite("smoke.yaml")
+    assert config["retention_test"]["enabled"] is False
+
+
+def test_new_preregistered_pair_preserves_study_fairness(tmp_path):
+    payload = yaml.safe_load(
+        (STUDY_SUITE_DIR / "main.yaml").read_text(encoding="utf-8")
+    )
+    suite = payload["study_suite"]
+    suite["name"] = "main_fairness_config_test"
+    suite["output_root"] = str(tmp_path / "runs")
+    suite["allow_missing_artifacts"] = True
+    suite["allow_dirty_worktree"] = True
+    suite["seeds"] = [42]
+    suite["budgets"] = [135]
+    suite["common_overrides"].append("paths.enforce_data_root=false")
+    path = tmp_path / "main.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    plan = StudyRunner(path, project_root=ROOT).build_plan()
+    assert {item.method for item in plan} == set(FIRST_ROUND_METHODS)
+    assert len(plan) == len(FIRST_ROUND_METHODS)
 
 
 def _write_suite(
