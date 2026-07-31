@@ -54,7 +54,7 @@ class OllamaRoutingTests(unittest.TestCase):
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["stop"], ["Human:", "<|im_end|>"])
 
-    def test_deepseek_request_has_explicit_output_token_limit(self):
+    def test_deepseek_request_has_no_output_token_limit(self):
         client = Mock()
         completion = Mock()
         completion.choices = [Mock(message=Mock(content='{"answer":"4"}'))]
@@ -72,7 +72,7 @@ class OllamaRoutingTests(unittest.TestCase):
         )
 
         kwargs = client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["max_tokens"], 12)
+        self.assertNotIn("max_tokens", kwargs)
         self.assertNotIn("extra_body", kwargs)
         self.assertEqual(kwargs["timeout"], 17)
 

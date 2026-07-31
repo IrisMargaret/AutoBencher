@@ -697,10 +697,14 @@ def query_openai_compatible(
                     top_p=top_p,
                     n=num_completions,
                 )
-                # A declared output reserve is enforceable only if the same
-                # cap is sent to every provider, including DeepSeek-compatible
-                # endpoints.
-                request_kwargs["max_tokens"] = max_tokens
+                # DeepSeek-compatible endpoints may spend completion tokens on
+                # hidden reasoning before returning visible content.  Do not
+                # impose the caller's local generation bound on those remote
+                # requests: a small cap can otherwise produce an empty visible
+                # completion.  Local and other API backends retain their
+                # explicit safety bound.
+                if not model.lower().startswith("deepseek"):
+                    request_kwargs["max_tokens"] = max_tokens
                 if stop_sequences:
                     request_kwargs["stop"] = list(stop_sequences)
                 if timeout_seconds is not None:
