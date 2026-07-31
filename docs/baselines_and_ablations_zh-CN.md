@@ -208,8 +208,9 @@ python aggregate_study.py \
   --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
 ```
 
-命令生成 `aggregate.json` 和逐实验 CSV，并按 method/model/budget 汇总均值、标准差和
-95% 正态近似置信区间。
+命令生成 `aggregate.json` 和逐实验 CSV，并按评测集、预算协议、model、budget、
+method、variant 与 seed 隔离结果；跨 seed 区间使用 Student-t，逐题比较使用预注册
+配对检验，不使用三种子正态近似。
 
 同一 method、seed、model、budget、resolved config 和 Git commit 产生相同
 `study_id` 与调度计划。修改代码、配置、Prompt、模型或固定集后必须使用新的 suite
@@ -217,11 +218,12 @@ python aggregate_study.py \
 
 ## 检查 allocation 和清单
 
-先定位本次输出目录：
+从 Registry 读取绑定输出目录，不按修改时间猜测“最新运行”：
 
 ```bash
-RUN_DIR=$(ls -dt \
-  /vepfs-mlp2/queue010/20262202597/math_flywheel/test_* | head -1)
+RUN_DIR=$(jq -r \
+  '.experiments[] | select(.study_id == "<registered-study-id>") | .run_dir' \
+  /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json)
 ```
 
 查看运行时真正采用的策略，而不是只看配置文件：

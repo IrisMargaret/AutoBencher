@@ -59,8 +59,7 @@ export DEEPSEEK_BASE_URL='...'
 
 ## 3. 运行前检查
 
-先执行只读/目录准备检查，不生成题目、不启动微调，也不会分配 `test_<N>`
-运行目录：
+先执行只读/目录准备检查，不生成题目、不启动微调，也不会创建正式运行目录：
 
 ```bash
 python run_scripts.py math \
@@ -101,14 +100,23 @@ test-taker 作答、训练集导出、1 个 epoch 的 QLoRA、adapter 合并、�
 复测。
 
 如果上一轮已经在 `training_export` 阶段因缺少 `datasketch` 失败，更新代码后
-直接用相同命令重跑即可。程序会创建新的 `test_<N>` 自包含运行目录；失败的
-旧目录会保留用于审计，不会把其中的半成品混入新训练集。
+必须用相同 `run_id` 加 `--resume true` 恢复。程序会重新打开原来的内容寻址运行目录，
+并核对配置、代码、Prompt 与模型指纹；不会另建目录从头训练，也不会把其他运行的
+半成品混入当前训练集：
+
+```bash
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-sympy-e2e \
+  --resume true
+```
 
 查找本次运行目录：
 
 ```bash
 export DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
-export RUN_DIR="$(ls -dt "$DATA_ROOT"/test_* | head -1)"
+export RUN_DIR="$(python -c 'from autobencher.experiment import run_dir_for_id; print(run_dir_for_id("/vepfs-mlp2/queue010/20262202597/math_flywheel", "mini-sympy-e2e"))')"
 echo "$RUN_DIR"
 tail -f "$RUN_DIR/logs/run.log"
 ```

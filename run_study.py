@@ -1,5 +1,7 @@
 """Command-line entry point for deterministic ablation study suites."""
 
+# ruff: noqa: E402 -- bytecode suppression must precede project imports.
+
 from __future__ import annotations
 
 import argparse

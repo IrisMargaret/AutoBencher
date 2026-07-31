@@ -1,29 +1,31 @@
+# Runtime path configuration must be established before project imports.
+# ruff: noqa: E402
+
+import argparse
+import contextlib
+import copy
 import glob
 import gc
 import hashlib
+import json
 import math
+import os
+import re
 import signal
 import sys
 import threading
-
-# Runtime artifacts and caches are configured after YAML resolution. Avoid
-# writing repository-local bytecode during the imports that precede it.
-sys.dont_write_bytecode = True
-
-import contextlib
+import time
 import traceback
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
-import copy
-import re, time
-import os, argparse, ast, json, tqdm
-from pydantic import BaseModel, Extra, root_validator
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
-from time import sleep
-from collections import Counter, defaultdict
-import numpy as np
+import tqdm
+
+# Runtime artifacts and caches are configured after YAML resolution. Avoid
+# writing repository-local bytecode during project imports.
+sys.dont_write_bytecode = True
 
 from autobencher.config import (
     ConfigurationError,
@@ -76,12 +78,11 @@ from autobencher.training_protocol import (
     enforce_train_correct_incorrect_ratio,
     split_by_template_cluster,
     write_precomputed_training_splits,
-    write_training_splits,
 )
 from autobencher.evaluation_sets import load_evaluation_registry
 from autobencher.evaluation_audit import load_json_questions
 from autobencher.fingerprints import artifact_fingerprint
-from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
+from util import gen_from_prompt, helm_process_args, process_args_for_models
 from tool_util import (
     DEFAULT_SYSTEM_MESSAGE,
     HardSamplePool,
@@ -104,9 +105,6 @@ from tool_util import (
     normalize_math_category,
     normalize_sub_category,
     read_json_records,
-    search_related_pages,
-    search_step,
-    get_pageviews,
     update_meta_summary,
 )
 from run_scripts import log_math_iteration_metrics

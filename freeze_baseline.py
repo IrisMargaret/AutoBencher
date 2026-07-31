@@ -1,5 +1,7 @@
 """Create a reproducibility manifest for the current experiment baseline."""
 
+# ruff: noqa: E402 -- bytecode suppression must precede project imports.
+
 from __future__ import annotations
 
 import argparse

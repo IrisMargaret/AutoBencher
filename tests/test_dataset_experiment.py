@@ -26,6 +26,7 @@ from autobencher.experiment import (
     ResearchRun,
     allocate_test_run_dir,
     atomic_json,
+    build_artifact_inventory,
     run_dir_for_id,
 )
 from tool_util import (
@@ -337,6 +338,23 @@ def test_atomic_json_is_pretty_and_complete(tmp_path):
     assert not output.with_name(output.name + ".tmp").exists()
 
 
+def test_artifact_inventory_hashes_text_and_binary(tmp_path):
+    atomic_json({"status": "completed"}, tmp_path / "summary.json")
+    (tmp_path / "model.bin").write_bytes(b"binary-checkpoint")
+    inventory = build_artifact_inventory(tmp_path)
+    assert inventory["layout_version"] == "research_run_v2"
+    by_path = {item["path"]: item for item in inventory["files"]}
+    assert by_path["summary.json"]["kind"] == "research_artifact"
+    assert by_path["model.bin"]["kind"] == "binary_payload"
+    assert all(len(item["sha256"]) == 64 for item in by_path.values())
+
+
+def test_artifact_inventory_rejects_uncommitted_temporary_file(tmp_path):
+    (tmp_path / "partial.json.tmp").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="temporary artifact"):
+        build_artifact_inventory(tmp_path)
+
+
 def test_progress_manager_rejects_nested_stages(config):
     manager = ProgressManager(config)
     with manager.stage("outer", 1):
@@ -548,6 +566,10 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
         "combined_sha256",
     }
     assert manifest["budget_protocol"] == "question_matched"
+    with pytest.raises(ValueError, match="safe artifact name"):
+        run.export_iteration(1, 1, {"../escape": []})
+    with pytest.raises(ValueError, match="must be positive"):
+        run.iteration_dir(0, 1)
 
 
 def test_absolute_legacy_prefix_stays_inside_bound_run_dir(tmp_path):

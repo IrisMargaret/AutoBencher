@@ -1,4 +1,4 @@
-# [ADDED] Reproducible benchmark and built-in QLoRA runtime.
+# Exact reproducible benchmark and QLoRA environment.
 accelerate==1.14.0
 annotated-types==0.7.0
 antlr4-python3-runtime==4.13.2

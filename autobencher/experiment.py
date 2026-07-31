@@ -27,6 +27,12 @@ from autobencher.fingerprints import (
 )
 
 
+ARTIFACT_LAYOUT_VERSION = "research_run_v2"
+HASHED_ARTIFACT_SUFFIXES = frozenset(
+    {".csv", ".json", ".jsonl", ".log", ".md", ".txt", ".yaml", ".yml"}
+)
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -117,6 +123,57 @@ def run_dir_for_id(output_root: str | Path, run_id: str) -> Path:
         raise ValueError("run_id must contain at least one safe character")
     digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:12]
     return root / f"run_{normalized[:96]}_{digest}"
+
+
+def _artifact_segment(value: Any, field: str) -> str:
+    normalized = str(value).strip()
+    if not normalized or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", normalized):
+        raise ValueError(
+            f"{field} must be a safe artifact name containing only letters, "
+            "numbers, dot, underscore, and hyphen"
+        )
+    return normalized
+
+
+def build_artifact_inventory(run_dir: str | Path) -> dict[str, Any]:
+    """Create a deterministic index of finalized run outputs.
+
+    Every file is content-addressed. This is intentionally performed only when
+    a run is finalized; complete integrity is more important than avoiding one
+    sequential read of model payloads at publication time.
+    """
+    root = Path(run_dir).resolve()
+    files = []
+    for path in sorted(root.rglob("*"), key=lambda value: value.as_posix()):
+        if not path.is_file() or path.name == "artifact_manifest.json":
+            continue
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink() and not path.resolve().is_relative_to(root):
+            raise RuntimeError(f"Artifact symlink escapes run directory: {relative}")
+        if path.name.endswith(".tmp"):
+            raise RuntimeError(f"Uncommitted temporary artifact remains: {relative}")
+        files.append(
+            {
+                "path": relative,
+                "size": path.stat().st_size,
+                "sha256": file_sha256(path),
+                "kind": (
+                    "research_artifact"
+                    if path.suffix.lower() in HASHED_ARTIFACT_SUFFIXES
+                    else "binary_payload"
+                ),
+            }
+        )
+    return {
+        "layout_version": ARTIFACT_LAYOUT_VERSION,
+        "hash_policy": {
+            "algorithm": "sha256",
+            "coverage": "all_regular_files",
+            "research_artifact_suffixes": sorted(HASHED_ARTIFACT_SUFFIXES),
+            "temporary_files_allowed": False,
+        },
+        "files": files,
+    }
 
 
 def environment_snapshot() -> dict[str, Any]:
@@ -560,6 +617,8 @@ class ResearchRun:
         )
 
     def iteration_dir(self, cycle: int, iteration: int) -> Path:
+        if int(cycle) < 1 or int(iteration) < 1:
+            raise ValueError("cycle and iteration identifiers must be positive")
         path = self.cycle_root / f"cycle_{cycle}" / f"iter_{iteration}"
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -572,9 +631,10 @@ class ResearchRun:
     ) -> None:
         target = self.iteration_dir(cycle, iteration)
         for name, payload in payloads.items():
+            artifact_name = _artifact_segment(name, "iteration artifact name")
             atomic_json(
                 {**self.metadata(), "cycle_id": cycle, "iteration_id": iteration, "data": payload},
-                target / f"{name}.json",
+                target / f"{artifact_name}.json",
             )
 
     def save_cycle_artifact(
@@ -585,7 +645,16 @@ class ResearchRun:
         payload: Any,
     ) -> Path:
         """Persist one metadata-enveloped artifact within a cycle section."""
-        target = self.cycle_root / f"cycle_{cycle}" / section / f"{name}.json"
+        if int(cycle) < 1:
+            raise ValueError("cycle identifier must be positive")
+        section_name = _artifact_segment(section, "cycle artifact section")
+        artifact_name = _artifact_segment(name, "cycle artifact name")
+        target = (
+            self.cycle_root
+            / f"cycle_{cycle}"
+            / section_name
+            / f"{artifact_name}.json"
+        )
         atomic_json(
             {
                 **self.metadata(),
@@ -622,35 +691,7 @@ class ResearchRun:
             manifest_path,
         )
         if status == "completed":
-            required = [
-                self.run_dir / "run_manifest.json",
-                self.run_dir / "experiment_summary.json",
-                self.run_dir / "budget_ledger.json",
-                self.run_dir / "cycle_record.json",
-                self.run_dir / "resolved_config.json",
-                self.run_dir / "fixed_test" / "dataset_snapshot.json",
-            ]
-            files = []
-            for path in sorted(
-                {
-                    *required,
-                    *self.run_dir.glob(
-                        "fixed_test/*/fixed_math.compare_answers.json"
-                    ),
-                    *self.run_dir.glob(
-                        "cycle/cycle_*/training/checkpoint_manifest.json"
-                    ),
-                },
-                key=lambda value: value.as_posix(),
-            ):
-                if path.is_file():
-                    files.append(
-                        {
-                            "path": path.relative_to(self.run_dir).as_posix(),
-                            "sha256": file_sha256(path),
-                            "size": path.stat().st_size,
-                        }
-                    )
+            inventory = build_artifact_inventory(self.run_dir)
             atomic_json(
                 {
                     "schema_version": "1.0",
@@ -658,7 +699,7 @@ class ResearchRun:
                     "config_hash": self.config_hash,
                     "git_commit": self.git_commit,
                     "created_at": utc_now(),
-                    "files": files,
+                    **inventory,
                 },
                 self.run_dir / "artifact_manifest.json",
             )

@@ -101,7 +101,6 @@ def build_baseline_manifest(
     )
     prompts = prompt_bundle_snapshot(config, root)
     config_sources = _config_source_fingerprints(provenance, root)
-    resolved_config = thaw_config(config)
     difficulty = thaw_config(config["difficulty"])
     calibration_path = difficulty.get("calibration_artifact")
     difficulty_artifact = (

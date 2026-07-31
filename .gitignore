@@ -1,41 +1,44 @@
-# Python 缓存
+# Python caches and test artifacts
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# 虚拟环境
+# Virtual environments
 .venv/
 venv/
 env/
 
-# PyCharm 配置
+# Editors and operating systems
 .idea/
+.vscode/
 *.iml
-
-# 环境密钥文件
-.env
-
-# 系统文件
 .DS_Store
 Thumbs.db
 
-# Benchmark outputs
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Legacy repository-local outputs (runtime configuration writes to VEPFS)
 KI/
 math_v5/
 multilingual/
 smoke_outputs/
 math_test/
-
-.venv/
-venv/
-__pycache__/
-*.pyc
 math_flywheel/
-*.safetensors
-*.bin
-*.log
 .cache/
 *.tmp
+*.log
 
+# Model payloads
+*.safetensors
+*.bin
+
+# Local archives
 AutoBencher.zip

@@ -130,6 +130,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
+python -m pip check
 ```
 
 Linux 或 macOS：
@@ -139,10 +140,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
+python -m pip check
 ```
 
-`requirements-lock.txt` 用于复现实验环境。只有在明确接受兼容的新版本时才使用
-`requirements.txt`。在 CUDA 服务器上修改 PyTorch 前先检查现有环境：
+`requirements-lock.txt` 是唯一精确复现实验环境，`requirements.txt` 只声明受支持的
+直接依赖范围。若 `pip check` 报冲突，应新建虚拟环境，不要通过静默修改项目版本去
+修补共享基础环境。在 CUDA 服务器上修改 PyTorch 前先检查现有环境：
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
@@ -160,6 +163,61 @@ VLLM_API_KEY=EMPTY
 ```
 
 不要提交 `.env`、访问密钥、私有服务地址或 SSH 凭据。
+
+## 权威运行顺序
+
+安装完成后以及每次修改代码后，先执行以下离线检查。这些命令不会加载模型、使用
+GPU 或调用付费 API：
+
+```bash
+python verify_project.py
+python smoke_test.py
+python -m ruff check .
+python -m pytest -q
+```
+
+在 Linux 训练服务器上，先把 Python 字节码和全部运行产物约束到 VEPFS，安装项目
+原生固定测试集，再执行失败关闭的预检；预检通过前不要开始付费生成或 GPU 训练：
+
+```bash
+export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
+export PYTHONDONTWRITEBYTECODE=1
+
+python -B prepare_fixed_math_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-chain-preflight-v1 \
+  --preflight-only
+```
+
+最小真实“基线评测 → 生成 → QLoRA → 固定集复测”链路：
+
+```bash
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-chain-v1
+```
+
+中断后必须使用相同 `run_id` 恢复：
+
+```bash
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-chain-v1 \
+  --resume true
+```
+
+API 连通性探测是可选操作，只有显式添加 `--api` 才会联网：
+
+```bash
+python -B smoke_test.py --api --model deepseek-v4-pro
+```
 
 ## 配置
 
@@ -593,6 +651,19 @@ Kappa ≥ 0.70、高置信度准确率 ≥ 0.80、高置信度样本不少于 50
 而失败；入口会把 source study/method/seed/run ID、checkpoint 路径及目录 SHA 与已完成
 Registry 逐项核对：
 
+正式固定集发布前必须同时提供最终训练语料和全部生成候选语料，审计任一缺失都会
+失败：
+
+```bash
+python prepare_evaluation_sets.py assemble-official \
+  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
+  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
+  --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json
+```
+
+选定 checkpoint 后只通过绑定入口执行正式评测：
+
 ```bash
 python run_formal_evaluation.py \
   --config configs/experiments/official_fixed_eval.yaml \
@@ -651,12 +722,36 @@ QLoRA 使用 Hugging Face TRL 的 `SFTConfig`/`SFTTrainer`。当
 每次运行会保留解析后的配置、配置来源、校验结果、配置哈希、环境快照、运行
 manifest、日志、全局错题池、训练产物、模型产物和固定测试结果。
 
-配置的输出根目录会为每次启动自动创建一个 `test_<N>` 目录。服务器配置强制
+配置的输出根目录会把每个 `run_id` 唯一映射到稳定的
+`run_<规范化-run-id>_<sha12>/` 目录；恢复时重新打开同一目录，不会另建 `test_2`。
+Study Runner 会在 suite/方法/seed 的隔离目录下保存该绑定运行。服务器配置强制
 所有运行产物、缓存、临时文件、日志、训练集、checkpoint 和模型位于
 `/vepfs-mlp2/queue010/20262202597/math_flywheel`；任何指向系统盘、
-`/root/code/` 或该根目录之外的可写路径都会在启动时被拒绝。可执行
-`ls -dt /vepfs-mlp2/queue010/20262202597/math_flywheel/test_* | head -1`
-找到最新一次运行目录。
+`/root/code/` 或该根目录之外的可写路径都会在启动时被拒绝。正式结果必须读取
+`experiment_index.json` 中绑定的精确路径，禁止按修改时间猜测“最新目录”。
+
+完成运行的顶层文件契约为：
+
+```text
+run_<id>_<sha12>/
+├── run_manifest.json
+├── resolved_config.json
+├── resolved_config.yaml
+├── config_sources.json
+├── config_validation.json
+├── environment.json
+├── budget_ledger.json
+├── cycle_record.json
+├── experiment_summary.json
+├── artifact_manifest.json
+├── logs/
+├── cycle/
+└── fixed_test/
+```
+
+`artifact_manifest.json` 使用 `research_run_v2` 布局，记录每个普通文件的相对路径、
+字节数、类型和 SHA-256；存在残留 `.tmp` 文件时拒绝完成运行。所有自动生成的 section
+和 artifact 名称都拒绝路径穿越及不安全字符，二进制模型文件同样计算 SHA-256。
 
 当 `experiment.clean_cycle_cache: true` 时，每个迭代目录在 `finally` 清理后严格只
 保留以下三个 JSON：
@@ -732,12 +827,17 @@ Apache-2.0 兼容 MinHash 独立后备实现、MIT 许可的
 python -m pytest -q
 ```
 
-语法与 CLI 检查：
+离线项目、语法、Schema、配置、存储、基准集、明文凭据和 CLI 检查：
 
 ```bash
-python -m py_compile math_autobencher.py run_scripts.py tool_util.py autobencher/*.py
+python verify_project.py
+python smoke_test.py
+python -m ruff check .
 python math_autobencher.py --help
 python run_scripts.py --help
+python run_study.py --help
+python aggregate_study.py --help
+python run_formal_evaluation.py --help
 ```
 
 真实 API 推理、本地大模型加载、CUDA QLoRA 和远程调度需要相应密钥、模型文件与

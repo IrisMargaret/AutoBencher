@@ -1,19 +1,22 @@
 import copy
 import contextlib
 import hashlib
+import json
 import math
+import os
 import re
-import requests
-import os, argparse, ast, json, tqdm
 import shutil
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote
-from time import sleep
-from collections import defaultdict
-import numpy as np
+
+import ast
+import requests
+import tqdm
+
 from util import gen_from_prompt
 from autobencher.output_schemas import TestTakerOutput
 from autobencher.difficulty import analyze_difficulty
@@ -1684,9 +1687,7 @@ def test_taker_inference(
 
 def _generate_lm_answers(question_inputs, test_model_info, agent_model_info, outfile_prefix='att1'):
     # test_taker_lm, test_taker_tokenizer, test_taker_client = test_model_info
-    if isinstance(question_inputs, list) or isinstance(question_inputs, dict):
-        question_inputs_str = json.dumps(question_inputs, indent=2)
-    else:
+    if not isinstance(question_inputs, (list, dict)):
         assert False
 
     if not isinstance(question_inputs, list) or not question_inputs:
@@ -1761,36 +1762,11 @@ def get_pageviews(page_title, start_date="2020040100", end_date="2023040700"):
         return 0
 
 
-def _legacy_get_pageviews(page_title, start_date="2020040100", end_date="2023040700"):
-    access_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIwMDFkMTFmNmQ2MzVmMGY4YmI3MDlkNWViN2ZhNDRlYiIsImp0aSI6IjMzOGQ0Mzc0YzNmZjE5NjBlZDkzNjIwNTdiYjMwYjExOWYzZTY2MzVkZjM3NmY3NDcyZjczMDcyMjNiYzU4ODFjODBkOTliOTZmMjAzZGNkIiwiaWF0IjoxNzEyNjEwMTg0LjY4OTIyNywibmJmIjoxNzEyNjEwMTg0LjY4OTIzLCJleHAiOjMzMjY5NTE4OTg0LjY4NzY1Mywic3ViIjoiNzUzODczODIiLCJpc3MiOiJodHRwczovL21ldGEud2lraW1lZGlhLm9yZyIsInJhdGVsaW1pdCI6eyJyZXF1ZXN0c19wZXJfdW5pdCI6NTAwMCwidW5pdCI6IkhPVVIifSwic2NvcGVzIjpbImJhc2ljIl19.YN0ZvSzsBuYe3Mg-r0C63cWxDXPU3GOCyspUqg4mMv27Qw1FJq9F9H6JKJAUMrqQxB-xyWZqpu8mekvMoxb3Ha5S2fpPbuM4gMB0JketqG2obaDd4QqgtJjg8KDYKwR8ieKoPRLDSHv3Tv4NcvIL-EvzjkRybqrukzQwttwuBUwxmlY8vhC1BZed7URt_-KhMYPsnNfJLSBeWivYJOmrqF2S04AOS0Egjul8Pz_yXAQ7q7aqpIwg6X2jod0ZN5h1gnmAvZmoLB7mKSAxrHEUL2zaQ8BVERWostWVA9ek556cuUJe5NusQ0XW7pcsYIi0YpFjKOBuq-tXzuOlbxFhlbwrp6xkhE_grQGNs1IxyT-w_sjQc2gI48FDe0ldDrTg6ZmgLELsjJM8xOxBy1ng1fY73p-QnaDdxX4hqRw2ZBDlZ1E2j84lvVrv62x_SHPiBNAeywEPcOqDRV_XbU6ArOyJ7QTZXRu9UOT0XDQ-Fx3maCRGb35W4aOtLSWL-SSXYLI8ZuOQ2BwKQQYYbEDMp0W7NjHWzh8YPv6Y2wDaMzsAqaxk2c36pNvTToiTc_P6_a56lydQwoT8ACx1kzzw5lTNPKPEPxPGNiMgtsL3VqtxJWMR7Lgq-ZKwI7cwQ5FTp2YriQDBYuvoaDQeG_eVh8BlNlyg26OYojtYbNos3os"
-    client_id = "001d11f6d635f0f8bb709d5eb7fa44eb"
-    client_secret = "630b434daa4c8f6cce03b1c294b59574c1ce9431"  # Example client secret
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'User-Agent': 'wikipagerank',
-    }
-
-    # Construct the API URL with the appropriate parameters
-    url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/{page_title}/daily/{start_date}/{end_date}"
-    # Make the HTTP GET request to the API
-    response = requests.get(url, headers=headers)
-    # Check if the request was successful
-    if response.status_code == 200:
-        # Parse the JSON response
-        data = response.json()
-        # Extract the pageview data
-        print('retrieved for ', page_title)
-        views = sum(item['views'] for item in data['items'])
-        return views
-    else:
-        print(f"Failed to retrieve pageviews data for {page_title}. Status code: {response.status_code}")
-        return 0
-
 def clean_str(p):
-  try:
-    return p.encode().decode("unicode-escape").encode("latin1").decode("utf-8")
-  except:
-    return ''
+    try:
+        return p.encode().decode("unicode-escape").encode("latin1").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return ""
 
 def filter_paragraph(paragraph_lst):
     return [p for p in paragraph_lst if len(p.split(" ")) > 2 and len(p.split(".")) > 1]

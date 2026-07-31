@@ -133,19 +133,23 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
+python -m pip check
 ```
 
 Linux or macOS:
 
 ```bash
 python3 -m venv .venv
-source /root/.virtualenvs/AutoBencher/bin/activate
+source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
+python -m pip check
 ```
 
-`requirements-lock.txt` is the reproducible environment. Use
-`requirements.txt` only when compatible newer versions are intentional.
+`requirements-lock.txt` is the exact reproducible environment;
+`requirements.txt` contains only supported direct-dependency ranges. Use a
+fresh virtual environment when `pip check` reports a conflict—do not repair a
+shared base environment by silently changing project pins.
 Inspect an existing CUDA installation before changing its PyTorch build:
 
 ```bash
@@ -164,6 +168,63 @@ VLLM_API_KEY=EMPTY
 ```
 
 Do not commit `.env`, access keys, private endpoints, or SSH credentials.
+
+## Authoritative run sequence
+
+Run these offline checks after installation and after every code change. They
+do not load a model, use a GPU, or call a paid API:
+
+```bash
+python verify_project.py
+python smoke_test.py
+python -m ruff check .
+python -m pytest -q
+```
+
+On the Linux training server, route Python bytecode and every runtime artifact
+to VEPFS, install the project-native benchmark, and run the fail-closed
+preflight before any paid generation or GPU training:
+
+```bash
+export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
+export PYTHONDONTWRITEBYTECODE=1
+
+python -B prepare_fixed_math_benchmark.py \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-chain-preflight-v1 \
+  --preflight-only
+```
+
+The smallest real baseline → generation → QLoRA → fixed-set regression chain
+is then:
+
+```bash
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-chain-v1
+```
+
+Resume the same run, never invent a replacement run ID:
+
+```bash
+python -B run_scripts.py math \
+  --config configs/experiments/mini_flywheel_8.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --run-id mini-chain-v1 \
+  --resume true
+```
+
+An API connectivity probe is optional and always explicit:
+
+```bash
+python -B smoke_test.py --api --model deepseek-v4-pro
+```
 
 ## Configuration
 
@@ -775,12 +836,40 @@ Each run stores resolved configuration, source provenance, validation results,
 configuration hash, environment snapshot, manifests, logs, global hard pool,
 training artifacts, model artifacts, and fixed-test results.
 
-The configured output root contains one automatically allocated `test_<N>`
-directory per invocation. Server configurations enforce
+The configured output root contains one stable, content-addressed
+`run_<normalized-run-id>_<sha12>/` directory per `run_id`. Resuming reopens
+that exact directory; it never allocates a `test_2` replacement. Study cells
+place these bound run directories beneath their isolated suite/method/seed
+directories. Server configurations enforce
 `/vepfs-mlp2/queue010/20262202597/math_flywheel`; writable output, caches,
 temporary files, logs, datasets, checkpoints, and model artifacts outside that
-root are rejected. The newest run can be located with
-`ls -dt /vepfs-mlp2/queue010/20262202597/math_flywheel/test_* | head -1`.
+root are rejected. Do not locate research results by modification time; use
+the exact run path recorded in `experiment_index.json`.
+
+A completed run has this top-level contract:
+
+```text
+run_<id>_<sha12>/
+├── run_manifest.json
+├── resolved_config.json
+├── resolved_config.yaml
+├── config_sources.json
+├── config_validation.json
+├── environment.json
+├── budget_ledger.json
+├── cycle_record.json
+├── experiment_summary.json
+├── artifact_manifest.json
+├── logs/
+├── cycle/
+└── fixed_test/
+```
+
+`artifact_manifest.json` uses layout `research_run_v2`, lists every regular
+file with path, byte size, kind, and SHA-256, and refuses finalization while a
+`.tmp` artifact remains. Generated artifact names reject path traversal and
+unsafe characters. Binary model payloads are hashed as well as their
+checkpoint manifests.
 
 With `experiment.clean_cycle_cache: true`, every iteration directory contains
 exactly these JSON files after its `finally` cleanup:
@@ -888,7 +977,8 @@ re-solve. Assemble a curated official set only after every candidate has
 ```bash
 python prepare_evaluation_sets.py assemble-official \
   --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
-  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_training_and_generation_questions.json \
+  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
+  --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json
 ```
 
@@ -914,12 +1004,18 @@ Run the CPU test suite:
 python -m pytest -q
 ```
 
-Syntax and CLI checks:
+Offline repository, syntax, schema, configuration, storage, benchmark, secret,
+and CLI smoke checks:
 
 ```bash
-python -m py_compile math_autobencher.py run_scripts.py tool_util.py autobencher/*.py
+python verify_project.py
+python smoke_test.py
+python -m ruff check .
 python math_autobencher.py --help
 python run_scripts.py --help
+python run_study.py --help
+python aggregate_study.py --help
+python run_formal_evaluation.py --help
 ```
 
 Real API inference, local model loading, CUDA QLoRA, and remote scheduling
