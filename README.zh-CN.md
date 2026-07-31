@@ -666,6 +666,24 @@ python -B run_scripts.py math \
 该 540 题集合为项目原创的确定性公式题，只借鉴 GSM8K、MATH 与 DeepMind
 Mathematics Dataset 的覆盖设计，不复制外部题目，也不能替代正式集或盲测集。
 
+如需构造独立的开源题库候选集，先按
+`configs/open_source_evaluation_sources.yaml` 的目录布局，把固定版本的 GSM8K、
+Hendrycks MATH、MMLU 和 DeepMind Mathematics 测试源文件放入
+`$AUTOBENCHER_DATA_ROOT/source_datasets`，再执行：
+
+```bash
+python -B prepare_open_source_math_benchmark.py \
+  --source-root "$AUTOBENCHER_DATA_ROOT/source_datasets" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/official_candidates_v1.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+该命令不会联网下载；它固定上游提交版本，记录每个输入文件的 SHA-256，执行精确去重、
+模板簇上限和 27×20 确定性平衡，任何子类别不足都会失败。输出仍是候选集：启发式题型
+映射标记为待人工复核，答案最初只有上游金标一个来源，必须补齐独立求解或双人审题证据
+后才能进入 `assemble-official`。公共题库只能支持跨基准泛化分析，不能证明题目未出现在
+模型预训练中；后者仍需独立保管的最终盲测集。
+
 旧运行可在完全离线、保持原文件不变的前提下重新评分：
 
 ```bash
@@ -708,7 +726,7 @@ Registry 逐项核对：
 
 ```bash
 python prepare_evaluation_sets.py assemble-official \
-  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
+  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \
   --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
   --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json

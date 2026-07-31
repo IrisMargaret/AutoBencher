@@ -52,9 +52,24 @@ python prepare_evaluation_sets.py audit-development \
 
 ## 3. 组装正式 540 题
 
+开源候选集使用 `configs/open_source_evaluation_sources.yaml` 中固定的上游提交，且只从
+VEPFS 中已经准备好的测试源文件离线导入：
+
+```bash
+python -B prepare_open_source_math_benchmark.py \
+  --source-root /vepfs-mlp2/queue010/20262202597/math_flywheel/source_datasets \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \
+  --allowed-data-root /vepfs-mlp2/queue010/20262202597/math_flywheel
+```
+
+准备器不调用 Hugging Face Dataset API，也不自动下载。它记录上游版本、输入文件哈希、
+来源 split 和原始记录 ID，并严格要求 27 个子类别各 20 题。自动分类只用于建立人工复核
+队列，不能代替题型审定；上游答案也不能代替第二个独立验证来源。公共测试集可能已进入
+模型预训练数据，因此它衡量的是跨公开基准迁移，不等价于未见题泛化。
+
 ```bash
 python prepare_evaluation_sets.py assemble-official \
-  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
+  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \
   --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
   --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json \

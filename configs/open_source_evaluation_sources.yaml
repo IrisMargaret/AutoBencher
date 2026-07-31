@@ -1,0 +1,50 @@
+schema_version: "1.0"
+
+# Source files are provisioned separately beneath the VEPFS data root.  The
+# project never downloads benchmark questions at runtime.  Repository revisions
+# pin the upstream code/data layout; the preparation manifest additionally
+# records a SHA-256 for every consumed file.
+candidate_set:
+  name: open_source_math_candidates_v1
+  version: "1.0"
+  seed: 2026
+  questions_per_subcategory: 20
+
+sources:
+  - id: gsm8k
+    adapter: gsm8k_jsonl
+    repository: https://github.com/openai/grade-school-math
+    revision: 3101c7d5072418e28b9008a6636bde82a006892c
+    license: MIT
+    split: test
+    path: gsm8k/grade_school_math/data/test.jsonl
+
+  - id: hendrycks_math
+    adapter: hendrycks_math_json
+    repository: https://github.com/hendrycks/math
+    revision: 985bdc1696e88e8643f081a0ff4719da39f2ae2a
+    license: MIT
+    split: test
+    path: hendrycks_math/test
+
+  - id: mmlu_math
+    adapter: mmlu_csv
+    repository: https://github.com/hendrycks/test
+    revision: 4450500f923c49f1fb1dd3d99108a0bd9717b660
+    license: MIT
+    split: test
+    path: mmlu/test
+    subjects:
+      - abstract_algebra
+      - college_mathematics
+      - elementary_mathematics
+      - high_school_mathematics
+      - high_school_statistics
+
+  - id: deepmind_mathematics
+    adapter: deepmind_text
+    repository: https://github.com/google-deepmind/mathematics_dataset
+    revision: 427f45075f84b8b9774950196ad63867ca20ffb3
+    license: Apache-2.0
+    split: test
+    path: deepmind_mathematics/test

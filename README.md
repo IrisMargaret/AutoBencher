@@ -984,6 +984,29 @@ copied. Its manifest marks it unsuitable for blind or paper claims. The formal
 540-item set must still pass the independent-solver, reviewer, diversity, and
 training-leakage gates in `prepare_evaluation_sets.py assemble-official`.
 
+To construct a separate open-source-derived candidate pool, provision the
+pinned upstream test files under
+`$AUTOBENCHER_DATA_ROOT/source_datasets` using the layout in
+`configs/open_source_evaluation_sources.yaml`, then run:
+
+```bash
+python -B prepare_open_source_math_benchmark.py \
+  --source-root "$AUTOBENCHER_DATA_ROOT/source_datasets" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/official_candidates_v1.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+This command performs no download. It deterministically imports only upstream
+test splits, removes exact duplicates, caps template clusters, balances all 27
+subcategories at 20 items, and records source revisions plus per-file SHA-256.
+It fails closed when any subcategory is short. Its taxonomy assignments are
+explicitly marked for human review, and every answer initially has only the
+upstream source, so the result is not release-ready. Reviewers must confirm the
+taxonomy and add independent validation evidence before `assemble-official`.
+Using public benchmarks supports cross-benchmark evaluation, but does not prove
+pretraining-unseen generalization; that stronger claim remains reserved for the
+independently held blind set.
+
 Regrade an old run entirely offline without changing original artifacts:
 
 ```bash
@@ -1026,7 +1049,7 @@ re-solve. Assemble a curated official set only after every candidate has
 
 ```bash
 python prepare_evaluation_sets.py assemble-official \
-  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
+  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \
   --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
   --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json

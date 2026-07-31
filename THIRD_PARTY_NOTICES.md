@@ -128,6 +128,29 @@ No question text, answer, solution, split, or dataset record from these
 projects is copied into `benchmarks/fixed_math_test_set.json`. All 81 benchmark
 questions are project-authored and carry `source_dataset: project_native`.
 
+## Optional open-source official-candidate inputs
+
+`prepare_open_source_math_benchmark.py` can import separately provisioned test
+files from the following upstream projects. No upstream dataset record is
+vendored in this repository, downloaded at runtime, or used for training.
+Imported records remain release-blocked candidates until independent answer
+verification, taxonomy review, leakage auditing, and immutable official-set
+assembly have all succeeded.
+
+- OpenAI GSM8K, repository revision
+  `3101c7d5072418e28b9008a6636bde82a006892c`, MIT repository license.
+- Hendrycks MATH, repository revision
+  `985bdc1696e88e8643f081a0ff4719da39f2ae2a`, MIT repository license.
+- Hendrycks MMLU, repository revision
+  `4450500f923c49f1fb1dd3d99108a0bd9717b660`, MIT repository license.
+- Google DeepMind Mathematics Dataset, repository revision
+  `427f45075f84b8b9774950196ad63867ca20ffb3`, Apache-2.0 repository license.
+
+The preparation manifest records the SHA-256 and byte size of every consumed
+source file. Dataset redistribution terms must still be reviewed for the exact
+archives provisioned by the experiment owner; a repository code license is not
+silently treated as a legal conclusion about every separately hosted archive.
+
 ## Stanford DSPy
 
 - Project: https://github.com/stanfordnlp/dspy
