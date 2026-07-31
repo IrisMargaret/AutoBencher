@@ -1,7 +1,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import autobencher.evaluator as evaluator_module
 import numpy as np
@@ -550,3 +550,54 @@ def test_semantic_judge_degrades_provider_failure_to_failed_judgment(config):
     assert result["deterministic_equivalent"] is True
     assert result["attempt"] == attempts
     assert "empty completion" in result["reason"]
+
+
+def test_semantic_judge_translates_low_level_provider_runtime_error(config):
+    attempts = config["evaluator_pipeline"]["semantic_judge_attempts"]
+    with patch(
+        "autobencher.evaluator.gen_from_prompt",
+        side_effect=RuntimeError(
+            "API request failed after 3 attempts: empty completion"
+        ),
+    ) as provider:
+        result = judge_answer_semantics(
+            question="Compute 1 + 1.",
+            gold_answer="2",
+            predicted_answer="2",
+            answer_type="integer",
+            evaluator_info=("deepseek-v4-pro", None, object()),
+            config=config,
+        )
+
+    assert provider.call_count == attempts
+    assert result["status"] == "failed"
+    assert result["deterministic_equivalent"] is True
+    assert "EvaluatorProtocolError" in result["reason"]
+    assert "empty completion" in result["reason"]
+
+
+def test_semantic_judge_survives_exact_repeated_empty_api_responses(config):
+    config["models"]["evaluator"]["retry_delay_seconds"] = 0
+    empty = Mock()
+    empty.choices = [Mock(message=Mock(content=""))]
+    client = Mock()
+    client.chat.completions.create.return_value = empty
+
+    with patch("util.time.sleep"):
+        result = judge_answer_semantics(
+            question="Compute 1 + 1.",
+            gold_answer="2",
+            predicted_answer="2",
+            answer_type="integer",
+            evaluator_info=("deepseek-v4-pro", None, client),
+            config=config,
+        )
+
+    expected_calls = (
+        config["evaluator_pipeline"]["semantic_judge_attempts"]
+        * config["models"]["evaluator"]["max_retries"]
+    )
+    assert client.chat.completions.create.call_count == expected_calls
+    assert result["status"] == "failed"
+    assert result["deterministic_equivalent"] is True
+    assert "fields do not match" in result["reason"]

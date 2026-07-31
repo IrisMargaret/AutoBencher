@@ -15,6 +15,10 @@ _OUTLINES_MODEL_CACHE = {}
 _GUIDANCE_MODEL_CACHE = {}
 
 
+class EmptyCompletionError(ValueError):
+    """Raised when a provider returns no visible completion text."""
+
+
 def _structured_value_to_text(value):
     if isinstance(value, str):
         return value
@@ -671,7 +675,8 @@ def query_openai_compatible(
                 "[API] request_start "
                 f"model={model} prompt={prompt_index}/{len(prompt_lst)} "
                 f"attempt={retry + 1}/{retry_count} "
-                f"timeout={timeout_label}",
+                f"timeout={timeout_label} "
+                "output_token_limit=provider_default",
                 flush=True,
             )
             ledger = None
@@ -684,7 +689,7 @@ def query_openai_compatible(
 
                     ledger.assert_generation_available(
                         reserved_input_tokens=estimate_tokens(prompt),
-                        reserved_output_tokens=int(max_tokens),
+                        reserved_output_tokens=0,
                     )
             try:
                 request_kwargs = dict(
@@ -697,14 +702,10 @@ def query_openai_compatible(
                     top_p=top_p,
                     n=num_completions,
                 )
-                # DeepSeek-compatible endpoints may spend completion tokens on
-                # hidden reasoning before returning visible content.  Do not
-                # impose the caller's local generation bound on those remote
-                # requests: a small cap can otherwise produce an empty visible
-                # completion.  Local and other API backends retain their
-                # explicit safety bound.
-                if not model.lower().startswith("deepseek"):
-                    request_kwargs["max_tokens"] = max_tokens
+                # Do not impose an application output-token cap on remote
+                # OpenAI-compatible inference. Providers still enforce their
+                # model context windows. Directly loaded local models and
+                # Ollama keep their explicit process-safety bounds.
                 if stop_sequences:
                     request_kwargs["stop"] = list(stop_sequences)
                 if timeout_seconds is not None:
@@ -712,7 +713,9 @@ def query_openai_compatible(
                 completion = client.chat.completions.create(**request_kwargs)
                 content = completion.choices[0].message.content
                 if not content or not content.strip():
-                    raise ValueError("API returned an empty completion")
+                    raise EmptyCompletionError(
+                        "API returned an empty completion"
+                    )
                 if ledger is not None:
                     from autobencher.budget_ledger import estimate_tokens
 
@@ -770,6 +773,23 @@ def query_openai_compatible(
                         success=False,
                     )
                 if retry == retry_count - 1:
+                    if (
+                        budget_role == "validation"
+                        and isinstance(exc, EmptyCompletionError)
+                    ):
+                        # Preserve end-to-end evaluation availability. The
+                        # evaluator will reject this strict JSON object as a
+                        # protocol failure, retry its own judge round, and then
+                        # record only this item as failed if needed.
+                        content = "{}"
+                        print(
+                            "[API] empty_completion_fallback "
+                            f"model={model} prompt={prompt_index}/"
+                            f"{len(prompt_lst)} attempts={retry_count} "
+                            "action=return_protocol_failure",
+                            flush=True,
+                        )
+                        break
                     raise RuntimeError(
                         f"API request failed after {retry_count} attempts "
                         f"(last attempt {elapsed:.1f}s): {exc}"

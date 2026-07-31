@@ -100,7 +100,30 @@ class OllamaRoutingTests(unittest.TestCase):
         self.assertEqual(client.chat.completions.create.call_count, 2)
         sleep.assert_called_once_with(0.25)
 
-    def test_non_deepseek_request_keeps_output_token_limit(self):
+    def test_validation_empty_completion_becomes_protocol_failure_payload(self):
+        client = Mock()
+        empty = Mock()
+        empty.choices = [Mock(message=Mock(content=""))]
+        client.chat.completions.create.return_value = empty
+
+        with patch("util.time.sleep"):
+            result = util.query_openai_compatible(
+                client,
+                "deepseek-v4-pro",
+                ["Judge."],
+                0.0,
+                12,
+                1,
+                False,
+                max_num_retries=3,
+                retry_delay_seconds=0,
+                budget_role="validation",
+            )
+
+        self.assertEqual(result, ["{}"])
+        self.assertEqual(client.chat.completions.create.call_count, 3)
+
+    def test_openai_compatible_request_has_no_output_token_limit(self):
         client = Mock()
         completion = Mock()
         completion.choices = [Mock(message=Mock(content="4"))]
@@ -115,7 +138,7 @@ class OllamaRoutingTests(unittest.TestCase):
         )
 
         kwargs = client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["max_tokens"], 321)
+        self.assertNotIn("max_tokens", kwargs)
 
     def test_transformers_five_uses_dtype_keyword(self):
         module = Mock(__version__="5.14.1")

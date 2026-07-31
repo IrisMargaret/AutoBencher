@@ -315,35 +315,43 @@ def _model_json(
         else {}
     )
     call_started = time.monotonic()
-    request_result = gen_from_prompt(
-        model=model,
-        tokenizer=tokenizer,
-        prompt=[prompt],
-        echo_prompt=False,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        process_func=None,
-        service=service,
-        terminate_by_linebreak="no",
-        verbose=False,
-        structured_schema=schema if use_structured else None,
-        structured_backend=structured.get("local_backend", "none"),
-        structured_fallback_backend=structured.get(
-            "fallback_backend",
-            "none",
-        ),
-        structured_required=bool(structured.get("required", False)),
-        request_timeout_seconds=evaluator_model_config.get(
-            "request_timeout_seconds"
-        ),
-        max_num_retries=int(
-            evaluator_model_config.get("max_retries", 3)
-        ),
-        retry_delay_seconds=float(
-            evaluator_model_config.get("retry_delay_seconds", 5)
-        ),
-        budget_role="validation",
-    )
+    try:
+        request_result = gen_from_prompt(
+            model=model,
+            tokenizer=tokenizer,
+            prompt=[prompt],
+            echo_prompt=False,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            process_func=None,
+            service=service,
+            terminate_by_linebreak="no",
+            verbose=False,
+            structured_schema=schema if use_structured else None,
+            structured_backend=structured.get("local_backend", "none"),
+            structured_fallback_backend=structured.get(
+                "fallback_backend",
+                "none",
+            ),
+            structured_required=bool(structured.get("required", False)),
+            request_timeout_seconds=evaluator_model_config.get(
+                "request_timeout_seconds"
+            ),
+            max_num_retries=int(
+                evaluator_model_config.get("max_retries", 3)
+            ),
+            retry_delay_seconds=float(
+                evaluator_model_config.get("retry_delay_seconds", 5)
+            ),
+            budget_role="validation",
+        )
+    except (OSError, RuntimeError) as exc:
+        # Provider availability is an evaluator protocol failure for this one
+        # item.  Callers can retry or record a failed judgment; it must never
+        # escape as a cycle-level runtime failure.
+        raise EvaluatorProtocolError(
+            f"evaluator model request failed: {type(exc).__name__}: {exc}"
+        ) from exc
     if not request_result.completions:
         raise EvaluatorProtocolError("evaluator returned no completion")
     completion_text = request_result.completions[0].text
