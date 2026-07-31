@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 import math_autobencher
-from autobencher.attribution_eval import evaluate_review_csv, export_review_sample
+from autobencher.attribution_eval import (
+    evaluate_review_csv,
+    export_blinded_review_packets,
+    export_review_sample,
+    merge_blinded_reviews,
+)
 from autobencher.config import load_resolved_config
 from autobencher.dataset import (
     build_training_dataset,
@@ -630,3 +635,46 @@ def test_error_attribution_review_export_and_metrics(tmp_path):
     assert metrics["reviewed_count"] == 1
     assert metrics["per_label"]["calculation_error"]["f1"] == 1.0
     assert metrics["cohen_kappa"] == 1.0
+
+
+def test_blind_attribution_packets_require_consensus_or_adjudication(tmp_path):
+    review_dir = tmp_path / "blind_review"
+    manifest = export_blinded_review_packets(
+        [
+            {
+                "question_id": "q1",
+                "question": "What is 1 + 1?",
+                "gold_answer": "2",
+                "test_taker_response": "3",
+                "primary_error_tag": "calculation_error",
+                "attribution_confidence": 0.95,
+                "is_correct": False,
+            }
+        ],
+        review_dir,
+        sample_size=400,
+    )
+    assert manifest["sample_size"] == 1
+    packet = (review_dir / "annotator_1.csv").read_text(
+        encoding="utf-8-sig"
+    )
+    assert "primary_error_tag" not in packet
+    for number in (1, 2):
+        path = review_dir / f"annotator_{number}.csv"
+        text = path.read_text(encoding="utf-8-sig")
+        path.write_text(
+            text.replace(",,\n", ",calculation_error,\n"),
+            encoding="utf-8-sig",
+        )
+    merged_path = review_dir / "adjudication.csv"
+    merged = merge_blinded_reviews(
+        review_dir / "system_predictions.sealed.csv",
+        review_dir / "annotator_1.csv",
+        review_dir / "annotator_2.csv",
+        merged_path,
+    )
+    assert merged["requires_adjudication"] == 0
+    metrics = evaluate_review_csv(merged_path)
+    assert metrics["reviewed_count"] == 1
+    assert metrics["attribution_accuracy"] == 1.0
+    assert metrics["acceptance"]["reviewed_count_pass"] is False

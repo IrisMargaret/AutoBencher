@@ -59,6 +59,42 @@ def _record_is_correct(record: Mapping[str, Any]) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
+def history_weight(
+    record: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    current_cycle: int,
+) -> float:
+    """Return the explicit model-version history weight for one observation.
+
+    cumulative: w_i = 1
+    cycle_reset: w_i = 1[cycle_i = current_cycle]
+    time_decay: w_i = exp(-lambda * max(0, current_cycle - cycle_i))
+    """
+    adaptive = config["adaptive_sampling"]
+    mode = str(adaptive.get("history_mode", "cumulative"))
+    try:
+        record_cycle = int(
+            record.get(
+                "cycle_id",
+                record.get(
+                    "cycle",
+                    record.get("source_cycle", current_cycle),
+                ),
+            )
+        )
+    except (TypeError, ValueError):
+        record_cycle = int(current_cycle)
+    age = max(0, int(current_cycle) - record_cycle)
+    if mode == "cumulative":
+        return 1.0
+    if mode == "cycle_reset":
+        return 1.0 if age == 0 else 0.0
+    if mode == "time_decay":
+        return math.exp(-float(adaptive["decay_lambda"]) * age)
+    raise ValueError(f"Unsupported adaptive history_mode: {mode!r}")
+
+
 def coverage_metrics(
     records: Iterable[Mapping[str, Any]],
     config: Mapping[str, Any],
@@ -132,31 +168,51 @@ def coverage_metrics(
 def beta_binomial_state(
     records: Iterable[Mapping[str, Any]],
     config: Mapping[str, Any],
+    *,
+    current_cycle: int = 0,
 ) -> dict[tuple[str, int], dict[str, float]]:
     adaptive = config["adaptive_sampling"]
     prior_alpha = float(adaptive["beta_prior_alpha"])
     prior_beta = float(adaptive["beta_prior_beta"])
-    grouped: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)
+    grouped: dict[
+        tuple[str, int],
+        list[tuple[Mapping[str, Any], float]],
+    ] = defaultdict(list)
     for record in records:
         key = (_record_subcategory(record), int(record.get("difficulty", 5)))
-        grouped[key].append(record)
+        weight = history_weight(
+            record,
+            config,
+            current_cycle=current_cycle,
+        )
+        grouped[key].append((record, weight))
     state = {}
     for key, group in grouped.items():
-        correct = sum(_record_is_correct(item) for item in group)
-        incorrect = len(group) - correct
+        correct = sum(
+            weight
+            for item, weight in group
+            if _record_is_correct(item)
+        )
+        incorrect = sum(weight for _, weight in group) - correct
         alpha = prior_alpha + correct
         beta = prior_beta + incorrect
         denominator = alpha + beta
         state[key] = {
             "correct_count": correct,
             "incorrect_count": incorrect,
+            "raw_observation_count": len(group),
+            "active_observation_count": sum(
+                weight > 0 for _, weight in group
+            ),
             "alpha": alpha,
             "beta": beta,
             "posterior_mean": alpha / denominator,
             "posterior_variance": (
                 alpha * beta / (denominator ** 2 * (denominator + 1))
             ),
-            "observation_count": len(group),
+            "observation_count": correct + incorrect,
+            "history_mode": str(adaptive.get("history_mode", "cumulative")),
+            "decay_lambda": float(adaptive.get("decay_lambda", 0.0)),
         }
     return state
 
@@ -265,7 +321,7 @@ def adaptive_priority(
         + float(adaptive["persistent_error_weight"]) * persistent_error
         + float(adaptive["retention_weight"]) * retention
     )
-    observations = int(posterior["observation_count"])
+    observations = float(posterior["observation_count"])
     selected_difficulty = difficulty
     reasons = []
     minimum = int(adaptive["min_observations_before_adjustment"])

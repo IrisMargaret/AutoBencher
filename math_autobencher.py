@@ -2152,6 +2152,8 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
         difficulty_config = research_config["difficulty"]
         difficulty_rejection_reason = None
         if (
+            difficulty_profile["difficulty_module_enabled"]
+            and
             difficulty_profile["profile_trusted"]
             and bool(
                 difficulty_config[
@@ -2167,6 +2169,8 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 f"{research_config['generation']['maximum_difficulty']}"
             )
         elif (
+            difficulty_profile["difficulty_module_enabled"]
+            and
             difficulty_profile["profile_trusted"]
             and str(difficulty_config["mismatch_action"]) == "reject"
             and not difficulty_profile["within_target_tolerance"]
@@ -2520,6 +2524,11 @@ def _ask_question_v3(
             is_hard_variant = (
                 plan_line.get("generation_source") == "hard_pool_variant"
             )
+            error_type_targeting_enabled = bool(
+                (generation_plan or {})
+                .get("component_state", {})
+                .get("error_type_targeting", True)
+            )
             variant_context = (
                 hard_pool.get_variant_context(
                     plan_line["category"],
@@ -2528,6 +2537,9 @@ def _ask_question_v3(
                         research_config["error_attribution"][
                             "confidence_threshold"
                         ]
+                    ),
+                    include_error_targeting=(
+                        error_type_targeting_enabled
                     ),
                 )
                 if enable_hard_sample_guidance and is_hard_variant and hard_pool
@@ -2546,11 +2558,6 @@ def _ask_question_v3(
                     for sample in matching_samples
                 ][:12]
                 plan_line["reference_hard_sample_ids"] = references
-                error_type_targeting_enabled = bool(
-                    (generation_plan or {})
-                    .get("component_state", {})
-                    .get("error_type_targeting", True)
-                )
                 error_counts = Counter(
                     tag
                     for sample in matching_samples
@@ -2787,6 +2794,61 @@ def _ask_question_v3(
     if generation_plan is not None:
         expected = int(generation_plan["question_budget"])
         verified_total = len(question_json_full)
+        hard_variant_lines = [
+            line
+            for line in plan_json
+            if line.get("generation_source") == "hard_pool_variant"
+        ]
+        targeted_lines = [
+            line
+            for line in hard_variant_lines
+            if line.get("target_error_type")
+        ]
+        difficulty_rejection_count = sum(
+            int(
+                item.get("failure_counts", {}).get(
+                    FailureType.DIFFICULTY_REJECTED.value,
+                    0,
+                )
+            )
+            for item in subcategory_statistics
+        )
+        realized_component_state = generation_plan.get(
+            "component_state",
+            {},
+        )
+        component_execution_evidence = {
+            "hard_pool_variant_allocation_count": len(hard_variant_lines),
+            "error_targeted_allocation_count": len(targeted_lines),
+            "hard_pool_disabled_verified": (
+                realized_component_state.get("hard_pool_variants", True)
+                or not hard_variant_lines
+            ),
+            "error_type_targeting_disabled_verified": (
+                realized_component_state.get("error_type_targeting", True)
+                or not targeted_lines
+            ),
+            "difficulty_rejection_count": difficulty_rejection_count,
+            "difficulty_module_disabled_verified": (
+                realized_component_state.get("difficulty_module", True)
+                or difficulty_rejection_count == 0
+            ),
+        }
+        if not all(
+            (
+                component_execution_evidence["hard_pool_disabled_verified"],
+                component_execution_evidence[
+                    "error_type_targeting_disabled_verified"
+                ],
+                component_execution_evidence[
+                    "difficulty_module_disabled_verified"
+                ],
+            )
+        ):
+            raise RuntimeError(
+                "A disabled Hard Pool/error-targeting component affected "
+                "the realized generation plan."
+            )
         generation_result = {
             "requested_questions": expected,
             "verified_questions": verified_total,
@@ -2798,6 +2860,7 @@ def _ask_question_v3(
             "partial_budget_allowed": allow_partial_budget,
             "subcategory_shortfalls": subcategory_shortfalls,
             "subcategory_statistics": subcategory_statistics,
+            "component_execution_evidence": component_execution_evidence,
         }
         dump_standard_json(generation_health, generation_health_file)
         generation_plan["generation_result"] = generation_result

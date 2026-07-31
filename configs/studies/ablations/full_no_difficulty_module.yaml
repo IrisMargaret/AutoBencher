@@ -1,0 +1,9 @@
+extends: ../../experiments/math_flywheel.yaml
+
+study:
+  policy: full
+  variant: full_no_difficulty_module
+  components:
+    difficulty_module: false
+    observed_difficulty: false
+    global_difficulty: false

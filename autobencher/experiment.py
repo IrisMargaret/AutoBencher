@@ -394,6 +394,12 @@ class ResearchRun:
     def initialize(self, cli_args: Mapping[str, Any]) -> None:
         resolved_payload = thaw_config(self.config)
         study_snapshot = study_manifest_snapshot(self.config)
+        difficulty_snapshot = thaw_config(self.config["difficulty"])
+        calibration_path = difficulty_snapshot.get("calibration_artifact")
+        if calibration_path and Path(str(calibration_path)).is_file():
+            difficulty_snapshot["calibration_artifact_actual_sha256"] = (
+                file_sha256(calibration_path)
+            )
         prompt_bundle = prompt_bundle_snapshot(
             self.config,
             self.project_root,
@@ -436,6 +442,17 @@ class ResearchRun:
                 "policy_version": study_snapshot.get("policy_version"),
                 "variant": study_snapshot.get("variant"),
                 "component_state": study_snapshot.get("component_state", {}),
+                "component_evidence": study_snapshot.get(
+                    "component_evidence",
+                    {},
+                ),
+                "adaptive_history": {
+                    "mode": self.config["adaptive_sampling"]["history_mode"],
+                    "decay_lambda": self.config["adaptive_sampling"][
+                        "decay_lambda"
+                    ],
+                },
+                "difficulty": difficulty_snapshot,
                 "seed": study_snapshot["seed"],
                 "question_budget": study_snapshot["question_budget"],
                 "question_budget_per_iteration": study_snapshot[

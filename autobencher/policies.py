@@ -18,6 +18,7 @@ from .coverage import (
     adaptive_priority,
     beta_binomial_state,
     coverage_metrics,
+    history_weight,
     largest_remainder,
     previous_round_accuracy_state,
     taxonomy_items,
@@ -25,11 +26,12 @@ from .coverage import (
 from .difficulty import target_difficulty_profile
 
 
-POLICY_VERSION = "1.0"
+POLICY_VERSION = "2.0"
 
 DEFAULT_COMPONENT_STATE = {
     "adaptive_allocation": True,
     "global_difficulty": True,
+    "difficulty_module": True,
     "observed_difficulty": True,
     "coverage_priority": True,
     "uncertainty_priority": True,
@@ -72,6 +74,9 @@ class GenerationPlan:
     coverage_before_generation: dict[str, Any]
     hard_pool_injection_enabled: bool
     component_state: dict[str, bool]
+    history_mode: str
+    decay_lambda: float
+    component_evidence: dict[str, Any]
     diagnostics: dict[str, Any]
     global_iteration: int
     cycle: int
@@ -167,6 +172,7 @@ def _actual_components(
         components["observed_difficulty"] = bool(
             _configured_components(config)["observed_difficulty"]
         )
+        components["difficulty_module"] = True
         return components
     if policy_name == "error_only":
         components = {name: False for name in DEFAULT_COMPONENT_STATE}
@@ -174,17 +180,21 @@ def _actual_components(
         components["observed_difficulty"] = bool(
             _configured_components(config)["observed_difficulty"]
         )
+        components["difficulty_module"] = True
         components["persistent_error_priority"] = True
         return components
 
     components = _configured_components(config)
     if variant == "full_no_hard_pool":
         components["hard_pool_variants"] = False
+    if variant == "full_no_error_targeting":
         components["error_type_targeting"] = False
-    if variant == "full_no_observed_difficulty":
+    if variant == "full_no_observed_difficulty_sampling":
         components["observed_difficulty"] = False
-    if not components["hard_pool_variants"]:
-        components["error_type_targeting"] = False
+    if variant == "full_no_difficulty_module":
+        components["difficulty_module"] = False
+        components["observed_difficulty"] = False
+        components["global_difficulty"] = False
     return components
 
 
@@ -365,11 +375,68 @@ class _PolicyBase:
         )
 
     def descriptor(self) -> dict[str, Any]:
+        adaptive = self.config["adaptive_sampling"]
+        difficulty = self.config["difficulty"]
+        evidence = {
+            "posterior_history_scope": str(adaptive["history_mode"]),
+            "coverage_history_scope": (
+                "cumulative_generation_coverage"
+                if self.component_state["coverage_priority"]
+                else "disabled"
+            ),
+            "adaptive_weights": {
+                "coverage_weight": (
+                    float(adaptive["coverage_weight"])
+                    if self.component_state["coverage_priority"]
+                    else 0.0
+                ),
+                "uncertainty_weight": (
+                    float(adaptive["uncertainty_weight"])
+                    if self.component_state["uncertainty_priority"]
+                    else 0.0
+                ),
+                "persistent_error_weight": (
+                    float(adaptive["persistent_error_weight"])
+                    if self.component_state["persistent_error_priority"]
+                    else 0.0
+                ),
+                "retention_weight": (
+                    float(adaptive["retention_weight"])
+                    if self.component_state["retention_priority"]
+                    else 0.0
+                ),
+            },
+            "global_accuracy_adjustment_enabled": bool(
+                self.component_state["global_difficulty"]
+            ),
+            "observed_difficulty_sampling_enabled": bool(
+                self.component_state["observed_difficulty"]
+                and self.component_state["difficulty_module"]
+            ),
+            "difficulty_rejection_enabled": bool(
+                self.component_state["difficulty_module"]
+                and difficulty["reject_outside_generation_bounds"]
+            ),
+            "difficulty_mismatch_action": (
+                str(difficulty["mismatch_action"])
+                if self.component_state["difficulty_module"]
+                else "disabled"
+            ),
+            "hard_pool_variants_enabled": bool(
+                self.component_state["hard_pool_variants"]
+            ),
+            "error_type_targeting_enabled": bool(
+                self.component_state["error_type_targeting"]
+            ),
+        }
         return {
             "policy_name": self.policy_name,
             "policy_version": self.policy_version,
             "variant": self.variant,
             "component_state": copy.deepcopy(self.component_state),
+            "history_mode": str(adaptive["history_mode"]),
+            "decay_lambda": float(adaptive["decay_lambda"]),
+            "component_evidence": evidence,
         }
 
     # A short alias is useful to external experiment drivers while
@@ -564,9 +631,30 @@ class ErrorOnlyPolicy(_PolicyBase):
         sampler_state: list[dict[str, Any]] = []
         for category, subcategory, _ in items:
             group = grouped.get(subcategory, [])
-            correct = sum(_record_is_correct(record) for record in group)
+            weighted = [
+                (
+                    record,
+                    history_weight(
+                        record,
+                        context.config,
+                        current_cycle=context.cycle,
+                    ),
+                )
+                for record in group
+            ]
+            weighted = [
+                (record, weight)
+                for record, weight in weighted
+                if weight > 0
+            ]
+            correct = sum(
+                weight
+                for record, weight in weighted
+                if _record_is_correct(record)
+            )
+            effective_count = sum(weight for _, weight in weighted)
             posterior_mean = (alpha + correct) / (
-                alpha + beta + len(group)
+                alpha + beta + effective_count
             )
             weight = epsilon + (1.0 - posterior_mean)
             key = f"{category}|||{subcategory}"
@@ -576,8 +664,12 @@ class ErrorOnlyPolicy(_PolicyBase):
                     "category": category,
                     "subcategory": subcategory,
                     "correct_count": correct,
-                    "incorrect_count": len(group) - correct,
-                    "observation_count": len(group),
+                    "incorrect_count": effective_count - correct,
+                    "observation_count": effective_count,
+                    "raw_observation_count": len(group),
+                    "active_observation_count": len(weighted),
+                    "history_mode": str(adaptive["history_mode"]),
+                    "decay_lambda": float(adaptive["decay_lambda"]),
                     "posterior_accuracy": posterior_mean,
                     "priority_score": weight,
                     "sampling_reason": ["historical_error_rate_only"],
@@ -594,6 +686,12 @@ class ErrorOnlyPolicy(_PolicyBase):
         upper = int(context.config["generation"]["maximum_difficulty"])
         latest: dict[str, int] = {}
         for record in context.history_records:
+            if history_weight(
+                record,
+                context.config,
+                current_cycle=context.cycle,
+            ) <= 0:
+                continue
             subcategory = _record_subcategory(record)
             try:
                 difficulty = int(record.get("difficulty"))
@@ -682,7 +780,16 @@ class FullAdaptivePolicy(_PolicyBase):
 
     def build_plan(self, context: PolicyContext) -> GenerationPlan:
         records: list[Mapping[str, Any]]
-        if self.component_state["observed_difficulty"]:
+        if not self.component_state["difficulty_module"]:
+            records = []
+            initial = int(
+                context.config["adaptive_sampling"]["initial_difficulty"]
+            )
+            for source in context.history_records:
+                item = dict(source)
+                item["difficulty"] = initial
+                records.append(item)
+        elif self.component_state["observed_difficulty"]:
             records = list(context.history_records)
         else:
             records = _project_requested_difficulty(
@@ -693,13 +800,23 @@ class FullAdaptivePolicy(_PolicyBase):
         items = taxonomy_items(context.config)
         metrics = coverage_metrics(records, context.config)
         effective_config = self._effective_config()
-        state = beta_binomial_state(records, effective_config)
+        state = beta_binomial_state(
+            records,
+            effective_config,
+            current_cycle=context.cycle,
+        )
         global_state = previous_round_accuracy_state(
             previous,
             effective_config,
         )
         latest_difficulty: dict[str, int] = {}
         for record in records:
+            if history_weight(
+                record,
+                effective_config,
+                current_cycle=context.cycle,
+            ) <= 0:
+                continue
             subcategory = _record_subcategory(record)
             if subcategory:
                 latest_difficulty[subcategory] = int(
@@ -729,6 +846,11 @@ class FullAdaptivePolicy(_PolicyBase):
                 state,
                 effective_config,
             )
+            if not self.component_state["difficulty_module"]:
+                item["selected_difficulty"] = difficulty
+                item["sampling_reason"].append(
+                    "difficulty_module_disabled_keep_initial_difficulty"
+                )
             if not self.component_state["adaptive_allocation"]:
                 item["priority_score"] = 1.0
                 item["sampling_reason"].append(
@@ -960,6 +1082,15 @@ class FullAdaptivePolicy(_PolicyBase):
             "error_type_targeting_enabled": bool(
                 self.component_state["error_type_targeting"]
             ),
+            "difficulty_module_enabled": bool(
+                self.component_state["difficulty_module"]
+            ),
+            "history_mode": str(
+                context.config["adaptive_sampling"]["history_mode"]
+            ),
+            "decay_lambda": float(
+                context.config["adaptive_sampling"]["decay_lambda"]
+            ),
         }
         if hard_disabled_by_ablation:
             diagnostics.update(
@@ -968,6 +1099,98 @@ class FullAdaptivePolicy(_PolicyBase):
                     "events": ["hard_pool_disabled_by_ablation"],
                 }
             )
+        runtime_checks = [
+            {
+                "check": "hard_pool_budget_zero_when_disabled",
+                "passed": (
+                    self.component_state["hard_pool_variants"]
+                    or int(source_budget["hard_pool_variant"]) == 0
+                ),
+                "observed": int(source_budget["hard_pool_variant"]),
+            },
+            {
+                "check": "coverage_weight_zero_when_disabled",
+                "passed": (
+                    self.component_state["coverage_priority"]
+                    or float(
+                        effective_config["adaptive_sampling"][
+                            "coverage_weight"
+                        ]
+                    )
+                    == 0.0
+                ),
+                "observed": float(
+                    effective_config["adaptive_sampling"]["coverage_weight"]
+                ),
+            },
+            {
+                "check": "uncertainty_weight_zero_when_disabled",
+                "passed": (
+                    self.component_state["uncertainty_priority"]
+                    or float(
+                        effective_config["adaptive_sampling"][
+                            "uncertainty_weight"
+                        ]
+                    )
+                    == 0.0
+                ),
+                "observed": float(
+                    effective_config["adaptive_sampling"][
+                        "uncertainty_weight"
+                    ]
+                ),
+            },
+            {
+                "check": "retention_weight_zero_when_disabled",
+                "passed": (
+                    self.component_state["retention_priority"]
+                    or float(
+                        effective_config["adaptive_sampling"][
+                            "retention_weight"
+                        ]
+                    )
+                    == 0.0
+                ),
+                "observed": float(
+                    effective_config["adaptive_sampling"]["retention_weight"]
+                ),
+            },
+            {
+                "check": "global_difficulty_zero_when_disabled",
+                "passed": (
+                    self.component_state["global_difficulty"]
+                    or (
+                        not bool(global_state["enabled"])
+                        and int(global_state["difficulty_delta"]) == 0
+                    )
+                ),
+                "observed": int(global_state["difficulty_delta"]),
+            },
+            {
+                "check": "difficulty_module_has_no_sampling_effect_when_disabled",
+                "passed": (
+                    self.component_state["difficulty_module"]
+                    or all(
+                        int(item["previous_difficulty"])
+                        == int(
+                            context.config["adaptive_sampling"][
+                                "initial_difficulty"
+                            ]
+                        )
+                        for item in priorities
+                    )
+                ),
+                "observed": sorted(
+                    {
+                        int(item["previous_difficulty"])
+                        for item in priorities
+                    }
+                ),
+            },
+        ]
+        if not all(item["passed"] for item in runtime_checks):
+            raise RuntimeError("A disabled study component remained active")
+        diagnostics["component_runtime_checks"] = runtime_checks
         return _make_plan(
             self,
             context,
@@ -1002,7 +1225,13 @@ def create_policy(config: Mapping[str, Any]) -> SamplingPolicy:
     if variant in {
         "full",
         "full_no_hard_pool",
-        "full_no_observed_difficulty",
+        "full_no_error_targeting",
+        "full_no_observed_difficulty_sampling",
+        "full_no_difficulty_module",
+        "full_no_coverage_priority",
+        "full_no_uncertainty_priority",
+        "full_no_global_difficulty",
+        "full_no_retention_priority",
     }:
         if policy_name != "full":
             raise ValueError(

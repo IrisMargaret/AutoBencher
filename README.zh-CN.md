@@ -208,7 +208,8 @@ evaluator 与出题器的难度边界必须一致；默认配置禁止竞赛级�
 ### 基线与消融实验
 
 统一策略接口支持 `base`、`random`、`uniform`、`error_only`、`full`、
-`full_no_hard_pool` 和 `full_no_observed_difficulty`。配置位于
+`full_no_hard_pool`、`full_no_error_targeting`、
+`full_no_observed_difficulty_sampling` 和 `full_no_difficulty_module`。配置位于
 `configs/studies/`；默认仍为 `full`，因此旧配置继续使用完整自适应行为。
 
 ```bash
@@ -240,7 +241,7 @@ git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
 基准。清单默认写入
 `/vepfs-mlp2/queue010/20262202597/math_flywheel/baselines/`。
 
-一条命令展开七种方法并完成完整 smoke 矩阵：
+一条命令展开第一轮九种方法并完成完整 smoke 矩阵：
 
 ```bash
 python run_study.py \
@@ -252,7 +253,7 @@ python run_study.py \
 ```
 
 中断后加 `--resume`。已完成实验会跳过，只继续 pending、failed 或 partial 实验。
-`main.yaml` 会展开“七方法 × 三个 seed × 一个模型 × 一个总题目预算”。每个矩阵单元
+`main.yaml` 会展开“九方法 × 三个 seed × 一个模型 × 一个总题目预算”。每个矩阵单元
 独占输出、缓存、Hard Pool/历史状态、训练集、checkpoint 与模型目录。Runner 会拒绝
 脏代码、已登记实验的指纹变化、不同基础模型/固定集/Prompt，以及六种训练方法之间
 任何非策略配置差异。`base` 是只评测参考点，因此只比较共同起点，不要求
@@ -268,9 +269,15 @@ python aggregate_study.py \
 
 suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
 `experiment.num_iterations * experiment.max_cycles` 整除；Runner 不会用隐式取整
-改变实验成本。需求中的
-`full_no_observed_difficulty_sampling` 是入口别名，运行清单仍记录项目内部规范名
-`full_no_observed_difficulty`。
+改变实验成本。旧名称 `full_no_observed_difficulty` 仅作为弃用的兼容入口，运行清单
+统一记录规范名 `full_no_observed_difficulty_sampling`。
+
+第一轮结果稳定后再运行 `configs/study_suites/ablation_round2.yaml`。陈旧后验应使用
+独立的 `configs/study_suites/history_modes.yaml` 比较：`cumulative` 使用
+\(w_i=1\)，`cycle_reset` 使用 \(w_i=\mathbf{1}[c_i=c_t]\)，正式默认
+`time_decay` 使用 \(w_i=\exp[-\lambda\max(0,c_t-c_i)]\)，默认
+`decay_lambda: 0.5`。运行清单和每轮生成计划会记录实际权重与运行时断言，证明被关闭
+的组件确实没有参与分配。
 
 ### 公平预算与论文结果表
 
@@ -317,6 +324,26 @@ python -B aggregate_study.py \
 但按实测难度重新标记，并记录目标偏差；设为 `reject` 时，超出
 `target_tolerance` 的题目会被拒绝。正式配置和 27 题配置会拒绝实测难度超出 2–6
 的题目；8 题功能测试只记录并重标，避免把有限修复预算浪费在难度校准上。
+
+`observable_math_v1` 是结构基线。经验版 `calibrated_math_v2` 必须使用独立难度
+校准集，禁止使用正式固定集或盲测集：
+
+```bash
+python calibrate_difficulty.py prepare-panel \
+  --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
+  --panel-config configs/difficulty_panels/panel_v1.yaml \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_tasks.json
+
+python calibrate_difficulty.py calibrate \
+  --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
+  --responses /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_responses.jsonl \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/calibrated_math_v2.json \
+  --freeze
+```
+
+冻结产物包含模型面板错误率、Pearson/Spearman/MAE、分桶校准、不同能力层一致性、
+Rasch/1PL、探索性 2PL 和校准后的五维权重。启用 v2 时，配置中的产物 SHA-256 与
+权重必须和冻结文件完全一致。
 
 ### 自适应难度与题目分配
 
@@ -469,10 +496,28 @@ TruthSolver 候选解回代、SymPy 常数等式验证、推理结果到最终�
 没有检查能够隔离出可靠机制时，系统输出 `unknown_error`，不会根据关键词猜测模型的
 “认知原因”。
 
-每轮会导出双人标注复核 CSV。两位标注者填写人工标签后，使用
-`evaluate_error_attribution.py score` 计算归因准确率、选择性覆盖/准确率、Macro-F1、
-Cohen's kappa、证据覆盖率、Brier Score 和分验证层级准确率。只有“确定性验证 +
-存在证据 + 置信度达标”的标签才能定向指导错题池出题。
+论文级验证默认抽取 400 条错误，并导出两份独立乱序盲标包：
+
+```bash
+python evaluate_error_attribution.py export-blinded \
+  --input /vepfs-mlp2/queue010/20262202597/math_flywheel/review/errors.jsonl \
+  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1
+
+python evaluate_error_attribution.py merge \
+  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/system_predictions.sealed.csv \
+  --annotator-1 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_1.csv \
+  --annotator-2 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_2.csv \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv
+
+python evaluate_error_attribution.py score \
+  --review-csv /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/metrics.json
+```
+
+标注者看不到系统标签和对方标签；一致标签自动成为共识，分歧必须由第三方填写
+`adjudicated_label`。报告 Coverage、Selective Accuracy、Macro-F1、Cohen’s Kappa、
+Brier Score、混淆矩阵和 `unknown_error` 比例。只有已裁决样本不少于 300、
+Kappa ≥ 0.70、高置信度准确率 ≥ 0.80 且无未决分歧时，错误类型才可作为论文核心信号。
 
 ## 固定测试集与泄漏防护
 

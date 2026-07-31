@@ -1,0 +1,5 @@
+extends: ../full.yaml
+
+adaptive_sampling:
+  history_mode: cumulative
+  decay_lambda: 0.5

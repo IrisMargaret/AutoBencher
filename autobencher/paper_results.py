@@ -449,7 +449,17 @@ def build_paper_tables(index_path: str | Path, output_dir: str | Path) -> dict[s
             row[f"{metric}_mean"] = (
                 sum(values) / len(values) if values else None
             )
-    ablation_methods = {"full", "full_no_hard_pool", "full_no_observed_difficulty"}
+    ablation_methods = {
+        "full",
+        "full_no_hard_pool",
+        "full_no_error_targeting",
+        "full_no_observed_difficulty_sampling",
+        "full_no_difficulty_module",
+        "full_no_coverage_priority",
+        "full_no_uncertainty_priority",
+        "full_no_global_difficulty",
+        "full_no_retention_priority",
+    }
     ablations = [
         row for row in main_results if row["method"] in ablation_methods
     ]

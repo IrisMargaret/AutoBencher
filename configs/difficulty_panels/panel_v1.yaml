@@ -1,0 +1,21 @@
+schema_version: "1.0"
+dataset_role: difficulty_calibration
+
+# Replace model paths with locally available immutable snapshots. Keep at least
+# one model in each tier; model hashes are captured with the completed panel.
+panel_models:
+  - model_id: small_model
+    tier: small
+    model_path: /vepfs-mlp2/queue010/20262202597/models/panel/small
+  - model_id: medium_model
+    tier: medium
+    model_path: /vepfs-mlp2/queue010/20262202597/models/panel/medium
+  - model_id: strong_model
+    tier: strong
+    model_path: /vepfs-mlp2/queue010/20262202597/models/panel/strong
+  - model_id: original_model
+    tier: target_original
+    model_path: /vepfs-mlp2/queue010/20262202597/models/panel/original
+  - model_id: finetuned_model
+    tier: target_finetuned
+    model_path: /vepfs-mlp2/queue010/20262202597/models/panel/finetuned

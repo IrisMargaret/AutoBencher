@@ -13,7 +13,9 @@ study_suite:
     - error_only
     - full
     - full_no_hard_pool
+    - full_no_error_targeting
     - full_no_observed_difficulty_sampling
+    - full_no_difficulty_module
   seeds:
     - 42
     - 123

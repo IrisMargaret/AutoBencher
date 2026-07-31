@@ -15,6 +15,7 @@ study:
   components:
     adaptive_allocation: false
     global_difficulty: false
+    difficulty_module: false
     observed_difficulty: false
     coverage_priority: false
     uncertainty_priority: false

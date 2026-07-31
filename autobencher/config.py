@@ -34,12 +34,25 @@ STUDY_VARIANT_NAMES = (
     "error_only",
     "full",
     "full_no_hard_pool",
-    "full_no_observed_difficulty",
+    "full_no_error_targeting",
+    "full_no_observed_difficulty_sampling",
+    "full_no_difficulty_module",
+    "full_no_coverage_priority",
+    "full_no_uncertainty_priority",
+    "full_no_global_difficulty",
+    "full_no_retention_priority",
 )
+
+STUDY_VARIANT_ALIASES = {
+    "full_no_observed_difficulty": (
+        "full_no_observed_difficulty_sampling"
+    ),
+}
 
 STUDY_COMPONENT_NAMES = (
     "adaptive_allocation",
     "global_difficulty",
+    "difficulty_module",
     "observed_difficulty",
     "coverage_priority",
     "uncertainty_priority",
@@ -56,7 +69,13 @@ STUDY_VARIANT_POLICIES = {
     "error_only": "error_only",
     "full": "full",
     "full_no_hard_pool": "full",
-    "full_no_observed_difficulty": "full",
+    "full_no_error_targeting": "full",
+    "full_no_observed_difficulty_sampling": "full",
+    "full_no_difficulty_module": "full",
+    "full_no_coverage_priority": "full",
+    "full_no_uncertainty_priority": "full",
+    "full_no_global_difficulty": "full",
+    "full_no_retention_priority": "full",
 }
 
 STUDY_COMPONENT_PRESETS = {
@@ -67,6 +86,7 @@ STUDY_COMPONENT_PRESETS = {
     "random": {
         "adaptive_allocation": False,
         "global_difficulty": False,
+        "difficulty_module": True,
         "observed_difficulty": True,
         "coverage_priority": False,
         "uncertainty_priority": False,
@@ -78,6 +98,7 @@ STUDY_COMPONENT_PRESETS = {
     "uniform": {
         "adaptive_allocation": False,
         "global_difficulty": False,
+        "difficulty_module": True,
         "observed_difficulty": True,
         "coverage_priority": False,
         "uncertainty_priority": False,
@@ -89,6 +110,7 @@ STUDY_COMPONENT_PRESETS = {
     "error_only": {
         "adaptive_allocation": True,
         "global_difficulty": False,
+        "difficulty_module": True,
         "observed_difficulty": True,
         "coverage_priority": False,
         "uncertainty_priority": False,
@@ -107,14 +129,45 @@ STUDY_COMPONENT_PRESETS = {
             for name in STUDY_COMPONENT_NAMES
         },
         "hard_pool_variants": False,
+    },
+    "full_no_error_targeting": {
+        **{
+            name: True
+            for name in STUDY_COMPONENT_NAMES
+        },
         "error_type_targeting": False,
     },
-    "full_no_observed_difficulty": {
+    "full_no_observed_difficulty_sampling": {
         **{
             name: True
             for name in STUDY_COMPONENT_NAMES
         },
         "observed_difficulty": False,
+    },
+    "full_no_difficulty_module": {
+        **{
+            name: True
+            for name in STUDY_COMPONENT_NAMES
+        },
+        "difficulty_module": False,
+        "observed_difficulty": False,
+        "global_difficulty": False,
+    },
+    "full_no_coverage_priority": {
+        **{name: True for name in STUDY_COMPONENT_NAMES},
+        "coverage_priority": False,
+    },
+    "full_no_uncertainty_priority": {
+        **{name: True for name in STUDY_COMPONENT_NAMES},
+        "uncertainty_priority": False,
+    },
+    "full_no_global_difficulty": {
+        **{name: True for name in STUDY_COMPONENT_NAMES},
+        "global_difficulty": False,
+    },
+    "full_no_retention_priority": {
+        **{name: True for name in STUDY_COMPONENT_NAMES},
+        "retention_priority": False,
     },
 }
 
@@ -295,6 +348,7 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "components": {
             "adaptive_allocation": True,
             "global_difficulty": True,
+            "difficulty_module": True,
             "observed_difficulty": True,
             "coverage_priority": True,
             "uncertainty_priority": True,
@@ -423,6 +477,8 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "difficulty": {
         "rubric_version": "observable_math_v1",
+        "calibration_artifact": None,
+        "calibration_artifact_sha256": None,
         "target_tolerance": 2,
         "minimum_profile_confidence": 0.70,
         "mismatch_action": "relabel",
@@ -479,6 +535,8 @@ SAFE_DEFAULTS: dict[str, Any] = {
     },
     "adaptive_sampling": {
         "enabled": True,
+        "history_mode": "time_decay",
+        "decay_lambda": 0.5,
         "initial_difficulty": 4,
         "global_accuracy_enabled": True,
         "global_accuracy_low": 0.35,
@@ -1436,15 +1494,6 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
                 "must be a Boolean",
                 component_value,
             )
-    if (
-        not bool(study_components["hard_pool_variants"])
-        and bool(study_components["error_type_targeting"])
-    ):
-        raise ConfigurationError(
-            "study.components.error_type_targeting",
-            "must be false when hard_pool_variants is false",
-            True,
-        )
     expected_components = STUDY_COMPONENT_PRESETS[study_variant]
     for component_name, expected_value in expected_components.items():
         actual_value = bool(study_components[component_name])
@@ -1560,12 +1609,71 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
     difficulty_rubric = str(
         _get(config, "difficulty.rubric_version")
     ).strip()
-    if difficulty_rubric != "observable_math_v1":
+    if difficulty_rubric not in {
+        "observable_math_v1",
+        "calibrated_math_v2",
+    }:
         raise ConfigurationError(
             "difficulty.rubric_version",
-            "must be observable_math_v1",
+            "must be observable_math_v1 or calibrated_math_v2",
             difficulty_rubric,
         )
+    calibration_path = _get(config, "difficulty.calibration_artifact")
+    calibration_hash = _get(
+        config,
+        "difficulty.calibration_artifact_sha256",
+    )
+    if difficulty_rubric == "calibrated_math_v2":
+        if not calibration_path or not calibration_hash:
+            raise ConfigurationError(
+                "difficulty.calibration_artifact",
+                "calibrated_math_v2 requires an immutable artifact path and "
+                "calibration_artifact_sha256",
+                calibration_path,
+            )
+        artifact_path = Path(str(calibration_path)).expanduser()
+        if artifact_path.exists():
+            actual_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+            if actual_hash != str(calibration_hash):
+                raise ConfigurationError(
+                    "difficulty.calibration_artifact_sha256",
+                    "does not match the frozen calibration artifact",
+                    calibration_hash,
+                )
+            try:
+                artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise ConfigurationError(
+                    "difficulty.calibration_artifact",
+                    f"cannot parse frozen calibration: {error}",
+                    calibration_path,
+                ) from error
+            if (
+                artifact.get("status") != "frozen"
+                or artifact.get("rubric_version") != "calibrated_math_v2"
+            ):
+                raise ConfigurationError(
+                    "difficulty.calibration_artifact",
+                    "must be a frozen calibrated_math_v2 artifact",
+                    calibration_path,
+                )
+            configured = _get(config, "difficulty.dimension_weights")
+            if any(
+                abs(float(configured[name]) - float(artifact["weights"][name]))
+                > 1.0e-9
+                for name in configured
+            ):
+                raise ConfigurationError(
+                    "difficulty.dimension_weights",
+                    "must exactly match the frozen calibration artifact",
+                    configured,
+                )
+        elif validate_paths:
+            raise ConfigurationError(
+                "difficulty.calibration_artifact",
+                "does not exist",
+                calibration_path,
+            )
     difficulty_action = str(
         _get(config, "difficulty.mismatch_action")
     ).strip()
@@ -1719,6 +1827,33 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "adaptive_sampling.target_accuracy_low",
             "target accuracies must satisfy 0 <= low <= mid <= high <= 1",
             [accuracy_low, accuracy_mid, accuracy_high],
+        )
+    history_mode = str(
+        _get(config, "adaptive_sampling.history_mode")
+    ).strip()
+    if history_mode not in {"cumulative", "cycle_reset", "time_decay"}:
+        raise ConfigurationError(
+            "adaptive_sampling.history_mode",
+            "must be cumulative, cycle_reset, or time_decay",
+            history_mode,
+        )
+    decay_lambda = _get(config, "adaptive_sampling.decay_lambda")
+    if (
+        not isinstance(decay_lambda, (int, float))
+        or isinstance(decay_lambda, bool)
+        or not math.isfinite(float(decay_lambda))
+        or float(decay_lambda) < 0
+    ):
+        raise ConfigurationError(
+            "adaptive_sampling.decay_lambda",
+            "must be a non-negative finite number",
+            decay_lambda,
+        )
+    if history_mode == "time_decay" and float(decay_lambda) <= 0:
+        raise ConfigurationError(
+            "adaptive_sampling.decay_lambda",
+            "must be positive when history_mode=time_decay",
+            decay_lambda,
         )
     global_accuracy_low = float(
         _get(config, "adaptive_sampling.global_accuracy_low")
@@ -2132,6 +2267,17 @@ def load_resolved_config(
     parsed_temporary = parse_overrides(temporary_overrides)
     resolved = deep_merge(resolved, parsed_temporary)
     _record_sources(field_sources, parsed_temporary, "explicit_override")
+    raw_variant = str(resolved.get("study", {}).get("variant", ""))
+    if raw_variant in STUDY_VARIANT_ALIASES:
+        canonical_variant = STUDY_VARIANT_ALIASES[raw_variant]
+        resolved["study"]["variant"] = canonical_variant
+        migrations.append(
+            {
+                "field": "study.variant",
+                "from": raw_variant,
+                "to": canonical_variant,
+            }
+        )
     validate_config(resolved, validate_paths=validate_paths)
     digest = config_hash(resolved)
     sensitive_environment = {}

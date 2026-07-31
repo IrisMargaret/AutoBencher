@@ -21,6 +21,7 @@ study:
   components:
     adaptive_allocation: true
     global_difficulty: true
+    difficulty_module: true
     observed_difficulty: true
     coverage_priority: true
     uncertainty_priority: true
@@ -237,6 +238,10 @@ generation:
 # observed score is used by adaptive sampling.
 difficulty:
   rubric_version: observable_math_v1
+  # calibrated_math_v2 requires both fields and weights exactly matching the
+  # frozen artifact; observable_math_v1 intentionally leaves them null.
+  calibration_artifact: null
+  calibration_artifact_sha256: null
   target_tolerance: 2
   minimum_profile_confidence: 0.70
   # relabel preserves useful verified questions while recording target drift.
@@ -296,6 +301,10 @@ hard_pool:
 
 adaptive_sampling:
   enabled: true
+  # Posterior observations are weighted by model-version age:
+  # w_i = exp(-decay_lambda * (current_cycle - observation_cycle)).
+  history_mode: time_decay
+  decay_lambda: 0.5
   # Previous-round global accuracy is a coarse difficulty guardrail. It is
   # applied before the original per-subcategory Beta-Binomial allocation.
   initial_difficulty: 4

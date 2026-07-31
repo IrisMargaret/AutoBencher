@@ -4,7 +4,7 @@
 SymPy 金标、质量过滤、训练集构建和固定测试集评测链路；差异仅来自声明的采样策略
 及组件开关。
 
-## 七种方法
+## 第一轮九种方法
 
 | 方法 | 分配依据 | 难度选择 | Hard Pool | 错误类型定向 | 是否训练 |
 | --- | --- | --- | --- | --- | --- |
@@ -13,13 +13,16 @@ SymPy 金标、质量过滤、训练集构建和固定测试集评测链路；�
 | `uniform` | 27 个细分题型严格均匀 | `study.uniform_difficulty`，默认 4 | 关闭 | 关闭 | 是 |
 | `error_only` | `epsilon + (1 - posterior_mean)` | 最近一次有效难度，无历史时用初始难度 | 关闭 | 关闭 | 是 |
 | `full` | 覆盖缺口、边界、不确定性、持续错误和 retention | 全局与局部自适应，并使用客观实测难度 | 开启 | 证据门控 | 是 |
-| `full_no_hard_pool` | 与 `full` 相同 | 与 `full` 相同 | 关闭，预算重分配 | 关闭 | 是 |
-| `full_no_observed_difficulty` | 与 `full` 相同 | 自适应状态使用请求难度 | 开启 | 证据门控 | 是 |
+| `full_no_hard_pool` | 与 `full` 相同 | 与 `full` 相同 | 关闭，预算重分配 | 仍开启但无 Hard Pool 上下文 | 是 |
+| `full_no_error_targeting` | 与 `full` 相同 | 与 `full` 相同 | 开启 | 关闭 | 是 |
+| `full_no_observed_difficulty_sampling` | 与 `full` 相同 | 自适应状态使用请求难度 | 开启 | 证据门控 | 是 |
+| `full_no_difficulty_module` | 与 `full` 相同 | 固定初始难度；不拒绝、不重标、不筛选 | 开启 | 证据门控 | 是 |
 
 `random` 和 `uniform` 仍会记录客观难度画像，但不使用历史表现进行下一轮分配。
 `error_only` 只使用子类别错误率，不叠加覆盖、不确定性、边界或 retention 权重；无
-历史数据时退化为均匀分配。`full_no_observed_difficulty` 不删除诊断信息：每道题仍
+历史数据时退化为均匀分配。`full_no_observed_difficulty_sampling` 不删除诊断信息：每道题仍
 保留 requested、observed 和 effective difficulty，只是 effective 使用 requested。
+`full_no_difficulty_module` 才是真正关闭完整难度模块。
 
 ## 组件定义
 
@@ -30,6 +33,7 @@ SymPy 金标、质量过滤、训练集构建和固定测试集评测链路；�
 | --- | --- |
 | `adaptive_allocation` | 是否按历史状态动态改变题型预算 |
 | `global_difficulty` | 是否使用上一轮整体正确率调整难度 |
+| `difficulty_module` | 是否启用难度采样、越界拒绝、不匹配处理和难度筛选 |
 | `observed_difficulty` | 后续采样是否使用客观实测难度 |
 | `coverage_priority` | 是否提高覆盖不足题型的优先级 |
 | `uncertainty_priority` | 是否使用后验不确定性 |
@@ -38,8 +42,8 @@ SymPy 金标、质量过滤、训练集构建和固定测试集评测链路；�
 | `hard_pool_variants` | 是否生成 Hard Pool 结构变式 |
 | `error_type_targeting` | 是否注入证据充分的细粒度错误类型 |
 
-命名方法使用固定组件组合。非法策略名、策略与 variant 不匹配、难度越界，或者在
-`hard_pool_variants=false` 时启用 `error_type_targeting`，都会在模型加载前失败。
+命名方法使用固定组件组合。非法策略名、策略与 variant 不匹配或配置难度越界，会在
+模型加载前失败。Hard Pool 与错误类型定向是独立组件，不再被强制联动关闭。
 
 ## 执行单个方法
 
@@ -90,10 +94,20 @@ python run_scripts.py math \
 
 ```bash
 python run_scripts.py math \
-  --config configs/studies/ablations/full_no_observed_difficulty.yaml \
+  --config configs/studies/ablations/full_no_observed_difficulty_sampling.yaml \
   --environment configs/environments/volcengine.yaml \
   --override experiment.seed=42 \
-  --run-id full-no-observed-difficulty-seed-42
+  --run-id full-no-observed-difficulty-sampling-seed-42
+```
+
+完整关闭难度模块：
+
+```bash
+python run_scripts.py math \
+  --config configs/studies/ablations/full_no_difficulty_module.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --override experiment.seed=42 \
+  --run-id full-no-difficulty-module-seed-42
 ```
 
 固定集参考基线：
@@ -137,11 +151,13 @@ git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
 
 | suite | 用途 |
 | --- | --- |
-| `smoke.yaml` | 七方法、单 seed、单轮小预算链路检查 |
-| `pilot.yaml` | 七方法、两个 seed 的先导实验 |
-| `main.yaml` | 七方法 × 3 seeds × 1 model × 1350 总题目 |
-| `budget_curve.yaml` | 七方法在 135/270/675/1350 总题目下的预算曲线 |
-| `fair_budget.yaml` | Data-matched 与 Cost-matched × 七方法 × 三个 seed |
+| `smoke.yaml` | 第一轮九方法、单 seed、单轮小预算链路检查 |
+| `pilot.yaml` | 第一轮九方法、两个 seed 的先导实验 |
+| `main.yaml` | 第一轮九方法 × 3 seeds × 1 model × 1350 总题目 |
+| `budget_curve.yaml` | 第一轮九方法在 135/270/675/1350 总题目下的预算曲线 |
+| `fair_budget.yaml` | Data-matched 与 Cost-matched × 第一轮九方法 × 三个 seed |
+| `ablation_round2.yaml` | 完整方法与四个第二轮单组件消融 |
+| `history_modes.yaml` | cumulative、cycle_reset、time_decay 后验比较 |
 
 先只展开矩阵并检查公平性，不启动模型：
 
@@ -263,9 +279,15 @@ jq '{
 `experiment.questions_per_iteration`，每个 allocation 块不得超过
 `generation.max_questions_per_prompt`。
 
+第一轮稳定后再运行 `configs/study_suites/ablation_round2.yaml`，其中分别关闭覆盖、
+不确定性、全局难度和 retention。后验历史模式使用独立 suite
+`configs/study_suites/history_modes.yaml`，避免将“机制消融”和“陈旧数据处理”混为
+同一个处理变量。每轮 `generation_plan.json` 的 `component_runtime_checks` 是组件
+真实关闭的执行证据。
+
 ## 公平比较要求
 
-除 `base` 仅作为未训练参考点外，其余六种方法必须保持以下条件一致：
+除 `base` 仅作为未训练参考点外，其余训练方法必须保持以下条件一致：
 
 - `experiment.questions_per_iteration` 和 Cycle/Iteration 数量；
 - 进入训练器的样本数量或预先声明的相同样本上限；

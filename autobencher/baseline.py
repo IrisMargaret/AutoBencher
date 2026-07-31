@@ -102,6 +102,17 @@ def build_baseline_manifest(
     prompts = prompt_bundle_snapshot(config, root)
     config_sources = _config_source_fingerprints(provenance, root)
     resolved_config = thaw_config(config)
+    difficulty = thaw_config(config["difficulty"])
+    calibration_path = difficulty.get("calibration_artifact")
+    difficulty_artifact = (
+        artifact_fingerprint(
+            str(calibration_path),
+            project_root=root,
+            allow_missing=allow_missing_artifacts,
+        )
+        if calibration_path
+        else None
+    )
     manifest = {
         "schema_version": "1.0",
         "baseline_id": baseline_id,
@@ -120,6 +131,12 @@ def build_baseline_manifest(
             "source_bundle_sha256": canonical_sha256(config_sources),
         },
         "prompt_bundle": prompts,
+        "difficulty": {
+            "rubric_version": difficulty["rubric_version"],
+            "dimension_weights": difficulty["dimension_weights"],
+            "calibration_artifact": difficulty_artifact,
+            "sha256": canonical_sha256(difficulty),
+        },
     }
     stable_environment = {
         key: value
@@ -134,6 +151,12 @@ def build_baseline_manifest(
             "evaluation_registry_sha256": evaluation_registry["sha256"],
             "config_sha256": manifest["config"]["resolved_sha256"],
             "prompt_sha256": prompts["combined_sha256"],
+            "difficulty_sha256": manifest["difficulty"]["sha256"],
+            "difficulty_artifact_sha256": (
+                difficulty_artifact["sha256"]
+                if difficulty_artifact
+                else None
+            ),
             "environment": stable_environment,
         }
     )

@@ -216,8 +216,9 @@ defaults prohibit competition-level questions.
 ### Baselines and ablations
 
 The unified policy interface supports `base`, `random`, `uniform`,
-`error_only`, `full`, `full_no_hard_pool`, and
-`full_no_observed_difficulty`. Study profiles live under `configs/studies/`;
+`error_only`, `full`, `full_no_hard_pool`, `full_no_error_targeting`,
+`full_no_observed_difficulty_sampling`, and `full_no_difficulty_module`.
+Study profiles live under `configs/studies/`;
 the default remains `full`, so existing resolved configurations keep the
 complete adaptive behavior.
 
@@ -251,7 +252,7 @@ The worktree must be clean unless `--allow-dirty` is explicitly used for a
 provisional, non-paper manifest. The production output defaults to
 `/vepfs-mlp2/queue010/20262202597/math_flywheel/baselines/`.
 
-Run the complete seven-method smoke matrix with one command:
+Run the complete first-round smoke matrix with one command:
 
 ```bash
 python run_study.py \
@@ -264,7 +265,7 @@ python run_study.py \
 
 Use `--resume` after interruption. Completed experiments are skipped; only
 pending, failed, or partial experiments are restarted. `main.yaml` expands
-seven methods × three seeds × one model × one total question budget. Every
+nine methods × three seeds × one model × one total question budget. Every
 matrix cell has its own outputs, cache, hard-pool/history state, datasets,
 checkpoints, and model directory. The runner rejects dirty code, changed
 fingerprints, non-identical base models/fixed tests/prompts, and any
@@ -280,9 +281,17 @@ python aggregate_study.py \
 
 `budgets` in a suite are total generated-question budgets. They must divide
 evenly by `experiment.num_iterations * experiment.max_cycles`; the runner
-refuses an inexact split instead of silently changing experimental cost. The requested alias
-`full_no_observed_difficulty_sampling` resolves to the project's canonical
-variant `full_no_observed_difficulty`.
+refuses an inexact split instead of silently changing experimental cost.
+`full_no_observed_difficulty` is retained only as a deprecated input alias and
+resolves to the canonical `full_no_observed_difficulty_sampling`.
+
+Run `configs/study_suites/ablation_round2.yaml` only after the first round is
+stable. Posterior staleness is tested separately with
+`configs/study_suites/history_modes.yaml`: `cumulative` uses \(w_i=1\),
+`cycle_reset` uses \(w_i=\mathbf{1}[c_i=c_t]\), and the production default
+`time_decay` uses \(w_i=\exp[-\lambda\max(0,c_t-c_i)]\) with
+`decay_lambda: 0.5`. Run manifests and per-iteration generation plans store
+the effective weights and runtime assertions for disabled components.
 
 ### Fair budgets and paper tables
 
@@ -336,6 +345,28 @@ SymPy-verified question but uses its observed score and records the target gap.
 the 27-question profile reject observed scores outside the configured 2–6
 range; the 8-question functional profile records and relabels them without
 spending its small repair budget.
+
+`observable_math_v1` is the structural baseline. Estimate and freeze
+`calibrated_math_v2` only on a dedicated calibration set, never on a fixed or
+blind test:
+
+```bash
+python calibrate_difficulty.py prepare-panel \
+  --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
+  --panel-config configs/difficulty_panels/panel_v1.yaml \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_tasks.json
+
+python calibrate_difficulty.py calibrate \
+  --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
+  --responses /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_responses.jsonl \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/calibrated_math_v2.json \
+  --freeze
+```
+
+The frozen artifact reports panel error rates, Pearson/Spearman/MAE, binned
+calibration, model-tier consistency, Rasch/1PL, exploratory 2PL, and calibrated
+five-dimension weights. A v2 runtime config must use the artifact's SHA-256 and
+exact weights.
 
 ### Adaptive difficulty and question allocation
 
@@ -542,12 +573,31 @@ confidence, verification tier, first failing step, and taxonomy version. When
 no check isolates a defensible mechanism, the system emits `unknown_error`
 instead of inferring a cognitive cause from keywords.
 
-Every iteration exports a double-annotation review CSV. Use
-`evaluate_error_attribution.py score` after two reviewers fill the human-label
-columns to obtain attribution accuracy, selective coverage/accuracy, macro-F1,
-Cohen's kappa, evidence coverage, Brier score, and accuracy by verification
-tier. Only deterministic, evidenced, above-threshold labels can direct
-hard-pool question generation.
+For publication-quality validation, export two independently shuffled blind
+packets (default 400 errors). Annotators cannot see the system label or each
+other's label. Merge completed packets, have a third reviewer adjudicate every
+remaining disagreement, then score the merged file:
+
+```bash
+python evaluate_error_attribution.py export-blinded \
+  --input /vepfs-mlp2/queue010/20262202597/math_flywheel/review/errors.jsonl \
+  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1
+
+python evaluate_error_attribution.py merge \
+  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/system_predictions.sealed.csv \
+  --annotator-1 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_1.csv \
+  --annotator-2 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_2.csv \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv
+
+python evaluate_error_attribution.py score \
+  --review-csv /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/metrics.json
+```
+
+The report includes coverage, selective accuracy, Macro-F1, Cohen's kappa,
+Brier score, a confusion matrix, and the unknown-error ratio. The conservative
+readiness gate requires at least 300 resolved samples, kappa ≥ 0.70,
+high-confidence accuracy ≥ 0.80, and zero unresolved adjudications.
 
 ## Fixed test and leakage protection
 

@@ -1249,6 +1249,7 @@ class HardSamplePool:
         sub_category,
         max_samples=12,
         confidence_threshold=0.70,
+        include_error_targeting=True,
     ):
         samples = [
             sample
@@ -1277,6 +1278,8 @@ class HardSamplePool:
         lines = []
         for sample in samples[:max_samples]:
             verified_attribution = (
+                bool(include_error_targeting)
+                and
                 str(sample.get("verification_tier")) == "deterministic"
                 and float(
                     sample.get("attribution_confidence", 0.0) or 0.0
@@ -1311,8 +1314,13 @@ class HardSamplePool:
                 f"verified_evidence_checks: {evidence_checks} | "
                 f"structural_pattern: {sample.get('sub_category', '')} problem | "
                 "variation_requirements: change all values and wording; "
-                "preserve the verified error mechanism when known; "
-                "do not copy the source; never reveal the reference answer"
+                + (
+                    "preserve the verified error mechanism when known; "
+                    if include_error_targeting
+                    else "vary only the mathematical structure without "
+                    "targeting an error label; "
+                )
+                + "do not copy the source; never reveal the reference answer"
             )
         return "\n".join(lines)
 

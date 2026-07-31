@@ -413,12 +413,15 @@ def assess_difficulty(
         if isinstance(study, Mapping)
         else {}
     )
+    module_enabled = bool(components.get("difficulty_module", True))
     use_observed = bool(
         difficulty_config["use_observed_score_for_adaptive_sampling"]
-    ) and bool(components.get("observed_difficulty", True))
-    if isinstance(study, Mapping) and study.get("variant") == (
-        "full_no_observed_difficulty"
-    ):
+    ) and bool(components.get("observed_difficulty", True)) and module_enabled
+    if isinstance(study, Mapping) and study.get("variant") in {
+        "full_no_observed_difficulty",
+        "full_no_observed_difficulty_sampling",
+        "full_no_difficulty_module",
+    }:
         use_observed = False
     effective = observed if trusted and use_observed else requested
     lower = int(config["generation"]["minimum_difficulty"])
@@ -444,6 +447,15 @@ def assess_difficulty(
             ),
             "mismatch_action": str(
                 difficulty_config["mismatch_action"]
+                if module_enabled
+                else "disabled"
+            ),
+            "difficulty_module_enabled": module_enabled,
+            "difficulty_rejection_enabled": bool(
+                module_enabled
+                and difficulty_config[
+                    "reject_outside_generation_bounds"
+                ]
             ),
         }
     )

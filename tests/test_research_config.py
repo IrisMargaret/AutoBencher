@@ -37,8 +37,10 @@ STUDY_CONFIGS = {
     "full_no_hard_pool": (
         STUDY_ROOT / "ablations" / "full_no_hard_pool.yaml"
     ),
-    "full_no_observed_difficulty": (
-        STUDY_ROOT / "ablations" / "full_no_observed_difficulty.yaml"
+    "full_no_observed_difficulty_sampling": (
+        STUDY_ROOT
+        / "ablations"
+        / "full_no_observed_difficulty_sampling.yaml"
     ),
 }
 
@@ -360,7 +362,7 @@ def test_launcher_announces_data_flywheel_mode_from_yaml():
         ("error_only", "error_only"),
         ("full", "full"),
         ("full_no_hard_pool", "full"),
-        ("full_no_observed_difficulty", "full"),
+        ("full_no_observed_difficulty_sampling", "full"),
     ],
 )
 def test_study_profiles_resolve_strict_runtime_identity(variant, policy):
@@ -397,8 +399,8 @@ def test_study_profiles_resolve_strict_runtime_identity(variant, policy):
         ),
         (
             STUDY_CONFIGS["full_no_hard_pool"],
-            "study.components.error_type_targeting=true",
-            "error_type_targeting",
+            "study.components.hard_pool_variants=true",
+            "hard_pool_variants",
         ),
         (
             STUDY_CONFIGS["base"],

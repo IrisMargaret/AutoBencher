@@ -32,8 +32,16 @@ STUDY_CONFIGS = {
     "full_no_hard_pool": (
         STUDY_ROOT / "ablations" / "full_no_hard_pool.yaml"
     ),
-    "full_no_observed_difficulty": (
-        STUDY_ROOT / "ablations" / "full_no_observed_difficulty.yaml"
+    "full_no_error_targeting": (
+        STUDY_ROOT / "ablations" / "full_no_error_targeting.yaml"
+    ),
+    "full_no_observed_difficulty_sampling": (
+        STUDY_ROOT
+        / "ablations"
+        / "full_no_observed_difficulty_sampling.yaml"
+    ),
+    "full_no_difficulty_module": (
+        STUDY_ROOT / "ablations" / "full_no_difficulty_module.yaml"
     ),
 }
 
@@ -192,12 +200,12 @@ def test_full_no_hard_pool_disables_and_redistributes_budget():
         "retention_known": 7,
     }
     assert sum(plan["source_budget"].values()) == 27
-    assert plan["component_state"]["error_type_targeting"] is False
+    assert plan["component_state"]["error_type_targeting"] is True
     assert plan["diagnostics"]["hard_pool_disabled_by_ablation"] is True
 
 
 def test_full_no_observed_uses_requested_history_difficulty():
-    config = _config("full_no_observed_difficulty", budget=27)
+    config = _config("full_no_observed_difficulty_sampling", budget=27)
     records = [
         {
             "sub_category": "Integer Operations",
@@ -226,7 +234,7 @@ def test_full_no_observed_uses_requested_history_difficulty():
 
 
 def test_full_no_observed_still_records_observed_profile():
-    config = _config("full_no_observed_difficulty")
+    config = _config("full_no_observed_difficulty_sampling")
     config["difficulty"]["minimum_profile_confidence"] = 0.0
     profile = assess_difficulty(
         "Solve for x: 2*x + 3 = 11.",
@@ -240,6 +248,41 @@ def test_full_no_observed_still_records_observed_profile():
     assert profile["requested_score"] == 6
     assert profile["effective_score"] == 6
     assert profile["effective_score_source"] == "requested"
+
+
+def test_hard_pool_and_error_targeting_are_independent_components():
+    hard_off = _config("full_no_hard_pool")
+    targeting_off = _config("full_no_error_targeting")
+    assert hard_off["study"]["components"]["hard_pool_variants"] is False
+    assert hard_off["study"]["components"]["error_type_targeting"] is True
+    assert targeting_off["study"]["components"]["hard_pool_variants"] is True
+    assert targeting_off["study"]["components"]["error_type_targeting"] is False
+
+
+def test_full_no_difficulty_module_disables_every_difficulty_effect():
+    config = _config("full_no_difficulty_module", budget=27)
+    records = [
+        {
+            "sub_category": "Integer Operations",
+            "difficulty": 9,
+            "observed_difficulty": 9,
+            "target_difficulty": 9,
+            "cycle": 1,
+            "is_correct": False,
+        }
+    ]
+    plan = _schedule(config, records=records, iteration=2)
+    assert plan["component_state"]["difficulty_module"] is False
+    assert plan["component_evidence"]["difficulty_rejection_enabled"] is False
+    assert plan["component_evidence"]["difficulty_mismatch_action"] == "disabled"
+    assert {
+        item["previous_difficulty"]
+        for item in plan["adaptive_sampler_state"]
+    } == {config["adaptive_sampling"]["initial_difficulty"]}
+    assert all(
+        check["passed"]
+        for check in plan["diagnostics"]["component_runtime_checks"]
+    )
 
 
 def test_base_runs_fixed_evaluation_without_generation_or_training(

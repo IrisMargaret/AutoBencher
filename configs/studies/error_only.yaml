@@ -7,6 +7,7 @@ study:
   components:
     adaptive_allocation: true
     global_difficulty: false
+    difficulty_module: true
     observed_difficulty: true
     coverage_priority: false
     uncertainty_priority: false

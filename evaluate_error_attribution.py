@@ -10,7 +10,9 @@ from typing import Any
 
 from autobencher.attribution_eval import (
     evaluate_review_csv,
+    export_blinded_review_packets,
     export_review_sample,
+    merge_blinded_reviews,
 )
 from autobencher.config import REQUIRED_DATA_ROOT
 
@@ -79,6 +81,24 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--sample-size", type=int, default=100)
     export.add_argument("--seed", type=int, default=42)
 
+    blind = subparsers.add_parser(
+        "export-blinded",
+        help="create two independent blinded packets and sealed predictions",
+    )
+    blind.add_argument("--input", required=True)
+    blind.add_argument("--output-dir", required=True)
+    blind.add_argument("--sample-size", type=int, default=400)
+    blind.add_argument("--seed", type=int, default=42)
+
+    merge = subparsers.add_parser(
+        "merge",
+        help="merge completed blind packets for consensus/adjudication",
+    )
+    merge.add_argument("--system-predictions", required=True)
+    merge.add_argument("--annotator-1", required=True)
+    merge.add_argument("--annotator-2", required=True)
+    merge.add_argument("--output", required=True)
+
     score = subparsers.add_parser(
         "score",
         help="score a completed review CSV",
@@ -105,6 +125,22 @@ def main(argv: list[str] | None = None) -> int:
             "review_sample_count": count,
             "output": output_path.as_posix(),
         }
+    elif args.command == "export-blinded":
+        input_path = _contained_path(args.input, allowed)
+        output_dir = _contained_path(args.output_dir, allowed)
+        result = export_blinded_review_packets(
+            _read_records(input_path),
+            output_dir,
+            sample_size=args.sample_size,
+            seed=args.seed,
+        )
+    elif args.command == "merge":
+        result = merge_blinded_reviews(
+            _contained_path(args.system_predictions, allowed),
+            _contained_path(args.annotator_1, allowed),
+            _contained_path(args.annotator_2, allowed),
+            _contained_path(args.output, allowed),
+        )
     else:
         review_path = _contained_path(args.review_csv, allowed)
         output_path = _contained_path(args.output, allowed)

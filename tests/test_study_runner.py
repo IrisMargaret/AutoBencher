@@ -23,14 +23,16 @@ from autobencher.study_runner import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SEVEN_METHODS = [
+FIRST_ROUND_METHODS = [
     "base",
     "random",
     "uniform",
     "error_only",
     "full",
     "full_no_hard_pool",
+    "full_no_error_targeting",
     "full_no_observed_difficulty_sampling",
+    "full_no_difficulty_module",
 ]
 
 
@@ -53,7 +55,7 @@ def _write_suite(
             "output_root": str(tmp_path / "runs"),
             "allow_missing_artifacts": False,
             "allow_dirty_worktree": True,
-            "methods": methods or SEVEN_METHODS,
+            "methods": methods or FIRST_ROUND_METHODS,
             "seeds": [42],
             "models": [{"name": "test-model", "path": str(model_dir)}],
             "budgets": [5],
@@ -132,11 +134,11 @@ def test_baseline_manifest_records_required_fingerprints():
     assert manifest["baseline_sha256"]
 
 
-def test_seven_method_plan_is_deterministic_and_isolated(tmp_path):
+def test_first_round_plan_is_deterministic_and_isolated(tmp_path):
     suite = _write_suite(tmp_path)
     first = StudyRunner(suite, project_root=ROOT).build_plan()
     second = StudyRunner(suite, project_root=ROOT).build_plan()
-    assert len(first) == 7
+    assert len(first) == 9
     assert [item.study_id for item in first] == [
         item.study_id for item in second
     ]
@@ -147,9 +149,11 @@ def test_seven_method_plan_is_deterministic_and_isolated(tmp_path):
         "error_only",
         "full",
         "full_no_hard_pool",
-        "full_no_observed_difficulty",
+        "full_no_error_targeting",
+        "full_no_observed_difficulty_sampling",
+        "full_no_difficulty_module",
     }
-    assert len({item.experiment_dir for item in first}) == 7
+    assert len({item.experiment_dir for item in first}) == 9
     for record in first:
         override_text = "\n".join(record.command)
         assert f"paths.cache_dir={record.experiment_dir}" in override_text
@@ -193,12 +197,12 @@ def test_runner_expands_data_and_cost_matched_protocols(tmp_path):
         encoding="utf-8",
     )
     plan = StudyRunner(suite, project_root=ROOT).build_plan()
-    assert len(plan) == 14
+    assert len(plan) == 18
     assert {item.budget_protocol for item in plan} == {
         "data_matched",
         "cost_matched",
     }
-    assert len({item.experiment_dir for item in plan}) == 14
+    assert len({item.experiment_dir for item in plan}) == 18
 
 
 def test_fairness_rejects_non_strategy_training_change(tmp_path):

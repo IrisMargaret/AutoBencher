@@ -39,15 +39,47 @@ METHOD_CONFIGS = {
     "full_no_hard_pool": (
         "configs/studies/ablations/full_no_hard_pool.yaml"
     ),
-    "full_no_observed_difficulty": (
-        "configs/studies/ablations/full_no_observed_difficulty.yaml"
+    "full_no_error_targeting": (
+        "configs/studies/ablations/full_no_error_targeting.yaml"
+    ),
+    "full_no_observed_difficulty_sampling": (
+        "configs/studies/ablations/full_no_observed_difficulty_sampling.yaml"
+    ),
+    "full_no_difficulty_module": (
+        "configs/studies/ablations/full_no_difficulty_module.yaml"
+    ),
+    "full_no_coverage_priority": (
+        "configs/studies/ablations/full_no_coverage_priority.yaml"
+    ),
+    "full_no_uncertainty_priority": (
+        "configs/studies/ablations/full_no_uncertainty_priority.yaml"
+    ),
+    "full_no_global_difficulty": (
+        "configs/studies/ablations/full_no_global_difficulty.yaml"
+    ),
+    "full_no_retention_priority": (
+        "configs/studies/ablations/full_no_retention_priority.yaml"
+    ),
+    "full_history_cumulative": (
+        "configs/studies/history/full_history_cumulative.yaml"
+    ),
+    "full_history_cycle_reset": (
+        "configs/studies/history/full_history_cycle_reset.yaml"
+    ),
+    "full_history_time_decay": (
+        "configs/studies/history/full_history_time_decay.yaml"
     ),
 }
 
 METHOD_ALIASES = {
-    "full_no_observed_difficulty_sampling": (
-        "full_no_observed_difficulty"
+    "full_no_observed_difficulty": (
+        "full_no_observed_difficulty_sampling"
     ),
+}
+
+ALLOWED_METHOD_SPECIFIC_FIELDS = {
+    "adaptive_sampling.history_mode",
+    "adaptive_sampling.decay_lambda",
 }
 
 RUNTIME_PATH_FIELDS = (
@@ -417,8 +449,8 @@ class StudyRunner:
                         f"{left!r}, {right!r}"
                     )
 
-    @staticmethod
     def _validate_fairness(
+        self,
         records: list[ExperimentRecord],
         configs: Mapping[str, Mapping[str, Any]],
     ) -> None:
@@ -469,10 +501,21 @@ class StudyRunner:
                 )
 
             training_methods = [item for item in group if item.method != "base"]
+            requested_fields = set(
+                self.suite.get("method_specific_fields", [])
+            )
+            unsupported = requested_fields - ALLOWED_METHOD_SPECIFIC_FIELDS
+            if unsupported:
+                raise StudyConfigurationError(
+                    "Unsupported method_specific_fields; scientific suites "
+                    "may only vary explicitly audited strategy fields: "
+                    f"{sorted(unsupported)}"
+                )
             normalized = {}
             for item in training_methods:
                 payload = thaw_config(configs[item.study_id])
                 _remove_keys(payload, ("study", "paths"))
+                _remove_keys(payload, requested_fields)
                 normalized[item.method] = canonical_sha256(payload)
             if len(set(normalized.values())) > 1:
                 raise StudyConfigurationError(
