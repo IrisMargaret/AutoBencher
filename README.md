@@ -391,6 +391,8 @@ python calibrate_difficulty.py calibrate \
   --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
   --responses /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_responses.jsonl \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/calibrated_math_v2.json \
+  --minimum-model-coverage 0.80 --minimum-models-per-item 3 \
+  --minimum-models-per-tier 1 --maximum-missing-rate 0.20 \
   --freeze
 ```
 
@@ -404,8 +406,9 @@ values); missing, non-finite, or out-of-range dimensions fail. Reported
 calibrated correlations/MAE are out-of-fold, while full-data fit is explicitly
 descriptive. Duplicate model×item rows, insufficient model/item coverage, or
 fewer than three declared ability tiers fail. Every response binds model and
-tokenizer directory SHA, prompt SHA, decoding SHA, provider revision, and raw
-response, so a reused model ID cannot silently change snapshots. 2PL remains
+tokenizer directory SHA, prompt SHA, the complete decoding config plus its SHA,
+provider revision, and raw response, so a reused model ID cannot silently
+change snapshots. Duplicate panel model IDs fail during schedule creation. 2PL remains
 explicitly exploratory when the panel is small. A v2 runtime config must use
 the artifact's SHA-256 and exact weights.
 
@@ -710,11 +713,15 @@ python run_formal_evaluation.py \
   --run-id official-full-seed42
 ```
 
-Official assembly requires every item to pass independent recomputation, two
-distinct validation methods and actors, template/lexical/math-AST/embedding
+Official assembly requires every item either to pass independent recomputation
+or to pass two independent human reviews plus a distinct adjudicator when the
+reviews conflict. It also requires zero unresolved conflicts, two distinct
+validation methods and actors (including distinct model snapshot hashes),
+template/lexical/math-AST/embedding
 leakage checks, and an audit manifest binding candidate and training-corpus
 hashes, thresholds, algorithm version, and report hash. Blind release also
-requires an independently provisioned release-token SHA-256.
+requires a pre-registered or independently provisioned release-token SHA-256;
+an arbitrary non-empty token is never sufficient.
 
 Hard-pool samples now move through `active`, `mastered`, `stale`, and `retired`.
 Each new model version retests high-priority active/stale samples. Repeatedly

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,6 +13,7 @@ import yaml
 
 from .config import DEFAULT_TAXONOMY
 from .dataset import template_signature
+from .structured import normalize_generated_gold_contract
 
 
 EVALUATION_ROLES = frozenset(
@@ -21,6 +23,9 @@ BLIND_PATH_ENV = "AUTOBENCHER_BLIND_TEST_PATH"
 BLIND_SHA256_ENV = "AUTOBENCHER_BLIND_TEST_SHA256"
 BLIND_TOKEN_ENV = "AUTOBENCHER_BLIND_RELEASE_TOKEN"
 BLIND_TOKEN_SHA256_ENV = "AUTOBENCHER_BLIND_RELEASE_TOKEN_SHA256"
+ACCEPTED_VERIFICATION_LABELS = {
+    "accept", "accepted", "approve", "approved", "correct", "pass", "verified"
+}
 
 
 def file_sha256(path: str | Path) -> str:
@@ -161,12 +166,17 @@ def resolve_active_evaluation_set(
     path_env = str(selected.get("dataset_path_env", BLIND_PATH_ENV))
     hash_env = str(selected.get("dataset_sha256_env", BLIND_SHA256_ENV))
     token = str(env.get(token_env, "")).strip()
-    expected_token_hash = str(env.get(token_hash_env, "")).strip().lower()
+    registered_token_hash = str(selected.get("release_token_sha256", "")).strip().lower()
+    expected_token_hash = registered_token_hash or str(
+        env.get(token_hash_env, "")
+    ).strip().lower()
     if not token or not expected_token_hash:
         raise PermissionError(
             "Blind evaluation requires a release token and its independently "
             f"provisioned SHA-256 ({token_env}, {token_hash_env})"
         )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_token_hash):
+        raise PermissionError("Blind release token SHA-256 is malformed")
     if hashlib.sha256(token.encode("utf-8")).hexdigest() != expected_token_hash:
         raise PermissionError("Blind evaluation release token hash mismatch")
     raw_path = str(env.get(path_env, "")).strip()
@@ -175,6 +185,8 @@ def resolve_active_evaluation_set(
         raise PermissionError(
             f"Blind evaluation requires both {path_env} and {hash_env}."
         )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise PermissionError("Blind test SHA-256 is malformed")
     path = Path(raw_path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Released blind test set does not exist: {path}")
@@ -187,7 +199,23 @@ def resolve_active_evaluation_set(
         raise PermissionError("Fine-tuning is prohibited during blind evaluation.")
     selected["dataset_path"] = path.as_posix()
     selected["released_sha256"] = observed_sha256
+    selected["release_token_hash_source"] = (
+        "registry" if registered_token_hash else "independent_environment"
+    )
     return selected
+
+
+def _canonical_validation_answer(item: Mapping[str, Any], answer: Any) -> str | None:
+    try:
+        contract = normalize_generated_gold_contract(
+            str(item.get("question", "")),
+            str(answer),
+            str(item.get("answer_type", "text")),
+            item.get("tolerance"),
+        )
+    except Exception:
+        return None
+    return " ".join(str(contract["canonical_answer"]).split()).lower()
 
 
 def validate_evaluation_coverage(
@@ -298,12 +326,36 @@ def validate_evaluation_coverage(
                 for source in sources if isinstance(source, Mapping)
             ] if isinstance(sources, list) else []
             answers = [
-                " ".join(str(source.get("answer", "")).split()).lower()
+                _canonical_validation_answer(item, source.get("answer", ""))
                 for source in sources if isinstance(source, Mapping)
             ] if isinstance(sources, list) else []
-            gold = " ".join(
-                str(item.get("canonical_answer", item.get("gold_answer", ""))).split()
-            ).lower()
+            gold = _canonical_validation_answer(
+                item,
+                item.get("canonical_answer", item.get("gold_answer", "")),
+            )
+            model_sources = [
+                source for source in sources
+                if isinstance(source, Mapping)
+                and (
+                    str(source.get("model_id", "")).strip()
+                    or any(
+                        marker in str(
+                            source.get("method", source.get("source_type", ""))
+                        ).lower()
+                        for marker in ("model", "llm", "api")
+                    )
+                )
+            ] if isinstance(sources, list) else []
+            model_hashes = [
+                str(source.get("model_sha256", "")).strip().lower()
+                for source in model_sources
+            ]
+            independent_model_snapshots = (
+                all(str(source.get("model_id", "")).strip() for source in model_sources)
+                and all(model_hashes)
+                and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in model_hashes)
+                and len(set(model_hashes)) == len(model_hashes)
+            ) if model_sources else True
             independent_sources = (
                 len(source_ids) >= 2
                 and all(source_ids)
@@ -312,8 +364,10 @@ def validate_evaluation_coverage(
                 and len(set(methods)) >= 2
                 and all(actors)
                 and len(set(actors)) == len(actors)
-                and all(answers)
+                and gold is not None
+                and all(answer is not None for answer in answers)
                 and all(answer == gold for answer in answers)
+                and independent_model_snapshots
             )
             if status != "verified" or not independent_sources:
                 invalid_evidence.append(
@@ -328,28 +382,56 @@ def validate_evaluation_coverage(
                 or str(item.get("answer_type", "")) == "text"
             ):
                 annotations = evidence.get("human_annotations", [])
+                valid_annotations = [
+                    annotation for annotation in annotations
+                    if isinstance(annotation, Mapping)
+                ] if isinstance(annotations, list) else []
                 annotators = {
                     str(annotation.get("annotator_id", "")).strip()
-                    for annotation in annotations
-                    if isinstance(annotation, Mapping)
-                    and str(annotation.get("label", "")).strip()
+                    for annotation in valid_annotations
+                    if str(annotation.get("label", "")).strip()
                 }
                 labels = {
-                    str(annotation.get("label", "")).strip()
-                    for annotation in annotations
-                    if isinstance(annotation, Mapping)
-                    and str(annotation.get("label", "")).strip()
+                    str(annotation.get("label", "")).strip().lower()
+                    for annotation in valid_annotations
+                    if str(annotation.get("label", "")).strip()
                 }
-                adjudication = evidence.get("adjudication")
-                if len(annotators) < 2 or (
-                    len(labels) > 1
-                    and not (
-                        isinstance(adjudication, Mapping)
-                        and str(adjudication.get("label", "")).strip()
-                        and str(
-                            adjudication.get("adjudicator_id", "")
-                        ).strip()
+                annotation_answers = [
+                    _canonical_validation_answer(
+                        item,
+                        annotation.get(
+                            "answer",
+                            annotation.get("canonical_answer", ""),
+                        ),
                     )
+                    for annotation in valid_annotations
+                ]
+                adjudication = evidence.get("adjudication")
+                requires_adjudication = not (
+                    labels
+                    and labels <= ACCEPTED_VERIFICATION_LABELS
+                    and all(answer == gold for answer in annotation_answers)
+                )
+                adjudication_valid = (
+                    isinstance(adjudication, Mapping)
+                    and str(adjudication.get("label", "")).strip().lower()
+                    in ACCEPTED_VERIFICATION_LABELS
+                    and bool(str(adjudication.get("adjudicator_id", "")).strip())
+                    and str(adjudication.get("adjudicator_id", "")).strip()
+                    not in annotators
+                    and _canonical_validation_answer(
+                        item,
+                        adjudication.get(
+                            "answer",
+                            adjudication.get("canonical_answer", ""),
+                        ),
+                    ) == gold
+                )
+                if (
+                    len(valid_annotations) < 2
+                    or len(annotators) != len(valid_annotations)
+                    or len(annotators) < 2
+                    or (requires_adjudication and not adjudication_valid)
                 ):
                     invalid_evidence.append(
                         str(

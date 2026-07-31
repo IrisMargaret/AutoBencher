@@ -93,9 +93,9 @@ def main(argv=None) -> int:
                 "Official candidates overlap training/generation corpora: "
                 + ", ".join(leaking[:20])
             )
-        if not audit["all_independently_verified"]:
+        if not audit["all_release_verified"] or audit["unresolved_conflict_count"]:
             raise ValueError(
-                "Official candidates contain unresolved independent-solver conflicts"
+                "Official candidates contain unresolved solver/reviewer conflicts"
             )
         audit_path = output_path.with_suffix(".leakage_audit.json")
         atomic_json(audit, audit_path)
@@ -119,7 +119,9 @@ def main(argv=None) -> int:
                 "thresholds": audit["thresholds"],
                 "audit_report_sha256": file_sha256(audit_path),
                 "audit_report_path": audit_path.as_posix(),
-                "all_independently_verified": True,
+                "all_independently_verified": audit["all_independently_verified"],
+                "all_release_verified": audit["all_release_verified"],
+                "unresolved_conflict_count": audit["unresolved_conflict_count"],
             },
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -151,7 +153,7 @@ def main(argv=None) -> int:
         output,
     )
     print(json.dumps({"output": output.as_posix(), **audit}, ensure_ascii=False, indent=2))
-    return 0 if audit["all_independently_verified"] else 2
+    return 0 if audit["all_release_verified"] else 2
 
 
 if __name__ == "__main__":

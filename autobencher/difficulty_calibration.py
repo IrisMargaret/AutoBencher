@@ -109,6 +109,7 @@ def prepare_panel_schedule(
     prompt_path = root / "prompts" / "test_taker.txt"
     prompt_sha = file_sha256(prompt_path)
     models = []
+    seen_model_ids: set[str] = set()
     for model in panel_models:
         model_id = str(model.get("model_id", "")).strip()
         tier = str(model.get("tier", "")).strip()
@@ -117,6 +118,11 @@ def prepare_panel_schedule(
             raise DifficultyCalibrationError(
                 "Each panel model needs model_id, tier, and model_path."
             )
+        if model_id in seen_model_ids:
+            raise DifficultyCalibrationError(
+                f"Duplicate panel model_id: {model_id}"
+            )
+        seen_model_ids.add(model_id)
         snapshot = artifact_fingerprint(
             model_path,
             project_root=root,
@@ -455,6 +461,10 @@ def calibrate_difficulty(
     dataset_role: str,
     dataset_hash: str,
     panel_hash: str,
+    minimum_model_coverage: float = 0.80,
+    minimum_models_per_item: int = 3,
+    minimum_models_per_tier: int = 1,
+    maximum_missing_rate: float = 0.20,
 ) -> dict[str, Any]:
     """Estimate empirical difficulty and a frozen v2 weight candidate."""
 
@@ -471,7 +481,13 @@ def calibrate_difficulty(
     matrix = np.full((len(model_ids), len(item_ids)), np.nan)
     tiers: dict[str, str] = {}
     seen_pairs = set()
-    snapshot_by_model: dict[str, tuple[str, ...]] = {}
+    if not 0 < minimum_model_coverage <= 1:
+        raise DifficultyCalibrationError("minimum_model_coverage must be in (0,1]")
+    if minimum_models_per_item < 1 or minimum_models_per_tier < 1:
+        raise DifficultyCalibrationError("Panel minimum counts must be positive")
+    if not 0 <= maximum_missing_rate < 1:
+        raise DifficultyCalibrationError("maximum_missing_rate must be in [0,1)")
+    snapshot_by_model: dict[str, dict[str, Any]] = {}
     for row in responses:
         question_id = _question_id(row)
         model_id = str(row["model_id"])
@@ -485,15 +501,29 @@ def calibrate_difficulty(
             raise DifficultyCalibrationError(
                 f"Panel response lacks raw_response: {pair}"
             )
-        provenance_fields = (
-            "model_sha256",
-            "tokenizer_sha256",
-            "inference_prompt_sha256",
-            "decoding_config_sha256",
-            "provider_revision",
-        )
-        snapshot = tuple(str(row.get(field, "")).strip() for field in provenance_fields)
-        if not all(snapshot):
+        decoding_config = row.get("decoding_config")
+        if not isinstance(decoding_config, Mapping):
+            raise DifficultyCalibrationError(
+                f"Panel response lacks full decoding_config: {pair}"
+            )
+        decoding_config = dict(decoding_config)
+        decoding_hash = str(row.get("decoding_config_sha256", "")).strip()
+        if canonical_sha256(decoding_config) != decoding_hash:
+            raise DifficultyCalibrationError(
+                f"Panel response decoding config hash mismatch: {pair}"
+            )
+        snapshot = {
+            "model_tier": str(row.get("model_tier", "")).strip(),
+            "model_sha256": str(row.get("model_sha256", "")).strip(),
+            "tokenizer_sha256": str(row.get("tokenizer_sha256", "")).strip(),
+            "inference_prompt_sha256": str(
+                row.get("inference_prompt_sha256", "")
+            ).strip(),
+            "decoding_config": decoding_config,
+            "decoding_config_sha256": decoding_hash,
+            "provider_revision": str(row.get("provider_revision", "")).strip(),
+        }
+        if not all(value for key, value in snapshot.items() if key != "decoding_config"):
             raise DifficultyCalibrationError(
                 f"Panel response lacks immutable inference provenance: {pair}"
             )
@@ -517,16 +547,26 @@ def calibrate_difficulty(
     model_coverage = (~np.isnan(matrix)).mean(axis=1)
     item_coverage = (~np.isnan(matrix)).sum(axis=0)
     missing_rate = float(np.isnan(matrix).mean())
-    if np.any(model_coverage < 0.80):
-        raise DifficultyCalibrationError("Every panel model needs at least 80% item coverage")
-    if np.any(item_coverage < 3):
-        raise DifficultyCalibrationError("Every item needs at least three distinct model answers")
-    if missing_rate > 0.20:
-        raise DifficultyCalibrationError("Panel missing-response rate exceeds 20%")
+    if np.any(model_coverage < minimum_model_coverage):
+        raise DifficultyCalibrationError(
+            "Panel model coverage falls below the configured minimum"
+        )
+    if np.any(item_coverage < minimum_models_per_item):
+        raise DifficultyCalibrationError(
+            "Item model coverage falls below the configured minimum"
+        )
+    if missing_rate > maximum_missing_rate:
+        raise DifficultyCalibrationError(
+            "Panel missing-response rate exceeds the configured maximum"
+        )
     tier_counts = {tier: list(tiers.values()).count(tier) for tier in set(tiers.values())}
     if len(tier_counts) < 3:
         raise DifficultyCalibrationError(
             "Calibration panel needs at least three declared ability tiers"
+        )
+    if min(tier_counts.values()) < minimum_models_per_tier:
+        raise DifficultyCalibrationError(
+            "Ability-tier model count falls below the configured minimum"
         )
     accuracy = np.nanmean(matrix, axis=0)
     empirical = 1.0 - accuracy
@@ -598,7 +638,7 @@ def calibrate_difficulty(
         "model_count": len(model_ids),
         "model_ids": model_ids,
         "model_snapshots": {
-            model_id: dict(zip(provenance_fields, snapshot_by_model[model_id]))
+            model_id: snapshot_by_model[model_id]
             for model_id in model_ids
         },
         "panel_coverage": {
@@ -609,6 +649,12 @@ def calibrate_difficulty(
             "minimum_models_per_item": int(item_coverage.min()),
             "missing_rate": missing_rate,
             "tier_model_counts": dict(sorted(tier_counts.items())),
+            "acceptance_thresholds": {
+                "minimum_model_coverage": minimum_model_coverage,
+                "minimum_models_per_item": minimum_models_per_item,
+                "minimum_models_per_tier": minimum_models_per_tier,
+                "maximum_missing_rate": maximum_missing_rate,
+            },
         },
         "raw_response_records": [dict(row) for row in responses],
         "weights": {
@@ -692,6 +738,10 @@ def calibrate_from_files(
     responses_path: str | Path,
     *,
     dataset_role: str,
+    minimum_model_coverage: float = 0.80,
+    minimum_models_per_item: int = 3,
+    minimum_models_per_tier: int = 1,
+    maximum_missing_rate: float = 0.20,
 ) -> dict[str, Any]:
     return calibrate_difficulty(
         _load_jsonl(questions_path),
@@ -699,4 +749,8 @@ def calibrate_from_files(
         dataset_role=dataset_role,
         dataset_hash=file_sha256(questions_path),
         panel_hash=file_sha256(responses_path),
+        minimum_model_coverage=minimum_model_coverage,
+        minimum_models_per_item=minimum_models_per_item,
+        minimum_models_per_tier=minimum_models_per_tier,
+        maximum_missing_rate=maximum_missing_rate,
     )

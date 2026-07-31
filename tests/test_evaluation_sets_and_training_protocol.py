@@ -8,12 +8,13 @@ import yaml
 from autobencher.evaluation_sets import (
     file_sha256,
     resolve_active_evaluation_set,
+    validate_evaluation_coverage,
 )
 from autobencher.config import load_project_config
 from autobencher.evaluation_audit import audit_evaluation_questions
 from autobencher.fixed_benchmark import load_fixed_test_set
 from autobencher.training_protocol import split_by_template_cluster
-from autobencher.truth_solver import TruthSolver
+from autobencher.truth_solver import TruthSolveResult, TruthSolver
 
 
 def _registry(tmp_path):
@@ -151,6 +152,101 @@ def test_all_81_development_questions_have_independent_recomputation():
     assert audit["question_count"] == 81
     assert audit["all_independently_verified"] is True
     assert audit["status_counts"] == {"independently_verified": 81}
+
+
+class _UnavailableSolver:
+    def solve(self, _question):
+        return TruthSolveResult(
+            success=False,
+            canonical_answer=None,
+            answer_type=None,
+            failure_type="no_closed_solution",
+        )
+
+
+def test_release_audit_accepts_independent_human_adjudication():
+    root = Path(__file__).resolve().parents[1]
+    config, _ = load_project_config(
+        root / "configs" / "math_flywheel.yaml",
+        validate_paths=False,
+    )
+    item = {
+        "question_id": "proof-1",
+        "question": "Give a proof of the stated finite combinatorial identity.",
+        "gold_answer": "the identity follows by double counting",
+        "answer_type": "text",
+        "validation": {
+            "status": "verified",
+            "human_annotations": [
+                {
+                    "annotator_id": "reviewer-a",
+                    "label": "verified",
+                    "answer": "the identity follows by double counting",
+                },
+                {
+                    "annotator_id": "reviewer-b",
+                    "label": "reject",
+                    "answer": "a conflicting draft",
+                },
+            ],
+            "adjudication": {
+                "adjudicator_id": "reviewer-c",
+                "label": "verified",
+                "answer": "the identity follows by double counting",
+            },
+        },
+    }
+    audit = audit_evaluation_questions(
+        [item],
+        normalization_config=config,
+        solver=_UnavailableSolver(),
+    )
+    assert audit["all_independently_verified"] is False
+    assert audit["all_release_verified"] is True
+    assert audit["unresolved_conflict_count"] == 0
+    assert audit["items"][0]["status"] == "human_adjudicated_verified"
+
+
+def test_official_evidence_rejects_same_model_snapshot_twice():
+    common_hash = "a" * 64
+    item = {
+        "question_id": "q-source-independence",
+        "question": "Compute 1 + 1.",
+        "gold_answer": "2",
+        "answer_type": "integer",
+        "category": "Arithmetic",
+        "sub_category": "Integer Operations",
+        "difficulty": 1,
+        "reasoning_structure": "direct computation",
+        "validation": {
+            "status": "verified",
+            "sources": [
+                {
+                    "source_id": "call-1",
+                    "method": "model_generation",
+                    "model_id": "alias-a",
+                    "model_sha256": common_hash,
+                    "answer": "2",
+                },
+                {
+                    "source_id": "call-2",
+                    "method": "model_critique",
+                    "model_id": "alias-b",
+                    "model_sha256": common_hash,
+                    "answer": "2.0",
+                },
+            ],
+        },
+    }
+    with pytest.raises(ValueError, match="distinct non-empty"):
+        validate_evaluation_coverage(
+            [item],
+            {
+                "require_all_subcategories": False,
+                "minimum_questions_per_subcategory": 1,
+                "require_explicit_validation": True,
+            },
+        )
 
 
 def test_retention_holdout_has_paper_sized_dimension_coverage():

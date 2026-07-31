@@ -158,6 +158,7 @@ def test_difficulty_calibration_rejects_blind_data_and_freezes(tmp_path):
                             "model_sha256",
                             "tokenizer_sha256",
                             "inference_prompt_sha256",
+                            "decoding_config",
                             "decoding_config_sha256",
                             "provider_revision",
                         )
@@ -172,8 +173,39 @@ def test_difficulty_calibration_rejects_blind_data_and_freezes(tmp_path):
         panel_hash="panel-hash",
     )
     assert candidate["rubric_version"] == "calibrated_math_v2"
+    assert candidate["model_snapshots"]["small"]["decoding_config"] == {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "do_sample": False,
+    }
+    tampered_responses = json.loads(json.dumps(responses))
+    tampered_responses[0]["decoding_config"]["temperature"] = 0.7
+    with pytest.raises(DifficultyCalibrationError, match="config hash mismatch"):
+        calibrate_difficulty(
+            items,
+            tampered_responses,
+            dataset_role="difficulty_calibration",
+            dataset_hash="dataset-hash",
+            panel_hash="panel-hash",
+        )
     assert sum(candidate["weights"].values()) == pytest.approx(1.0)
     output = tmp_path / "calibrated_math_v2.json"
     frozen = freeze_calibration(candidate, output)
     assert frozen["status"] == "frozen"
     assert json.loads(output.read_text(encoding="utf-8"))["content_sha256"]
+
+
+def test_panel_schedule_rejects_duplicate_model_ids(tmp_path):
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text("{}", encoding="utf-8")
+    panel = [
+        {"model_id": "same", "tier": tier, "model_path": str(model_path)}
+        for tier in ("small", "medium", "strong")
+    ]
+    with pytest.raises(DifficultyCalibrationError, match="Duplicate panel model_id"):
+        prepare_panel_schedule(
+            [{"question_id": "q1"}],
+            panel,
+            dataset_role="difficulty_calibration",
+        )

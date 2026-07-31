@@ -53,6 +53,10 @@ def main() -> int:
     calibrate.add_argument("--output", required=True)
     calibrate.add_argument("--dataset-role", default="difficulty_calibration")
     calibrate.add_argument("--freeze", action="store_true")
+    calibrate.add_argument("--minimum-model-coverage", type=float, default=0.80)
+    calibrate.add_argument("--minimum-models-per-item", type=int, default=3)
+    calibrate.add_argument("--minimum-models-per-tier", type=int, default=1)
+    calibrate.add_argument("--maximum-missing-rate", type=float, default=0.20)
     args = parser.parse_args()
     output = _safe_output(args.output)
     questions = _safe_data_input(args.questions)
@@ -79,6 +83,10 @@ def main() -> int:
         questions,
         _safe_data_input(args.responses),
         dataset_role=args.dataset_role,
+        minimum_model_coverage=args.minimum_model_coverage,
+        minimum_models_per_item=args.minimum_models_per_item,
+        minimum_models_per_tier=args.minimum_models_per_tier,
+        maximum_missing_rate=args.maximum_missing_rate,
     )
     result = freeze_calibration(candidate, output) if args.freeze else candidate
     if not args.freeze:

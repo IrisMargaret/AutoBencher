@@ -18,7 +18,17 @@ from .truth_solver import TruthSolver
 from .similarity import build_similarity_batch
 
 
-AUDIT_ALGORITHM_VERSION = "evaluation_leakage_v3_template_ast_embedding"
+AUDIT_ALGORITHM_VERSION = "evaluation_leakage_v4_release_verification"
+
+ACCEPTED_HUMAN_VERIFICATION_LABELS = {
+    "accept",
+    "accepted",
+    "approve",
+    "approved",
+    "correct",
+    "pass",
+    "verified",
+}
 
 
 def math_structure_signature(question: Any) -> str:
@@ -189,6 +199,121 @@ def _question_hash(record: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _answers_match_contract(
+    answer: Any,
+    contract: Mapping[str, Any],
+    normalization_config: Mapping[str, Any],
+) -> bool:
+    if answer is None or not str(answer).strip():
+        return False
+    try:
+        candidate = normalize_generated_gold_contract(
+            "human verification answer",
+            str(answer),
+            str(contract["answer_type"]),
+            contract.get("tolerance"),
+        )
+    except Exception:
+        return False
+    return answers_equivalent(
+        candidate["canonical_answer"],
+        contract["canonical_answer"],
+        contract["answer_type"],
+        normalization_config,
+    )
+
+
+def _human_verification_resolution(
+    item: Mapping[str, Any],
+    contract: Mapping[str, Any] | None,
+    normalization_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the two-reviewer-plus-adjudication release fallback."""
+    evidence = item.get("validation", item.get("verification"))
+    annotations = (
+        evidence.get("human_annotations", [])
+        if isinstance(evidence, Mapping)
+        else []
+    )
+    if contract is None or not isinstance(annotations, list):
+        return {"valid": False, "reason": "missing_contract_or_annotations"}
+    parsed = []
+    for annotation in annotations:
+        if not isinstance(annotation, Mapping):
+            continue
+        annotator_id = str(annotation.get("annotator_id", "")).strip()
+        label = str(annotation.get("label", "")).strip().lower()
+        answer = annotation.get(
+            "answer",
+            annotation.get("canonical_answer"),
+        )
+        parsed.append(
+            {
+                "annotator_id": annotator_id,
+                "label": label,
+                "answer_matches_gold": _answers_match_contract(
+                    answer,
+                    contract,
+                    normalization_config,
+                ),
+            }
+        )
+    reviewer_ids = [row["annotator_id"] for row in parsed]
+    independent_reviewers = (
+        len(parsed) >= 2
+        and all(reviewer_ids)
+        and len(set(reviewer_ids)) == len(reviewer_ids)
+    )
+    unanimous_acceptance = independent_reviewers and all(
+        row["label"] in ACCEPTED_HUMAN_VERIFICATION_LABELS
+        and row["answer_matches_gold"]
+        for row in parsed
+    )
+    adjudication = (
+        evidence.get("adjudication")
+        if isinstance(evidence, Mapping)
+        else None
+    )
+    adjudication_valid = False
+    adjudicator_id = ""
+    if isinstance(adjudication, Mapping):
+        adjudicator_id = str(adjudication.get("adjudicator_id", "")).strip()
+        adjudication_valid = (
+            bool(adjudicator_id)
+            and adjudicator_id not in set(reviewer_ids)
+            and str(adjudication.get("label", "")).strip().lower()
+            in ACCEPTED_HUMAN_VERIFICATION_LABELS
+            and _answers_match_contract(
+                adjudication.get(
+                    "answer",
+                    adjudication.get("canonical_answer"),
+                ),
+                contract,
+                normalization_config,
+            )
+        )
+    valid = bool(unanimous_acceptance or (independent_reviewers and adjudication_valid))
+    return {
+        "valid": valid,
+        "independent_reviewer_count": len(set(reviewer_ids)) if all(reviewer_ids) else 0,
+        "unanimous_acceptance": bool(unanimous_acceptance),
+        "adjudication_required": not bool(unanimous_acceptance),
+        "adjudication_valid": bool(adjudication_valid),
+        "adjudicator_id_present": bool(adjudicator_id),
+        "reason": None if valid else "human_verification_unresolved",
+    }
+
+
+def _signature_similarity(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"[A-Za-z_]+|<=|>=|==|!=|[=+\-*/^<>]", left))
+    right_tokens = set(re.findall(r"[A-Za-z_]+|<=|>=|==|!=|[=+\-*/^<>]", right))
+    if not left_tokens and not right_tokens:
+        return 1.0
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
 def audit_evaluation_questions(
     questions: Iterable[Mapping[str, Any]],
     *,
@@ -196,6 +321,7 @@ def audit_evaluation_questions(
     solver: TruthSolver,
     training_records: Iterable[Mapping[str, Any]] = (),
     semantic_leakage_threshold: float = 0.82,
+    ast_leakage_threshold: float = 0.90,
     embedding_leakage_threshold: float = 0.90,
     require_embedding_audit: bool = False,
 ) -> dict[str, Any]:
@@ -274,10 +400,17 @@ def audit_evaluation_questions(
                     contract["answer_type"],
                     normalization_config,
                 )
+        human_resolution = _human_verification_resolution(
+            item,
+            contract,
+            normalization_config,
+        )
         if format_status == "failed":
             status = "format_rejected"
         elif solver_equivalence:
             status = "independently_verified"
+        elif human_resolution["valid"]:
+            status = "human_adjudicated_verified"
         elif truth.success:
             status = "conflict_requires_adjudication"
         else:
@@ -294,6 +427,15 @@ def audit_evaluation_questions(
         ast_structure = math_ast_signature(question)
         if ast_structure and ast_structure in training_ast_structures:
             leakage.append("training_math_ast_match")
+        max_ast_similarity = max(
+            (
+                _signature_similarity(ast_structure, training_ast)
+                for training_ast in training_ast_structures
+            ),
+            default=0.0,
+        )
+        if ast_structure and max_ast_similarity >= float(ast_leakage_threshold):
+            leakage.append("training_math_ast_near_match")
         closest_similarity = 0.0
         for training_question in training_questions:
             closest_similarity = max(
@@ -334,6 +476,7 @@ def audit_evaluation_questions(
                 },
                 "independent_solver": truth.to_dict(),
                 "solver_gold_equivalent": solver_equivalence,
+                "human_verification_resolution": human_resolution,
                 "curated_recomputation": recomputation,
                 "declared_validation_source": item.get(
                     "validation",
@@ -351,6 +494,7 @@ def audit_evaluation_questions(
                 ).hexdigest(),
                 "training_leakage_flags": sorted(set(leakage)),
                 "max_training_lexical_similarity": closest_similarity,
+                "max_training_math_ast_similarity": max_ast_similarity,
                 "max_training_embedding_similarity": max_embedding_similarity,
             }
         )
@@ -359,6 +503,7 @@ def audit_evaluation_questions(
         "audit_algorithm_version": AUDIT_ALGORITHM_VERSION,
         "thresholds": {
             "lexical": float(semantic_leakage_threshold),
+            "math_ast": float(ast_leakage_threshold),
             "embedding": float(embedding_leakage_threshold),
         },
         "embedding_audit_required": bool(require_embedding_audit),
@@ -367,6 +512,25 @@ def audit_evaluation_questions(
         "all_independently_verified": (
             bool(items)
             and status_counts == Counter({"independently_verified": len(items)})
+        ),
+        "all_release_verified": (
+            bool(items)
+            and sum(
+                status_counts[name]
+                for name in (
+                    "independently_verified",
+                    "human_adjudicated_verified",
+                )
+            )
+            == len(items)
+        ),
+        "unresolved_conflict_count": sum(
+            status_counts[name]
+            for name in (
+                "conflict_requires_adjudication",
+                "manual_review_required",
+                "format_rejected",
+            )
         ),
         "template_cluster_count": len(template_groups),
         "template_clusters_with_multiple_items": sum(
@@ -408,6 +572,8 @@ def assemble_official_set(
         "thresholds",
         "audit_report_sha256",
         "all_independently_verified",
+        "all_release_verified",
+        "unresolved_conflict_count",
         "leaking_question_count",
     }
     if required_audit_fields - set(audit):
@@ -415,9 +581,14 @@ def assemble_official_set(
             "Official release leakage audit is incomplete: "
             + ", ".join(sorted(required_audit_fields - set(audit)))
         )
-    if not audit["all_independently_verified"] or int(audit["leaking_question_count"]):
+    if (
+        not audit["all_release_verified"]
+        or int(audit["unresolved_conflict_count"])
+        or int(audit["leaking_question_count"])
+    ):
         raise ValueError(
-            "Official release requires all independent solutions to pass and zero leakage"
+            "Official release requires every item to pass independent solving or "
+            "two-reviewer adjudication, with zero unresolved conflicts and leakage"
         )
     spec = {
         "minimum_questions_per_subcategory": int(

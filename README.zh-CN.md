@@ -361,6 +361,8 @@ python calibrate_difficulty.py calibrate \
   --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
   --responses /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_responses.jsonl \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/calibrated_math_v2.json \
+  --minimum-model-coverage 0.80 --minimum-models-per-item 3 \
+  --minimum-models-per-tier 1 --maximum-missing-rate 0.20 \
   --freeze
 ```
 
@@ -372,7 +374,8 @@ Bootstrap 的题目难度标准误。模型数量较少时，2PL 只能解释为
 归一化值），维度缺失、非有限值或越界都会失败。论文指标使用逐题确定性交叉验证的
 out-of-fold 预测，不把全数据拟合指标冒充验证结果。重复的 model×item、覆盖不足或
 少于三个能力层都会失败；每条响应必须绑定模型目录 SHA、tokenizer SHA、提示词 SHA、
-解码配置 SHA、provider revision 和原始响应，防止相同 model ID 静默指向不同快照。
+完整解码配置及其 SHA、provider revision 和原始响应，防止相同 model ID 静默指向不同
+快照；面板配置中的重复 model ID 会在生成任务时直接失败。覆盖率门槛会写入冻结产物。
 
 ### 自适应难度与题目分配
 
@@ -602,9 +605,12 @@ python run_formal_evaluation.py \
   --run-id official-full-seed42
 ```
 
-正式集发布要求：每题独立重求解通过；两个验证来源的 source ID、方法和执行者均独立；
+正式集发布要求：每题必须“独立重求解通过”，或在求解器不覆盖/冲突时完成两名独立
+审题者复核，并由第三名独立仲裁者解决分歧；所有未解决冲突必须清零。两个验证来源的
+source ID、方法和执行者均须独立，模型来源还必须绑定不同的模型快照 SHA；
 通过参数模板、词法、数学 AST/方程结构与 embedding 泄漏审计；发布清单绑定候选语料、
-训练语料、算法版本、阈值与审计报告哈希。盲测发布还必须校验独立提供的 token SHA-256。
+训练语料、生成语料、算法版本、阈值与审计报告哈希。盲测发布必须校验预注册或独立
+提供的 token SHA-256，任意非空 token 不能解锁盲测。
 
 错题池采用 `active`、`mastered`、`stale`、`retired` 生命周期。每个新模型版本复测高
 优先级 active/stale 题；连续答对后转为 mastered，长期未复现则 stale/retired；只有

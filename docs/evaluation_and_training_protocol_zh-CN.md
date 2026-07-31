@@ -46,7 +46,9 @@ python prepare_evaluation_sets.py audit-development \
 报告逐题记录类型和格式检查、SymPy 独立重求解、solver 与 gold 等价性、原验证
 来源、模板签名、精确重复和训练泄漏标记。若仍有 `manual_review_required` 或
 `conflict_requires_adjudication`，命令返回退出码 2，不会把“gold 能解析”冒充
-“答案已独立重求解”。证明题和开放表达题必须保留两位标注者与仲裁结果。
+“答案已独立重求解”。正式发布逐题接受两种证据路径：独立求解通过；或两位身份独立
+的审题者给出答案，发生分歧时由第三位身份独立的仲裁者裁决。仲裁答案仍须与规范答案
+一致，且 `unresolved_conflict_count` 必须为零。
 
 ## 3. 组装正式 540 题
 
