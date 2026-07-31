@@ -7,7 +7,7 @@
 3. 从 SymPy 的求解与回代证据生成训练用 `gold_reasoning_summary`。
 4. 让原始 test-taker 在生成题上作答并构建小训练集。
 5. 执行一轮 QLoRA、合并模型。
-6. 使用同一份 27 题不可变固定集，分别评测原始模型和微调后模型。
+6. 使用同一份 81 题不可变固定集，分别评测原始模型和微调后模型。
 
 默认的 8 题功能测试配置是
 `configs/experiments/mini_flywheel_8.yaml`。它用于验证功能，不用于判断

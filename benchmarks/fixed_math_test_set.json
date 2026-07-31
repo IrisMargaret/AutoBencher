@@ -1,7 +1,40 @@
 {
-  "schema_version": "1.0",
-  "name": "autobencher_fixed_math_test_v1",
-  "description": "Immutable moderate-difficulty holdout covering every configured math subcategory.",
+  "schema_version": "2.0",
+  "name": "autobencher_project_native_fixed_math_v2",
+  "description": "Immutable 81-question project-native holdout with three questions for every configured mathematics subcategory.",
+  "license": "Project-authored benchmark; no external question copied.",
+  "design_references": [
+    {
+      "name": "GSM8K",
+      "url": "https://github.com/openai/grade-school-math",
+      "role": "multi-step arithmetic and word-problem design reference",
+      "questions_copied": false
+    },
+    {
+      "name": "MATH",
+      "url": "https://github.com/hendrycks/math",
+      "role": "subject coverage and symbolic-answer design reference",
+      "questions_copied": false
+    },
+    {
+      "name": "MMLU",
+      "url": "https://github.com/hendrycks/test",
+      "role": "broad mathematical competency design reference",
+      "questions_copied": false
+    },
+    {
+      "name": "DeepMind Mathematics Dataset",
+      "url": "https://github.com/google-deepmind/mathematics_dataset",
+      "role": "parameterized question generation design reference",
+      "questions_copied": false
+    }
+  ],
+  "selection_policy": {
+    "questions_per_subcategory": 3,
+    "difficulty_intent": "basic, intermediate, and advanced coverage",
+    "external_question_copying": false,
+    "training_use_prohibited": true
+  },
   "questions": [
     {
       "question_id": "fixed-001",
@@ -10,7 +43,14 @@
       "difficulty": 2,
       "question": "Compute -18 + 7 * 4.",
       "answer_type": "integer",
-      "canonical_answer": "10"
+      "canonical_answer": "10",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "66f680de4da99998da2ae7e6a860a5ec5fec16c0e136d150bcdfa2914e8c726e"
+      }
     },
     {
       "question_id": "fixed-002",
@@ -19,7 +59,14 @@
       "difficulty": 3,
       "question": "Compute 3/4 + 5/6 and give the result as a reduced fraction.",
       "answer_type": "rational",
-      "canonical_answer": "19/12"
+      "canonical_answer": "19/12",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5e9620e445b750b608b8e66ce43fa247221ff67baafa19169108fb34b9779dc9"
+      }
     },
     {
       "question_id": "fixed-003",
@@ -28,7 +75,14 @@
       "difficulty": 2,
       "question": "A shirt costs 80 dollars and is discounted by 15%. What is the sale price in dollars?",
       "answer_type": "decimal",
-      "canonical_answer": "68"
+      "canonical_answer": "68",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "8782e2bc2f3a2fd2457d931492124534dc7eab8e8e1718cb6a8d80def93d46db"
+      }
     },
     {
       "question_id": "fixed-004",
@@ -37,7 +91,14 @@
       "difficulty": 2,
       "question": "Solve for x: 5*x - 7 = 18.",
       "answer_type": "integer",
-      "canonical_answer": "5"
+      "canonical_answer": "5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "ae56ddf7d95dc0e248f4bf20f28e741185bcaa75499f85e0c25c5f5ced373133"
+      }
     },
     {
       "question_id": "fixed-005",
@@ -46,7 +107,14 @@
       "difficulty": 3,
       "question": "Solve the system for (x, y): 2*x + y = 11, x - y = 1.",
       "answer_type": "ordered_tuple",
-      "canonical_answer": "(4, 3)"
+      "canonical_answer": "(4, 3)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "c8b398e7f01f3650964adc3e22dfb71295ced2c60e37fab36d0fdf1412c4744f"
+      }
     },
     {
       "question_id": "fixed-006",
@@ -55,7 +123,14 @@
       "difficulty": 3,
       "question": "Find all real solutions of x^2 - 5*x + 6 = 0.",
       "answer_type": "set",
-      "canonical_answer": "{2, 3}"
+      "canonical_answer": "{2, 3}",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "a811581d2df2b10f9fae360133a8046ad28777744fa002a4b11dc3ee91b985e3"
+      }
     },
     {
       "question_id": "fixed-007",
@@ -64,7 +139,14 @@
       "difficulty": 2,
       "question": "A rectangle has length 8 cm and width 5 cm. What is its perimeter in centimeters?",
       "answer_type": "decimal",
-      "canonical_answer": "26"
+      "canonical_answer": "26",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5bd75a20590d6511396b54cb68ca25133671288b661c844536ecbef5622af5b8"
+      }
     },
     {
       "question_id": "fixed-008",
@@ -73,7 +155,14 @@
       "difficulty": 3,
       "question": "Find the exact volume of a cylinder with radius 2 and height 3.",
       "answer_type": "symbolic_expression",
-      "canonical_answer": "12*pi"
+      "canonical_answer": "12*pi",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "782b1bff7007543f7adcd58fe1186ac89e6f0929596e47b336db077bd7fa7033"
+      }
     },
     {
       "question_id": "fixed-009",
@@ -82,7 +171,14 @@
       "difficulty": 3,
       "question": "In a right triangle, the side opposite angle theta is 3 and the hypotenuse is 5. What is sin(theta)?",
       "answer_type": "rational",
-      "canonical_answer": "3/5"
+      "canonical_answer": "3/5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "e4af508a6d78fad3bf74221190d8117058ee72c0b464bc9ddd364cd4ae074c27"
+      }
     },
     {
       "question_id": "fixed-010",
@@ -91,7 +187,14 @@
       "difficulty": 2,
       "question": "A fair six-sided die is rolled once. What is the probability of rolling an even number?",
       "answer_type": "rational",
-      "canonical_answer": "1/2"
+      "canonical_answer": "1/2",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "de9edb2e54704f79a0ca3aab3fe6288615fd71d3c1b47abdf4232b240562610e"
+      }
     },
     {
       "question_id": "fixed-011",
@@ -100,7 +203,14 @@
       "difficulty": 3,
       "question": "How many unordered pairs can be selected from 8 distinct people?",
       "answer_type": "integer",
-      "canonical_answer": "28"
+      "canonical_answer": "28",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "b3a8b51c65336f5c0b398065414a92efd09dcf501fe5a263b29bf57a0206cb8b"
+      }
     },
     {
       "question_id": "fixed-012",
@@ -109,7 +219,14 @@
       "difficulty": 2,
       "question": "Find the arithmetic mean of 4, 7, 9, and 10.",
       "answer_type": "decimal",
-      "canonical_answer": "7.5"
+      "canonical_answer": "7.5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "3660ca2997a2190bd4953f02da71042bf49645dc333e8ef80b19f24865edae37"
+      }
     },
     {
       "question_id": "fixed-013",
@@ -118,7 +235,14 @@
       "difficulty": 2,
       "question": "A car travels at 60 km per hour for 2.5 hours. How many kilometers does it travel?",
       "answer_type": "decimal",
-      "canonical_answer": "150"
+      "canonical_answer": "150",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "91b8f2292a3f3f2d8d52c072e9c9d5fcf0db70a9f9b3dd87536db597c1c1b22f"
+      }
     },
     {
       "question_id": "fixed-014",
@@ -127,7 +251,14 @@
       "difficulty": 3,
       "question": "One pump fills a tank in 6 hours and another fills it in 3 hours. How many hours do they need together?",
       "answer_type": "decimal",
-      "canonical_answer": "2"
+      "canonical_answer": "2",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "3df52e709490dbb6a8d174b118dacf4400fdaf7914ccbaea79964027b668d5bd"
+      }
     },
     {
       "question_id": "fixed-015",
@@ -136,7 +267,14 @@
       "difficulty": 3,
       "question": "What simple interest is earned on 1200 dollars at 5% per year for 2 years?",
       "answer_type": "decimal",
-      "canonical_answer": "120"
+      "canonical_answer": "120",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "ad0739ce0a6d00743e1dee69d7274412ae3f04c9468ee4189b6b3eb111026c01"
+      }
     },
     {
       "question_id": "fixed-016",
@@ -145,7 +283,14 @@
       "difficulty": 2,
       "question": "Find the greatest common divisor of 84 and 126.",
       "answer_type": "integer",
-      "canonical_answer": "42"
+      "canonical_answer": "42",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "f3fb89b7c66480c928d9bfa0e9b939f3d8f5f08b8abfe6f8ceac39ba1fa829df"
+      }
     },
     {
       "question_id": "fixed-017",
@@ -154,7 +299,14 @@
       "difficulty": 3,
       "question": "Write the prime factorization of 360 as a product of prime powers.",
       "answer_type": "symbolic_expression",
-      "canonical_answer": "2^3*3^2*5"
+      "canonical_answer": "2^3*3^2*5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "3a7d47047c55095730f658281cccf000eafeeecd6fae015a96c66955993108a7"
+      }
     },
     {
       "question_id": "fixed-018",
@@ -163,7 +315,14 @@
       "difficulty": 3,
       "question": "What is the remainder when 7^4 is divided by 10?",
       "answer_type": "integer",
-      "canonical_answer": "1"
+      "canonical_answer": "1",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "bf82cb23885b45e853370f0b37715165b8a47cd7f5e926e57482c34b0e3f2a80"
+      }
     },
     {
       "question_id": "fixed-019",
@@ -172,7 +331,14 @@
       "difficulty": 4,
       "question": "Find the limit of (x^2 - 9)/(x - 3) as x approaches 3.",
       "answer_type": "integer",
-      "canonical_answer": "6"
+      "canonical_answer": "6",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "33cd44d36d2aeb2f6052aec292151bc880d1eaa71882fd159cf79814b8c8b5fa"
+      }
     },
     {
       "question_id": "fixed-020",
@@ -181,7 +347,14 @@
       "difficulty": 4,
       "question": "Differentiate x^3 - 4*x^2 + 2*x with respect to x.",
       "answer_type": "symbolic_expression",
-      "canonical_answer": "3*x^2 - 8*x + 2"
+      "canonical_answer": "3*x^2 - 8*x + 2",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "ae86f43d53159be48b34d6ae80efd83f10d9f4b6129a0ce3a149e676f000e0dc"
+      }
     },
     {
       "question_id": "fixed-021",
@@ -190,7 +363,14 @@
       "difficulty": 4,
       "question": "Integrate 3*x^2 + 2 with respect to x from 0 to 2.",
       "answer_type": "integer",
-      "canonical_answer": "12"
+      "canonical_answer": "12",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "25499a354d274cb1fd104c7ef5b4f8fd29e57dd605ffd95afa6634413dd97e93"
+      }
     },
     {
       "question_id": "fixed-022",
@@ -199,7 +379,14 @@
       "difficulty": 4,
       "question": "Multiply the matrices [[1, 2], [3, 4]] and [[2, 0], [1, 2]] in that order.",
       "answer_type": "matrix",
-      "canonical_answer": "[[4, 4], [10, 8]]"
+      "canonical_answer": "[[4, 4], [10, 8]]",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "0cf684e05c8f5055866f8dfeff065769b3e4ac31f689f3dc5646814c6419fe44"
+      }
     },
     {
       "question_id": "fixed-023",
@@ -208,7 +395,14 @@
       "difficulty": 4,
       "question": "Solve the system for (x, y, z): x + y + z = 6, x - y = 0, z = 2.",
       "answer_type": "ordered_tuple",
-      "canonical_answer": "(2, 2, 2)"
+      "canonical_answer": "(2, 2, 2)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "ce779be1d403429e30c998539027b34382fe4421839dc6daf9c61e8cd52d6f92"
+      }
     },
     {
       "question_id": "fixed-024",
@@ -217,7 +411,14 @@
       "difficulty": 3,
       "question": "Find the dot product of vectors (2, -1, 3) and (4, 5, -2).",
       "answer_type": "integer",
-      "canonical_answer": "-3"
+      "canonical_answer": "-3",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "6fa63715c55f75c772da3349319c12e5ea42bfa698230ca1bc2d0bce46ce164b"
+      }
     },
     {
       "question_id": "fixed-025",
@@ -226,7 +427,14 @@
       "difficulty": 5,
       "question": "A rectangle has width x, length x + 2, and area 48. If x is positive, find its perimeter.",
       "answer_type": "integer",
-      "canonical_answer": "28"
+      "canonical_answer": "28",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "0b9decf4628c352c9e26d8bc935ac3be8564ebd1709e2da3ead8e1063df62dc9"
+      }
     },
     {
       "question_id": "fixed-026",
@@ -235,7 +443,14 @@
       "difficulty": 3,
       "question": "Is the statement true or false: for every even integer n, n^2 is even?",
       "answer_type": "boolean",
-      "canonical_answer": "true"
+      "canonical_answer": "true",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "29e82dafe8b236365f6480b0a95d02d7c89c4dd6c5b9d2cc1ca75eaf5c1fc9d1"
+      }
     },
     {
       "question_id": "fixed-027",
@@ -244,7 +459,878 @@
       "difficulty": 4,
       "question": "Find the smallest positive integer that is divisible by both 6 and 8.",
       "answer_type": "integer",
-      "canonical_answer": "24"
+      "canonical_answer": "24",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5e71cb23af8e2d032a889318a4e61f8225199d3798fbd080e2958002bbc99a7e"
+      }
+    },
+    {
+      "question_id": "project-fixed-028",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 3,
+      "question": "Compute (-24)/6 + 5*(7 - 3).",
+      "answer_type": "integer",
+      "canonical_answer": "16",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "a8269f660552c489e73016abdc2d11ea201ab35a2142208a033a52f0c685214f"
+      }
+    },
+    {
+      "question_id": "project-fixed-029",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 4,
+      "question": "Compute |-17| - 3^2 + 2*(-4).",
+      "answer_type": "integer",
+      "canonical_answer": "0",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "22f14fc94c39c78a5964a62acf806cfd02b23bb33c97fe57a8cc6f38b1f0a0e4"
+      }
+    },
+    {
+      "question_id": "project-fixed-030",
+      "category": "Arithmetic",
+      "sub_category": "Fraction and Decimal Operations",
+      "difficulty": 3,
+      "question": "Compute 7/12 - 5/18 as a reduced fraction.",
+      "answer_type": "rational",
+      "canonical_answer": "11/36",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "b78c5c10921e477a99a958d1cb5f0401b66289cb69e25d69af5c5aa8b2f39dd3"
+      }
+    },
+    {
+      "question_id": "project-fixed-031",
+      "category": "Arithmetic",
+      "sub_category": "Fraction and Decimal Operations",
+      "difficulty": 4,
+      "question": "Compute 1.25 + 3/8 - 0.4 as a reduced fraction.",
+      "answer_type": "rational",
+      "canonical_answer": "49/40",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "49ec5ffda9bbc8a275f0ea401630068769b57446bce393235a4a537204ed1a9e"
+      }
+    },
+    {
+      "question_id": "project-fixed-032",
+      "category": "Arithmetic",
+      "sub_category": "Ratio and Percentage",
+      "difficulty": 3,
+      "question": "Red and blue beads are in the ratio 3:5. If there are 64 beads, how many are red?",
+      "answer_type": "integer",
+      "canonical_answer": "24",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "113c3eec86107024befda7fd0c5273b3d7a7ccc231bb1eaa3c2fd2cb7a69b778"
+      }
+    },
+    {
+      "question_id": "project-fixed-033",
+      "category": "Arithmetic",
+      "sub_category": "Ratio and Percentage",
+      "difficulty": 4,
+      "question": "A price of 250 dollars is increased by 20% and then reduced by 10%. What is the final price?",
+      "answer_type": "decimal",
+      "canonical_answer": "270",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "b730a4e73774fe79bc5bd26f645f5a11bad6c881c3956d481205881e5fbea966"
+      }
+    },
+    {
+      "question_id": "project-fixed-034",
+      "category": "Algebra",
+      "sub_category": "Linear Equations",
+      "difficulty": 3,
+      "question": "Solve for x: 3*(2*x - 5) + 4 = 5*x + 9.",
+      "answer_type": "integer",
+      "canonical_answer": "20",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "6b7845649d4225d2ad6414a306eaf766abc10c49fa59c03abfedd1099bc47913"
+      }
+    },
+    {
+      "question_id": "project-fixed-035",
+      "category": "Algebra",
+      "sub_category": "Linear Equations",
+      "difficulty": 5,
+      "question": "Solve for x: (x - 2)/3 + (x + 1)/2 = 7.",
+      "answer_type": "rational",
+      "canonical_answer": "43/5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "38bed08b17d4121cd1413f88828d9f2e315bc405136379e92d5ceff3d25e59c0"
+      }
+    },
+    {
+      "question_id": "project-fixed-036",
+      "category": "Algebra",
+      "sub_category": "Systems of Equations",
+      "difficulty": 3,
+      "question": "Solve for (x, y): 3*x + 2*y = 16 and x - y = 2.",
+      "answer_type": "ordered_tuple",
+      "canonical_answer": "(4, 2)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "636cf2700124f9e3c8ba4d7afc82e4c785eba1fc9c583f6ee4dd4c668f146c01"
+      }
+    },
+    {
+      "question_id": "project-fixed-037",
+      "category": "Algebra",
+      "sub_category": "Systems of Equations",
+      "difficulty": 5,
+      "question": "Solve for (x, y, z): x + y + z = 9, 2*x - y + z = 8, and x + 2*y - z = 3.",
+      "answer_type": "ordered_tuple",
+      "canonical_answer": "(3, 2, 4)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "269d71fa796b62bd7635393ef6a39568747a535972fdf799cb7df3d2b612e8cb"
+      }
+    },
+    {
+      "question_id": "project-fixed-038",
+      "category": "Algebra",
+      "sub_category": "Polynomials and Inequalities",
+      "difficulty": 4,
+      "question": "Solve the inequality x^2 + x - 12 < 0 over the real numbers.",
+      "answer_type": "interval",
+      "canonical_answer": "(-4, 3)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "23b9e99b5985b0434f6520cabe5d61359bf509bb4c85a5b423da3758e46d6ca1"
+      }
+    },
+    {
+      "question_id": "project-fixed-039",
+      "category": "Algebra",
+      "sub_category": "Polynomials and Inequalities",
+      "difficulty": 5,
+      "question": "Find all real roots of x^3 - 4*x = 0.",
+      "answer_type": "set",
+      "canonical_answer": "{-2, 0, 2}",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "79d32d4fb8df35737e74a13459897b312433b6e3915251508479ceca81309f78"
+      }
+    },
+    {
+      "question_id": "project-fixed-040",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Plane Geometry",
+      "difficulty": 3,
+      "question": "A triangle has base 12 and perpendicular height 7. Find its area.",
+      "answer_type": "decimal",
+      "canonical_answer": "42",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "6753393eae0ae08021d57b00ebd51c810b7566fb3587eaef64c31319a4f788d7"
+      }
+    },
+    {
+      "question_id": "project-fixed-041",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Plane Geometry",
+      "difficulty": 5,
+      "question": "Find the exact area of a 120-degree sector of a circle of radius 6.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "12*pi",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "8ddbb734eebde55be3723812f6a7c17e9435425a0748f3190423e66d97c91ba4"
+      }
+    },
+    {
+      "question_id": "project-fixed-042",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Solid Geometry",
+      "difficulty": 4,
+      "question": "Find the exact space diagonal of a rectangular prism with side lengths 4, 5, and 9.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "sqrt(122)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "f80402b0d668917383ca8df8ea9ab57a535f3cae01e6009f0395900c77f6c31f"
+      }
+    },
+    {
+      "question_id": "project-fixed-043",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Solid Geometry",
+      "difficulty": 5,
+      "question": "Find the exact surface area of a sphere of radius 3.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "36*pi",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "9ca62b75d4f5dc9108435f3c4026a09993e4fdc4b220e730b24d77ae6217f016"
+      }
+    },
+    {
+      "question_id": "project-fixed-044",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Trigonometric Reasoning",
+      "difficulty": 3,
+      "question": "In a right triangle, the side adjacent to theta is 12 and the hypotenuse is 13. Find cos(theta).",
+      "answer_type": "rational",
+      "canonical_answer": "12/13",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "3a191872f4e54cc94c1ed0f0c3f826ce35a72b9a6e1cf28b8b26569722b9c6b6"
+      }
+    },
+    {
+      "question_id": "project-fixed-045",
+      "category": "Geometry & Trigonometry",
+      "sub_category": "Trigonometric Reasoning",
+      "difficulty": 5,
+      "question": "Solve 2*sin(x) = 1 for x in the interval [0, 2*pi).",
+      "answer_type": "set",
+      "canonical_answer": "{pi/6, 5*pi/6}",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "fd00fe1e9710d332dfa0ca8799d864880e9e34f19acec12ee4ea74d3ba2d1a38"
+      }
+    },
+    {
+      "question_id": "project-fixed-046",
+      "category": "Probability & Statistics",
+      "sub_category": "Basic Probability",
+      "difficulty": 3,
+      "question": "A bag contains 5 red, 3 blue, and 2 green balls. One ball is drawn uniformly. What is the probability it is not red?",
+      "answer_type": "rational",
+      "canonical_answer": "1/2",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "fd9922ec0f4b391ccd95063718295d03461097ad4c3de84e1155cc529c432162"
+      }
+    },
+    {
+      "question_id": "project-fixed-047",
+      "category": "Probability & Statistics",
+      "sub_category": "Basic Probability",
+      "difficulty": 4,
+      "question": "Two fair six-sided dice are rolled. What is the probability that their sum is 9?",
+      "answer_type": "rational",
+      "canonical_answer": "1/9",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "7a72c9d38e1e5842802c38bf2f06d1a6a1a122a5bbe967bef1fa4939bade108e"
+      }
+    },
+    {
+      "question_id": "project-fixed-048",
+      "category": "Probability & Statistics",
+      "sub_category": "Combinatorics",
+      "difficulty": 3,
+      "question": "In how many orders can 6 distinct books be arranged on a shelf?",
+      "answer_type": "integer",
+      "canonical_answer": "720",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "b0048e0fff23a424f54bbc3bb41dbe68c07efa78752d7cc04f1ef16e0b4e211a"
+      }
+    },
+    {
+      "question_id": "project-fixed-049",
+      "category": "Probability & Statistics",
+      "sub_category": "Combinatorics",
+      "difficulty": 5,
+      "question": "How many 3-person committees can be chosen from 10 people if two specified people may not both serve?",
+      "answer_type": "integer",
+      "canonical_answer": "112",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "612421e1ac83ec10703b101e9b909fd18e63638fa68a66b41e91e8b891de9245"
+      }
+    },
+    {
+      "question_id": "project-fixed-050",
+      "category": "Probability & Statistics",
+      "sub_category": "Descriptive Statistics",
+      "difficulty": 3,
+      "question": "Find the median of 3, 5, 7, 11, and 14.",
+      "answer_type": "decimal",
+      "canonical_answer": "7",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "f2301fb660fab16658023adb47b4507fb6c99308325447dac97e6a3ebd81e523"
+      }
+    },
+    {
+      "question_id": "project-fixed-051",
+      "category": "Probability & Statistics",
+      "sub_category": "Descriptive Statistics",
+      "difficulty": 4,
+      "question": "Scores 70, 80, and 95 have frequencies 2, 3, and 1. Find the weighted mean as a reduced fraction.",
+      "answer_type": "rational",
+      "canonical_answer": "475/6",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "f7766814741610663e2f61c4e617b6050df999dc6e8d6dfc85c908c8d0debc6e"
+      }
+    },
+    {
+      "question_id": "project-fixed-052",
+      "category": "Word Problems",
+      "sub_category": "Rate and Distance",
+      "difficulty": 3,
+      "question": "A cyclist rides at 18 km/h for 1.75 hours. How far does the cyclist travel in kilometers?",
+      "answer_type": "decimal",
+      "canonical_answer": "31.5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "27dc685b8b1d2678030cacb16816f51e6a6ea0f15a816e8ea92bacf30c809270"
+      }
+    },
+    {
+      "question_id": "project-fixed-053",
+      "category": "Word Problems",
+      "sub_category": "Rate and Distance",
+      "difficulty": 4,
+      "question": "Two trains 400 km apart move toward each other at 72 km/h and 88 km/h. After how many hours do they meet?",
+      "answer_type": "decimal",
+      "canonical_answer": "2.5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "005fe4fca690aae37f2e31f7b51e122bc412cbedd56a145080d12c3027da0049"
+      }
+    },
+    {
+      "question_id": "project-fixed-054",
+      "category": "Word Problems",
+      "sub_category": "Work and Mixture",
+      "difficulty": 4,
+      "question": "One machine completes a job in 4 hours and another in 6 hours. How many hours do they need working together?",
+      "answer_type": "rational",
+      "canonical_answer": "12/5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "8a3578ab25a45fa3bd11b0173cf3c4c3b7239dabb9da8e3f7910234f3c91940c"
+      }
+    },
+    {
+      "question_id": "project-fixed-055",
+      "category": "Word Problems",
+      "sub_category": "Work and Mixture",
+      "difficulty": 5,
+      "question": "How many liters of 50% solution must be added to 10 liters of 20% solution to obtain a 32% solution?",
+      "answer_type": "rational",
+      "canonical_answer": "20/3",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "682b4ae4ab70b80d249d6eb5a45da3eaa4cba33b600f0047bee9201bd9822a4a"
+      }
+    },
+    {
+      "question_id": "project-fixed-056",
+      "category": "Word Problems",
+      "sub_category": "Financial Applications",
+      "difficulty": 3,
+      "question": "What interest is earned when 1000 dollars is compounded annually at 10% for 2 years?",
+      "answer_type": "decimal",
+      "canonical_answer": "210",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "13a002e2955fe2e30ddaaeed48e69b8c309cfcd6673b0c8041da28194c7d5958"
+      }
+    },
+    {
+      "question_id": "project-fixed-057",
+      "category": "Word Problems",
+      "sub_category": "Financial Applications",
+      "difficulty": 4,
+      "question": "A product has fixed cost 600 dollars, variable cost 8 dollars per unit, and selling price 20 dollars. How many units break even?",
+      "answer_type": "integer",
+      "canonical_answer": "50",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "e4777d9f6e7dccbeb9d8c9a18b4e2cde9b08af300ac73a69b894f758a9795d0c"
+      }
+    },
+    {
+      "question_id": "project-fixed-058",
+      "category": "Number Theory",
+      "sub_category": "Divisibility and Factors",
+      "difficulty": 3,
+      "question": "Find the least common multiple of 18 and 24.",
+      "answer_type": "integer",
+      "canonical_answer": "72",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5f0acabebf98ae9c96abf10b80c9ca19d42a1055671c3d9083c28bf9a7cc5bae"
+      }
+    },
+    {
+      "question_id": "project-fixed-059",
+      "category": "Number Theory",
+      "sub_category": "Divisibility and Factors",
+      "difficulty": 5,
+      "question": "How many positive divisors does 2^3 * 3^2 * 5 have?",
+      "answer_type": "integer",
+      "canonical_answer": "24",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "86e3b8415f6de54e7dc4a99c13421f85454eb809d968b1f39f29cfd89b002c2b"
+      }
+    },
+    {
+      "question_id": "project-fixed-060",
+      "category": "Number Theory",
+      "sub_category": "Prime Factorization",
+      "difficulty": 3,
+      "question": "Write 756 as a product of prime powers.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "2^2*3^3*7",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "9fb74b0e2e1b40e5d35a004850df5aa409ce3a10606e0f42afdcf5772801ad3a"
+      }
+    },
+    {
+      "question_id": "project-fixed-061",
+      "category": "Number Theory",
+      "sub_category": "Prime Factorization",
+      "difficulty": 5,
+      "question": "Find the least positive integer divisible by both 84 and 90.",
+      "answer_type": "integer",
+      "canonical_answer": "1260",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "c2e256701f0c37bd6bcaca78a09aabe0b5ebc122dcba2375c1de103ec405d41c"
+      }
+    },
+    {
+      "question_id": "project-fixed-062",
+      "category": "Number Theory",
+      "sub_category": "Modular Arithmetic",
+      "difficulty": 4,
+      "question": "Find the remainder when 3^100 is divided by 7.",
+      "answer_type": "integer",
+      "canonical_answer": "4",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5a5794328671fc0d01a46e432834a8b776d49c8ee5a8f57ef06064e32d7f972a"
+      }
+    },
+    {
+      "question_id": "project-fixed-063",
+      "category": "Number Theory",
+      "sub_category": "Modular Arithmetic",
+      "difficulty": 5,
+      "question": "Find the least nonnegative integer x satisfying 5*x = 3 (mod 11).",
+      "answer_type": "integer",
+      "canonical_answer": "5",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "84750fcbaf312409d0eb528b02bb215e521a5624c5e1ca7eed734121e9a13ef0"
+      }
+    },
+    {
+      "question_id": "project-fixed-064",
+      "category": "Calculus",
+      "sub_category": "Limits and Continuity",
+      "difficulty": 3,
+      "question": "Find the limit of (x^2 - 16)/(x - 4) as x approaches 4.",
+      "answer_type": "integer",
+      "canonical_answer": "8",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5374960b93bb7f6fada17e7a47838fbf24288c6f500f87364bcc05e129103e24"
+      }
+    },
+    {
+      "question_id": "project-fixed-065",
+      "category": "Calculus",
+      "sub_category": "Limits and Continuity",
+      "difficulty": 5,
+      "question": "Find the limit of sin(3*x)/x as x approaches 0.",
+      "answer_type": "integer",
+      "canonical_answer": "3",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "9cca400c031e200e275cf3e661819e5b5037361749ecff2c0d0cb842bac05b92"
+      }
+    },
+    {
+      "question_id": "project-fixed-066",
+      "category": "Calculus",
+      "sub_category": "Differentiation",
+      "difficulty": 4,
+      "question": "Differentiate x^4 - 3*x^2 + 5 with respect to x.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "4*x^3 - 6*x",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "df9a2d1cc32ddad2de47448982a9adda5fc32b1274d32c95ea84720f0f0b315f"
+      }
+    },
+    {
+      "question_id": "project-fixed-067",
+      "category": "Calculus",
+      "sub_category": "Differentiation",
+      "difficulty": 5,
+      "question": "Differentiate (x^2 + 1)*exp(x) with respect to x.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "(x^2 + 2*x + 1)*exp(x)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "44e371abb63f7ff10440e276c3d6f4673a10331787fcc99c28b6af7f35101bfe"
+      }
+    },
+    {
+      "question_id": "project-fixed-068",
+      "category": "Calculus",
+      "sub_category": "Integration",
+      "difficulty": 4,
+      "question": "Evaluate the integral of 2*x + 1 from x = 0 to x = 3.",
+      "answer_type": "integer",
+      "canonical_answer": "12",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "2b74ada8dd39201ab3997d7fa70fb90c5eae7ded3afb79ec0d926e1038402836"
+      }
+    },
+    {
+      "question_id": "project-fixed-069",
+      "category": "Calculus",
+      "sub_category": "Integration",
+      "difficulty": 5,
+      "question": "Evaluate the integral of sin(x) from x = 0 to x = pi.",
+      "answer_type": "integer",
+      "canonical_answer": "2",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "fdffc5177fce89ec9bfb1300fb13d4be44a374c24854241de3639a3f54cc21c2"
+      }
+    },
+    {
+      "question_id": "project-fixed-070",
+      "category": "Linear Algebra",
+      "sub_category": "Matrix Operations",
+      "difficulty": 4,
+      "question": "Compute A^2 for A = [[2, 1], [1, 2]].",
+      "answer_type": "matrix",
+      "canonical_answer": "[[5, 4], [4, 5]]",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "50365bca98609eb869de9395f91e4bdb20fd33882b06e0004e1b4a98cccd3dd8"
+      }
+    },
+    {
+      "question_id": "project-fixed-071",
+      "category": "Linear Algebra",
+      "sub_category": "Matrix Operations",
+      "difficulty": 5,
+      "question": "Find the inverse of [[2, 1], [5, 3]].",
+      "answer_type": "matrix",
+      "canonical_answer": "[[3, -1], [-5, 2]]",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "22f955cc0108bf6064a736d7acee61f41ccc8d616a01097b75e89b8c6ef8983e"
+      }
+    },
+    {
+      "question_id": "project-fixed-072",
+      "category": "Linear Algebra",
+      "sub_category": "Linear Systems",
+      "difficulty": 4,
+      "question": "Solve for (x, y, z): 2*x + y - z = 1, x - y + 2*z = 5, and 3*x + 2*y + z = 10.",
+      "answer_type": "ordered_tuple",
+      "canonical_answer": "(1, 2, 3)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "c419b5493d7fbd9fe5c4ef24e6c0ef6d3040c6d4609b9d9c82b7748f1699e335"
+      }
+    },
+    {
+      "question_id": "project-fixed-073",
+      "category": "Linear Algebra",
+      "sub_category": "Linear Systems",
+      "difficulty": 5,
+      "question": "Solve for (x, y, z): x + y + z = 3, x + 2*y + 3*z = 6, and 2*x - y + z = 2.",
+      "answer_type": "ordered_tuple",
+      "canonical_answer": "(1, 1, 1)",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "432c7ec9666966d78c71596a0b382bc70d98c64271e113e54d9bcb82e315cd62"
+      }
+    },
+    {
+      "question_id": "project-fixed-074",
+      "category": "Linear Algebra",
+      "sub_category": "Vectors and Vector Spaces",
+      "difficulty": 4,
+      "question": "Find the cross product (1, 2, 3) x (2, -1, 1).",
+      "answer_type": "vector",
+      "canonical_answer": "[5, 5, -5]",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "3dad10ba755cc06a6ca2b1ca611aa328501321eabb9cb25d05f58934c9f35295"
+      }
+    },
+    {
+      "question_id": "project-fixed-075",
+      "category": "Linear Algebra",
+      "sub_category": "Vectors and Vector Spaces",
+      "difficulty": 4,
+      "question": "Find the Euclidean norm of the vector (3, 4, 12).",
+      "answer_type": "integer",
+      "canonical_answer": "13",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "0d0cb5aa4f39f962e276b743916bb8c57ef42729c8cf65148aad6a207c8b7177"
+      }
+    },
+    {
+      "question_id": "project-fixed-076",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 4,
+      "question": "A circle has area 49*pi. Find its exact circumference.",
+      "answer_type": "symbolic_expression",
+      "canonical_answer": "14*pi",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "25bb67ab15f37a57ff94568c5f5ed7c5aa850824930b553f4214fbb1ca0a8cfa"
+      }
+    },
+    {
+      "question_id": "project-fixed-077",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 5,
+      "question": "An item priced at 150 dollars receives a 20% discount and then 8% sales tax. What is the final price?",
+      "answer_type": "decimal",
+      "canonical_answer": "129.6",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "9e4a26a8256c0bcdf931cf2dd9ace29f600219bc2d029baf46b55f33383fb9e3"
+      }
+    },
+    {
+      "question_id": "project-fixed-078",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 3,
+      "question": "True or false: the square of every odd integer is odd.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "3c4944398d2cdf62c206e7f3cc0809dc9585b354200b570be6cd7cc955af8201"
+      }
+    },
+    {
+      "question_id": "project-fixed-079",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 5,
+      "question": "True or false: if a*b is divisible by 6, then a or b must be divisible by 6.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "560547541314860da5b48b5019a1b5eb0b2dcf8063b5db2f0b4eb53c1cc85778"
+      }
+    },
+    {
+      "question_id": "project-fixed-080",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 4,
+      "question": "Find the least nonnegative integer n such that n leaves remainder 2 modulo 3 and remainder 3 modulo 5.",
+      "answer_type": "integer",
+      "canonical_answer": "8",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "5e6f853ccc9758b72e409134741d30957342dbdfb14217bd20e1bb33395ac6e1"
+      }
+    },
+    {
+      "question_id": "project-fixed-081",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 5,
+      "question": "How many ordered pairs (x, y) of nonnegative integers satisfy x + y = 10 and x is even?",
+      "answer_type": "integer",
+      "canonical_answer": "6",
+      "source_dataset": "project_native",
+      "construction_method": "human_curated_original_v2",
+      "verification": {
+        "backend": "human_curated_plus_typed_parser",
+        "canonical_parse_passed": true,
+        "question_sha256": "d3cef89dacc29fe9f4399bb3118c352e58f05dc244b9ab85c38356c6f29af92a"
+      }
     }
   ]
 }

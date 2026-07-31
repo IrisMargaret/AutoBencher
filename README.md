@@ -301,7 +301,7 @@ server run. This command is offline and does not access Hugging Face datasets:
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -333,10 +333,10 @@ python run_scripts.py math \
   --run-id quick-flywheel-27
 ```
 
-This profile evaluates the original model on the 27-question fixed set,
+This profile evaluates the original model on the 81-question fixed set,
 generates 27 adaptive training candidates, performs one QLoRA cycle when a
 complete 25/75 training block is available, and evaluates the merged model on
-the fixed set again.
+the same 81-question fixed set again.
 
 Complete data flywheel:
 
@@ -465,7 +465,10 @@ The server environment uses the immutable project-native
 `benchmarks/fixed_math_test_set.json` artifact under VEPFS. It is copied from
 the checked-in benchmark without any dataset download. GSM8K, Hendrycks MATH,
 MMLU, and other Hugging Face-hosted questions are excluded from the active
-evaluation chain.
+evaluation chain. The v2 benchmark contains 81 original questions: three for
+each of the 27 subcategories, spanning basic, intermediate, and advanced
+difficulty intent. GSM8K, MATH, MMLU, and DeepMind Mathematics inform only the
+capability distribution; no external question text is copied.
 
 - At startup, the original test taker is evaluated and its baseline accuracy is
   stored.

@@ -12,7 +12,8 @@
 
 当前唯一生效的题目文件是仓库内置的
 `benchmarks/fixed_math_test_set.json`。它覆盖配置中的 9 个数学大类和 27 个细分题型，
-只保存题目、规范答案、答案类型、难度与项目原生题号。
+共 81 题，每个细分题型固定 3 题，并覆盖基础、中等和较难层级。题集只保存原创
+题目、规范答案、答案类型、难度、构造与校验元数据及项目原生题号。
 
 GSM8K、Hendrycks MATH、MMLU 等 Hugging Face 托管数据集已经从生效配置、准备命令
 和文档入口中移除。加载器与安装器还会按 `source_dataset` 做拒绝检查，防止旧文件
@@ -38,7 +39,7 @@ export TMPDIR="$AUTOBENCHER_DATA_ROOT/temp"
 mkdir -p "$TMPDIR" "$AUTOBENCHER_DATA_ROOT/benchmarks"
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -48,11 +49,11 @@ python prepare_fixed_math_benchmark.py \
 jq '{
   name,
   question_count: (.questions | length)
-}' "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json"
+}' "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json"
 
 sha256sum \
-  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
-  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json.manifest.json"
+  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
+  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json.manifest.json"
 ```
 
 首次安装后，应把题集与清单 SHA-256 写入实验记录。后续实验复用同一文件。若确实

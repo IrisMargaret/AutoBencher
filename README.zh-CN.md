@@ -280,7 +280,7 @@ Beta-Binomial 后验会把这条观测计入难度 3，而不是错误地计入�
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -396,7 +396,9 @@ Cohen's kappa、证据覆盖率、Brier Score 和分验证层级准确率。只�
 服务器环境使用 VEPFS 中不可变的项目原生
 `benchmarks/fixed_math_test_set.json`。它由仓库内置基准离线复制得到，不执行数据集
 下载；GSM8K、Hendrycks MATH、MMLU 以及其他 Hugging Face 托管题目均不进入当前
-评测链路。
+评测链路。v2 固定集共 81 道原创题：27 个细分题型各 3 道，分别覆盖基础、中等和
+较难层级。GSM8K、MATH、MMLU 与 DeepMind Mathematics 只用于参考能力分布，不复制
+任何外部题面。
 
 - 启动时先评测原始 test-taker 并保存基线正确率。
 - 每轮训练成功后，用同一测试集评测合并后的新模型。

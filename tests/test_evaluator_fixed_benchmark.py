@@ -95,9 +95,18 @@ def test_fixed_test_covers_every_subcategory(config):
         (record["category"], record["sub_category"])
         for record in questions
     }
-    assert len(questions) == 27
+    assert len(questions) == 81
     assert observed == expected
     assert metadata["covered_subcategory_count"] == 27
+    assert all(
+        sum(
+            record["category"] == category
+            and record["sub_category"] == subcategory
+            for record in questions
+        )
+        == 3
+        for category, subcategory in expected
+    )
     assert len(metadata["sha256"]) == 64
 
 

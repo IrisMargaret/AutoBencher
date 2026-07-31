@@ -113,6 +113,21 @@ data flywheel.
   AutoBencher defaults to W&B offline mode; network upload requires explicitly
   selecting online mode in YAML.
 
+## Fixed-benchmark design references
+
+The project-native fixed benchmark uses the following projects only as
+references for capability coverage and question style:
+
+- OpenAI GSM8K: https://github.com/openai/grade-school-math
+- Hendrycks MATH: https://github.com/hendrycks/math
+- Hendrycks MMLU: https://github.com/hendrycks/test
+- DeepMind Mathematics Dataset:
+  https://github.com/google-deepmind/mathematics_dataset
+
+No question text, answer, solution, split, or dataset record from these
+projects is copied into `benchmarks/fixed_math_test_set.json`. All 81 benchmark
+questions are project-authored and carry `source_dataset: project_native`.
+
 ## Stanford DSPy
 
 - Project: https://github.com/stanfordnlp/dspy
