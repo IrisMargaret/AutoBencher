@@ -1198,15 +1198,21 @@ def judge_answer_semantics(
                 "prompt_sha256": prompt_sha256,
                 "deterministic_equivalent": bool(equivalence["equivalent"]),
             }
-        except (EvaluatorProtocolError, TypeError, ValueError) as exc:
+        except (
+            EvaluatorProtocolError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             last_error = exc
     return {
         "semantically_equivalent": False,
         "confidence": 0.0,
         "reason": (
-            f"judge protocol failure: {type(last_error).__name__}: {last_error}"
+            f"judge failure: {type(last_error).__name__}: {last_error}"
             if last_error is not None
-            else "judge protocol failure"
+            else "judge failure"
         ),
         "format_only_difference": False,
         "status": "failed",

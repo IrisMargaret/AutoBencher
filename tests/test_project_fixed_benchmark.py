@@ -8,6 +8,7 @@ import yaml
 from build_project_fixed_benchmark import build_payload
 from autobencher.fixed_benchmark import (
     PROJECT_FIXED_TEST_SET,
+    bootstrap_development_fixed_test_set,
     install_project_fixed_test_set,
     load_fixed_test_set,
 )
@@ -47,6 +48,33 @@ def test_project_fixed_installer_rejects_output_outside_data_root(tmp_path):
             tmp_path / "outside.json",
             allowed_data_root=tmp_path / "data",
         )
+
+
+def test_runtime_bootstrap_installs_only_managed_development_set(tmp_path):
+    target = tmp_path / "data" / "benchmarks" / "fixed_math_test_set_v3.json"
+    config = {
+        "fixed_test": {"enabled": True, "dataset_path": target.as_posix()},
+        "evaluation_sets": {"active_set": "development_regression_v3"},
+        "paths": {
+            "enforce_data_root": True,
+            "allowed_data_root": (tmp_path / "data").as_posix(),
+        },
+    }
+    result = bootstrap_development_fixed_test_set(
+        config,
+        project_root=tmp_path,
+    )
+    assert result["status"] == "installed"
+    assert target.read_bytes() == PROJECT_FIXED_TEST_SET.read_bytes()
+
+    config["evaluation_sets"]["active_set"] = "official_fixed_v1"
+    target.unlink()
+    result = bootstrap_development_fixed_test_set(
+        config,
+        project_root=tmp_path,
+    )
+    assert result["status"] == "not_project_development_set"
+    assert not target.exists()
 
 
 def test_all_active_configs_exclude_external_fixed_question_suite():

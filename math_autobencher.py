@@ -60,6 +60,7 @@ from autobencher.evaluator import (
     solve_with_privileged_python,
 )
 from autobencher.fixed_benchmark import (
+    bootstrap_development_fixed_test_set,
     fixed_benchmark_summary,
     load_fixed_test_set,
 )
@@ -6472,6 +6473,22 @@ def main():
     )
     try:
         cli_overrides = _configuration_cli_overrides(args, config_explicit)
+        bootstrap_config, _ = load_project_config(
+            config_path,
+            environment_path=args.environment,
+            cli_overrides=cli_overrides,
+            temporary_overrides=args.override,
+            validate_paths=False,
+        )
+        bootstrap = bootstrap_development_fixed_test_set(
+            bootstrap_config,
+            project_root=Path(__file__).resolve().parent,
+        )
+        if bootstrap["status"] in {"installed", "already_installed"}:
+            print(
+                "[Bootstrap] development_fixed_test="
+                f"{bootstrap['status']} path={bootstrap['output_path']}"
+            )
         resolved_config, provenance = load_project_config(
             config_path,
             environment_path=args.environment,
@@ -6484,7 +6501,7 @@ def main():
             args,
             resolved_config,
         )
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     print(
         "[Storage] output_root="

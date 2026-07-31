@@ -1,6 +1,10 @@
 import os
 
 import pytest
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 @pytest.mark.gpu
@@ -21,4 +25,3 @@ def test_gpu_environment_opt_in():
 )
 def test_api_environment_opt_in():
     assert os.getenv("DEEPSEEK_API_KEY") or os.getenv("ARK_API_KEY")
-

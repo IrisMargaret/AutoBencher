@@ -525,3 +525,28 @@ def test_semantic_judge_uses_strict_model_result(config):
     assert result["status"] == "success"
     assert result["semantically_equivalent"] is True
     assert result["prompt_version"]
+
+
+def test_semantic_judge_degrades_provider_failure_to_failed_judgment(config):
+    attempts = config["evaluator_pipeline"]["semantic_judge_attempts"]
+    with patch(
+        "autobencher.evaluator._model_json",
+        side_effect=RuntimeError(
+            "API request failed after 3 attempts: empty completion"
+        ),
+    ) as model_json:
+        result = judge_answer_semantics(
+            question="Compute 1/2.",
+            gold_answer="1/2",
+            predicted_answer="0.5",
+            answer_type="rational",
+            evaluator_info=("model", None, object()),
+            config=config,
+        )
+
+    assert model_json.call_count == attempts
+    assert result["status"] == "failed"
+    assert result["semantically_equivalent"] is False
+    assert result["deterministic_equivalent"] is True
+    assert result["attempt"] == attempts
+    assert "empty completion" in result["reason"]

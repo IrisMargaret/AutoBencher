@@ -123,6 +123,43 @@ def install_project_fixed_test_set(
     return {"status": status, **manifest}
 
 
+def bootstrap_development_fixed_test_set(
+    config: Mapping[str, Any],
+    *,
+    project_root: str | Path,
+) -> dict[str, Any]:
+    """Install the checked-in development set when a managed target is absent.
+
+    Official and blind evaluation sets are deliberately excluded: they must
+    only be released through their independent publication mechanisms.
+    """
+    if not bool(config["fixed_test"]["enabled"]):
+        return {"status": "disabled"}
+    active_set = str(config["evaluation_sets"]["active_set"])
+    if active_set != "development_regression_v3":
+        return {"status": "not_project_development_set", "active_set": active_set}
+    paths = config["paths"]
+    if not bool(paths.get("enforce_data_root")) or not paths.get("allowed_data_root"):
+        return {
+            "status": "unmanaged_storage",
+            "message": "Automatic installation requires paths.enforce_data_root=true",
+        }
+    configured = Path(str(config["fixed_test"]["dataset_path"])).expanduser()
+    target = (
+        configured.resolve()
+        if configured.is_absolute()
+        else (Path(project_root).resolve() / configured).resolve()
+    )
+    if target.is_file():
+        return {"status": "present", "output_path": target.as_posix()}
+    result = install_project_fixed_test_set(
+        target,
+        allowed_data_root=str(paths["allowed_data_root"]),
+        overwrite=False,
+    )
+    return {**result, "bootstrap": "development_regression_v3"}
+
+
 def resolve_fixed_test_path(
     config: Mapping[str, Any],
     project_root: str | Path | None = None,
