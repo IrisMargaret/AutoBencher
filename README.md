@@ -194,6 +194,7 @@ Important sections in `configs/math_flywheel.yaml`:
 | Section | Purpose |
 | --- | --- |
 | `study` | Sampling policy, named variant, baseline parameters, and component switches. |
+| `budget` | Fairness protocol, data/token/API/GPU caps, and optional pricing. |
 | `generation` | Allowed difficulty range 2–6 by default, reasoning limit, retries, quota repair. |
 | `difficulty` | Observable rubric, dimension weights, target tolerance, relabel/reject policy, and sampler score source. |
 | `evaluator_pipeline` | Prompt paths, Python timeout/size limits, retries, semantic-judge threshold. |
@@ -280,6 +281,26 @@ evenly by `experiment.num_iterations * experiment.max_cycles`; the runner
 refuses an inexact split instead of silently changing experimental cost. The requested alias
 `full_no_observed_difficulty_sampling` resolves to the project's canonical
 variant `full_no_observed_difficulty`.
+
+### Fair budgets and paper tables
+
+Every run writes `budget_ledger.json` from actual generator, SymPy, judge,
+deduplication, training, GPU, and timing events. `data_matched` accumulates
+filtered candidates until methods have the same training-sample count;
+`cost_matched` stops new generation calls at a shared token/API cap.
+
+```bash
+python -B run_study.py \
+  --suite configs/study_suites/fair_budget.yaml
+
+python -B aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/fair_budget_v1/experiment_index.json
+```
+
+Aggregation rebuilds `results_long.csv` from raw fixed-item comparisons and
+creates main, ablation, category, difficulty, efficiency, and significance
+tables with confidence intervals and effect sizes. See
+[Fair budgets and statistics](docs/fair_budget_and_statistics_zh-CN.md).
 
 ### Observable difficulty definition
 

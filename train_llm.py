@@ -73,6 +73,7 @@ def build_parser():
         help="Random seed used by Transformers and the training dataloader.",
     )
     parser.add_argument("--metrics_path")
+    parser.add_argument("--summary_path")
     parser.add_argument("--run_id", default="")
     parser.add_argument("--config_hash", default="")
     parser.add_argument("--wandb_enabled", action="store_true")
@@ -315,11 +316,13 @@ def train_and_merge(args, model_source, records):
     )
     from trl import SFTTrainer
 
+    training_process_started = time.monotonic()
     # Seed before model and adapter construction so LoRA initialization,
     # dataset iteration, and Trainer sampling share the experiment seed.
     set_seed(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for 4-bit bitsandbytes QLoRA")
+    torch.cuda.reset_peak_memory_stats()
     use_bfloat16 = bool(
         hasattr(torch.cuda, "is_bf16_supported")
         and torch.cuda.is_bf16_supported()
@@ -339,6 +342,17 @@ def train_and_merge(args, model_source, records):
         {"text": _format_record(tokenizer, record)}
         for record in records
     ]
+    dataset_token_count = sum(
+        len(
+            tokenizer(
+                item["text"],
+                add_special_tokens=False,
+                truncation=True,
+                max_length=args.max_seq_length,
+            )["input_ids"]
+        )
+        for item in formatted_records
+    )
     dataset = Dataset.from_list(formatted_records)
 
     quantization_config = BitsAndBytesConfig(
@@ -446,7 +460,11 @@ def train_and_merge(args, model_source, records):
             args.lora_rank,
             args.seed,
         )
-        trainer.train()
+        train_started = time.monotonic()
+        train_result = trainer.train()
+        train_elapsed = time.monotonic() - train_started
+        optimizer_steps = int(trainer.state.global_step)
+        train_metrics = dict(getattr(train_result, "metrics", {}) or {})
         trainer.model.save_pretrained(
             adapter_output,
             safe_serialization=True,
@@ -500,6 +518,23 @@ def train_and_merge(args, model_source, records):
         del base_model
         torch.cuda.empty_cache()
     LOGGER.info("stage=complete output=%s", output_path)
+    wall_time = time.monotonic() - training_process_started
+    return {
+        "schema_version": "1.0",
+        "final_training_sample_count": len(records),
+        "dataset_token_count": dataset_token_count,
+        "training_token_count": dataset_token_count * int(args.epoch),
+        "optimizer_steps": optimizer_steps,
+        "gpu_hours": wall_time / 3600.0,
+        "peak_gpu_memory_gb": (
+            torch.cuda.max_memory_allocated() / (1024 ** 3)
+        ),
+        "training_wall_time_seconds": wall_time,
+        "trainer_train_runtime_seconds": float(
+            train_metrics.get("train_runtime", train_elapsed)
+        ),
+        "epochs": int(args.epoch),
+    }
 
 
 def _is_complete_model_directory(output_path):
@@ -565,7 +600,17 @@ def main(argv=None):
             args.gpu,
             args.seed,
         )
-        train_and_merge(args, model_source, records)
+        summary = train_and_merge(args, model_source, records)
+        if args.summary_path:
+            summary_path = Path(args.summary_path).expanduser().resolve()
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = summary_path.with_name(summary_path.name + ".tmp")
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(summary, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, summary_path)
     except Exception as exc:
         error_text = re.sub(r"\s+", " ", str(exc)).strip()
         if "out of memory" in error_text.lower():

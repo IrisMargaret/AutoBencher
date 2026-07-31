@@ -7,6 +7,7 @@ import os, argparse, ast, json, tqdm
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 from time import sleep
@@ -476,6 +477,10 @@ def canonicalize_math_record(record, index=0):
         "config_hash",
         "prompt_hash",
         "cache_status",
+        "latency",
+        "input_tokens",
+        "output_tokens",
+        "token_count_source",
     )
     for field in preserved_fields:
         if field in record:
@@ -593,6 +598,7 @@ def generate_math_inference(
         for offset in range(0, len(pending), bsz):
             batch_indices = pending[offset:offset + bsz]
             prompts = [canonical_records[index]["prompt"] for index in batch_indices]
+            inference_started = time.monotonic()
             request_result = gen_from_prompt(
                 model=model_choice,
                 tokenizer=tokenizer_choice,
@@ -654,9 +660,20 @@ def generate_math_inference(
                     else False
                 ),
             )
+            batch_latency = time.monotonic() - inference_started
             for index, completion in zip(batch_indices, request_result.completions):
                 record = canonical_records[index]
                 raw_response = str(completion.text or "")
+                from autobencher.budget_ledger import estimate_tokens
+
+                record["latency"] = (
+                    batch_latency / len(batch_indices)
+                    if batch_indices
+                    else batch_latency
+                )
+                record["input_tokens"] = estimate_tokens(record["prompt"])
+                record["output_tokens"] = estimate_tokens(raw_response)
+                record["token_count_source"] = "estimated_utf8_bytes_v1"
                 if research_config:
                     parsed = parse_test_taker_output(
                         raw_response,
@@ -912,6 +929,7 @@ def call_local_finetune(
     lora_rank,
     output_path,
     metrics_path=None,
+    summary_path=None,
     run_id=None,
     config_hash=None,
     max_seq_length=None,
@@ -952,6 +970,7 @@ def call_local_finetune(
     ]
     _optional_arguments = (
         ("--metrics_path", metrics_path),
+        ("--summary_path", summary_path),
         ("--run_id", run_id),
         ("--config_hash", config_hash),
         ("--max_seq_length", max_seq_length),
@@ -981,6 +1000,7 @@ def call_local_finetune(
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
     environment["PYTHONUNBUFFERED"] = "1"
+    finetune_started = time.monotonic()
     try:
         process = subprocess.Popen(
             command,
@@ -1007,10 +1027,31 @@ def call_local_finetune(
                     output_lines.pop(0)
     returncode = process.wait()
     error_output = "\n".join(output_lines)
+    training_summary = None
+    if summary_path and Path(summary_path).is_file():
+        try:
+            training_summary = json.loads(
+                Path(summary_path).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            training_summary = None
+    if training_summary is None:
+        wall_time = time.monotonic() - finetune_started
+        training_summary = {
+            "schema_version": "1.0",
+            "status": "completed" if returncode == 0 else "failed",
+            "training_token_count": 0,
+            "optimizer_steps": 0,
+            "gpu_hours": wall_time / 3600.0,
+            "peak_gpu_memory_gb": None,
+            "training_wall_time_seconds": wall_time,
+            "metrics_complete": False,
+        }
     return {
         "success": returncode == 0,
         "returncode": returncode,
         "error": "" if returncode == 0 else error_output[-4000:],
+        "training_summary": training_summary,
     }
 
 

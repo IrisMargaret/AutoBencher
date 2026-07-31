@@ -1,0 +1,36 @@
+schema_version: "1.0"
+
+study_suite:
+  name: fair_budget_v1
+  environment: configs/environments/volcengine.yaml
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
+  allow_missing_artifacts: false
+  allow_dirty_worktree: false
+  methods:
+    - base
+    - random
+    - uniform
+    - error_only
+    - full
+    - full_no_hard_pool
+    - full_no_observed_difficulty_sampling
+  seeds:
+    - 42
+    - 123
+    - 2026
+  models:
+    - name: qwen2.5-7b-instruct
+      path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+  # This is a safety ceiling. data_matched can stop after reaching its sample
+  # target; cost_matched can stop earlier when its token cap is exhausted.
+  budgets:
+    - 13500
+  protocols:
+    - name: data_matched
+      target_training_samples: 1000
+    - name: cost_matched
+      max_generation_tokens: 1000000
+  common_overrides:
+    - experiment.num_iterations=5
+    - experiment.max_cycles=3
+

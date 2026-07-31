@@ -29,6 +29,22 @@ study:
     hard_pool_variants: true
     error_type_targeting: true
 
+budget:
+  # question_matched preserves the legacy planned-question comparison.
+  # Study suites may override this with data_matched or cost_matched.
+  protocol: question_matched
+  data_matched_target_samples: null
+  max_generation_tokens: null
+  max_total_api_calls: null
+  max_gpu_hours: null
+  pricing:
+    currency: USD
+    # Keep null until the exact provider contract and GPU accounting rate are
+    # declared. The ledger never invents a monetary estimate.
+    input_per_million_tokens: null
+    output_per_million_tokens: null
+    gpu_hour: null
+
 compatibility:
   use_helm: false
   preserve_existing_cli: true

@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 import yaml
 
 from autobencher.config import ProjectConfig, thaw_config
+from autobencher.budget_ledger import BudgetLedger, set_active_ledger
 from autobencher.fingerprints import (
     file_sha256,
     prompt_bundle_snapshot,
@@ -374,6 +375,12 @@ class ResearchRun:
         self.progress = ProgressManager(config)
         self.git_commit = git_commit(self.project_root)
         self.config_hash = str(provenance["config_hash"])
+        self.budget_ledger = BudgetLedger(
+            self.run_dir / "budget_ledger.json",
+            thaw_config(self.config["budget"]),
+            self.metadata(),
+        )
+        set_active_ledger(self.budget_ledger)
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -437,6 +444,7 @@ class ResearchRun:
                 "total_question_budget": study_snapshot[
                     "total_question_budget"
                 ],
+                "budget_protocol": str(self.config["budget"]["protocol"]),
                 "prompt_version": "content-addressed-v1",
                 "prompt_hash": prompt_bundle["combined_sha256"],
                 "prompt_bundle": prompt_bundle,
@@ -495,6 +503,7 @@ class ResearchRun:
         summary: Mapping[str, Any] | None = None,
     ) -> None:
         """Atomically close the run manifest without discarding start metadata."""
+        self.budget_ledger.finalize(status)
         manifest_path = self.run_dir / "run_manifest.json"
         existing: dict[str, Any] = {}
         if manifest_path.is_file():
@@ -512,3 +521,4 @@ class ResearchRun:
             },
             manifest_path,
         )
+        set_active_ledger(None)

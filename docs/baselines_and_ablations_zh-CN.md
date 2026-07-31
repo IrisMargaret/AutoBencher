@@ -141,6 +141,7 @@ git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
 | `pilot.yaml` | 七方法、两个 seed 的先导实验 |
 | `main.yaml` | 七方法 × 3 seeds × 1 model × 1350 总题目 |
 | `budget_curve.yaml` | 七方法在 135/270/675/1350 总题目下的预算曲线 |
+| `fair_budget.yaml` | Data-matched 与 Cost-matched × 七方法 × 三个 seed |
 
 先只展开矩阵并检查公平性，不启动模型：
 
@@ -279,7 +280,7 @@ jq '{
 
 ## 当前范围
 
-当前版本已实现多 seed/多模型/多预算矩阵、实验目录隔离、状态恢复、公平性拒绝、
-内容指纹和基础跨 seed 聚合。尚未实现 token/API 美元成本账本、paired bootstrap、
-McNemar 显著性检验和自动论文表格；这些能力可在现有 experiment index 上扩展，
-不需要改变七种方法定义。
+当前版本已实现多 seed/多模型/多预算/多公平协议矩阵、实验目录隔离、状态恢复、
+内容指纹、BudgetLedger、逐题长表、paired/分层 bootstrap、McNemar、Holm 校正和
+论文 CSV 表。金额估算仍要求实验者显式填写当期 API 与 GPU 单价；默认 `null` 是为了
+避免把过期价格写成实验事实。

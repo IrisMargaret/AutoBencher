@@ -304,6 +304,19 @@ SAFE_DEFAULTS: dict[str, Any] = {
             "error_type_targeting": True,
         },
     },
+    "budget": {
+        "protocol": "question_matched",
+        "data_matched_target_samples": None,
+        "max_generation_tokens": None,
+        "max_total_api_calls": None,
+        "max_gpu_hours": None,
+        "pricing": {
+            "currency": "USD",
+            "input_per_million_tokens": None,
+            "output_per_million_tokens": None,
+            "gpu_hour": None,
+        },
+    },
     "compatibility": {
         "use_helm": False,
         "preserve_existing_cli": True,
@@ -1419,6 +1432,78 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "must be eval when study.policy is base",
             mode,
         )
+    budget_protocol = _get(config, "budget.protocol")
+    if budget_protocol not in {
+        "question_matched",
+        "data_matched",
+        "cost_matched",
+    }:
+        raise ConfigurationError(
+            "budget.protocol",
+            "must be question_matched, data_matched, or cost_matched",
+            budget_protocol,
+        )
+    target_samples = _get(config, "budget.data_matched_target_samples")
+    if budget_protocol == "data_matched" and (
+        not isinstance(target_samples, int)
+        or isinstance(target_samples, bool)
+        or target_samples <= 0
+    ):
+        raise ConfigurationError(
+            "budget.data_matched_target_samples",
+            "must be a positive integer for data_matched",
+            target_samples,
+        )
+    if (
+        budget_protocol == "data_matched"
+        and bool(_get(config, "training_mix.strict_correct_incorrect_ratio"))
+        and int(target_samples) % 4
+    ):
+        raise ConfigurationError(
+            "budget.data_matched_target_samples",
+            "must be divisible by 4 for the configured 25/75 ratio",
+            target_samples,
+        )
+    generation_token_cap = _get(config, "budget.max_generation_tokens")
+    if budget_protocol == "cost_matched" and (
+        not isinstance(generation_token_cap, int)
+        or isinstance(generation_token_cap, bool)
+        or generation_token_cap <= 0
+    ):
+        raise ConfigurationError(
+            "budget.max_generation_tokens",
+            "must be a positive integer for cost_matched",
+            generation_token_cap,
+        )
+    for path in (
+        "budget.max_total_api_calls",
+        "budget.max_gpu_hours",
+    ):
+        value = _get(config, path)
+        if value is not None and (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise ConfigurationError(path, "must be null or positive", value)
+    for field in (
+        "input_per_million_tokens",
+        "output_per_million_tokens",
+        "gpu_hour",
+    ):
+        value = _get(config, f"budget.pricing.{field}")
+        if value is not None and (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise ConfigurationError(
+                f"budget.pricing.{field}",
+                "must be null or a non-negative finite number",
+                value,
+            )
     if study_policy == "base" and not bool(
         _get(config, "fixed_test.enabled")
     ):

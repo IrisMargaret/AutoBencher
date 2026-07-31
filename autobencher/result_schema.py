@@ -25,6 +25,7 @@ class ExperimentRecord:
     budget: int
     config_hash: str
     git_commit: str
+    budget_protocol: str = "question_matched"
     status: str = "pending"
     experiment_dir: str = ""
     command: list[str] = field(default_factory=list)

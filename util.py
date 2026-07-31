@@ -401,6 +401,7 @@ def gen_from_prompt(
     structured_backend="none",
     structured_fallback_backend="none",
     structured_required=False,
+    budget_role="other",
     request_timeout_seconds=None,
     max_num_retries=5,
     retry_delay_seconds=10,
@@ -564,6 +565,7 @@ def gen_from_prompt(
             request_timeout_seconds=request_timeout_seconds,
             max_num_retries=max_num_retries,
             retry_delay_seconds=retry_delay_seconds,
+            budget_role=budget_role,
         )
         return _as_request_result(texts)
 
@@ -646,6 +648,7 @@ def query_openai_compatible(
     top_p=1.0,
     request_timeout_seconds=None,
     retry_delay_seconds=10,
+    budget_role="other",
 ):
     results = []
     retry_count = max(1, int(max_num_retries))
@@ -671,6 +674,13 @@ def query_openai_compatible(
                 f"timeout={timeout_label}",
                 flush=True,
             )
+            ledger = None
+            if budget_role == "generation":
+                from autobencher.budget_ledger import active_ledger
+
+                ledger = active_ledger()
+                if ledger is not None:
+                    ledger.assert_generation_available()
             try:
                 request_kwargs = dict(
                     model=model,
@@ -695,6 +705,38 @@ def query_openai_compatible(
                 content = completion.choices[0].message.content
                 if not content or not content.strip():
                     raise ValueError("API returned an empty completion")
+                if ledger is not None:
+                    from autobencher.budget_ledger import estimate_tokens
+
+                    usage = getattr(completion, "usage", None)
+                    input_tokens = (
+                        getattr(usage, "prompt_tokens", None)
+                        or getattr(usage, "input_tokens", None)
+                    )
+                    output_tokens = (
+                        getattr(usage, "completion_tokens", None)
+                        or getattr(usage, "output_tokens", None)
+                    )
+                    exact_tokens = (
+                        input_tokens is not None
+                        and output_tokens is not None
+                    )
+                    ledger.record_generation_call(
+                        input_tokens=(
+                            int(input_tokens)
+                            if input_tokens is not None
+                            else estimate_tokens(prompt)
+                        ),
+                        output_tokens=(
+                            int(output_tokens)
+                            if output_tokens is not None
+                            else estimate_tokens(content)
+                        ),
+                        wall_time_seconds=time.monotonic() - started,
+                        retry=retry > 0,
+                        api_calls=1,
+                        exact_tokens=exact_tokens,
+                    )
                 print(
                     "[API] request_done "
                     f"model={model} prompt={prompt_index}/{len(prompt_lst)} "
@@ -705,6 +747,17 @@ def query_openai_compatible(
                 break
             except Exception as exc:
                 elapsed = time.monotonic() - started
+                if budget_role == "generation" and ledger is not None:
+                    from autobencher.budget_ledger import estimate_tokens
+
+                    ledger.record_generation_call(
+                        input_tokens=estimate_tokens(prompt),
+                        output_tokens=0,
+                        wall_time_seconds=elapsed,
+                        retry=retry > 0,
+                        api_calls=1,
+                        exact_tokens=False,
+                    )
                 if retry == retry_count - 1:
                     raise RuntimeError(
                         f"API request failed after {retry_count} attempts "

@@ -1,0 +1,28 @@
+schema_version: "1.0"
+
+study_suite:
+  name: fair_budget_smoke_v1
+  environment: configs/environments/volcengine.yaml
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
+  allow_missing_artifacts: false
+  allow_dirty_worktree: false
+  methods:
+    - base
+    - full
+  seeds:
+    - 42
+  models:
+    - name: qwen2.5-7b-instruct
+      path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+  budgets:
+    - 120
+  protocols:
+    - name: data_matched
+      target_training_samples: 4
+    - name: cost_matched
+      max_generation_tokens: 100000
+  common_overrides:
+    - experiment.num_iterations=1
+    - experiment.max_cycles=1
+    - coverage.default_min_quota=1
+

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -1127,6 +1128,7 @@ def judge_answer_semantics(
         },
     )
     last_error: Exception | None = None
+    judge_started = time.monotonic()
     for attempt in range(1, int(pipeline["semantic_judge_attempts"]) + 1):
         try:
             result = _model_json(
@@ -1160,6 +1162,27 @@ def judge_answer_semantics(
                 raise EvaluatorProtocolError(
                     "semantic judge confidence must be within [0, 1]"
                 )
+            from autobencher.budget_ledger import (
+                active_ledger,
+                estimate_tokens,
+            )
+
+            ledger = active_ledger()
+            if ledger is not None:
+                ledger.record_judge(
+                    success=True,
+                    attempts=attempt,
+                    input_tokens=estimate_tokens(prompt),
+                    output_tokens=estimate_tokens(
+                        json.dumps(result, ensure_ascii=False)
+                    ),
+                    wall_time_seconds=time.monotonic() - judge_started,
+                    api_calls=(
+                        attempt
+                        if evaluator_info[2] is not None
+                        else 0
+                    ),
+                )
             return {
                 **result,
                 "confidence": confidence,
@@ -1171,6 +1194,22 @@ def judge_answer_semantics(
             }
         except (EvaluatorProtocolError, TypeError, ValueError) as exc:
             last_error = exc
+    from autobencher.budget_ledger import active_ledger, estimate_tokens
+
+    ledger = active_ledger()
+    if ledger is not None:
+        ledger.record_judge(
+            success=False,
+            attempts=int(pipeline["semantic_judge_attempts"]),
+            input_tokens=estimate_tokens(prompt),
+            output_tokens=0,
+            wall_time_seconds=time.monotonic() - judge_started,
+            api_calls=(
+                int(pipeline["semantic_judge_attempts"])
+                if evaluator_info[2] is not None
+                else 0
+            ),
+        )
     return {
         "semantically_equivalent": False,
         "confidence": 0.0,

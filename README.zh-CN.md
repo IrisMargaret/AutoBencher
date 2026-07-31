@@ -186,6 +186,7 @@ CLI、`--override`。未知字段和不安全值会在加载模型前直接报�
 | 节点 | 用途 |
 | --- | --- |
 | `study` | 采样策略、命名 variant、基线参数与组件开关。 |
+| `budget` | 公平协议、数据/Token/API/GPU 上限与可选单价。 |
 | `generation` | 默认允许难度 2–6、推理步数、重试与 Quota 修复。 |
 | `difficulty` | 客观难度量表、维度权重、目标容差、重标/拒绝策略和采样分数来源。 |
 | `evaluator_pipeline` | 主求解、盲审、裁决和语义提示词路径，以及 Python 限制与重试。 |
@@ -267,6 +268,24 @@ suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
 改变实验成本。需求中的
 `full_no_observed_difficulty_sampling` 是入口别名，运行清单仍记录项目内部规范名
 `full_no_observed_difficulty`。
+
+### 公平预算与论文结果表
+
+每个运行都会从真实 generator、SymPy、Judge、去重、训练、GPU 和耗时事件生成
+`budget_ledger.json`。`data_matched` 累积过滤后的候选直到各方法训练样本数相同；
+`cost_matched` 在统一 Token/API 上限耗尽后停止新的生成调用。
+
+```bash
+python -B run_study.py \
+  --suite configs/study_suites/fair_budget.yaml
+
+python -B aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/fair_budget_v1/experiment_index.json
+```
+
+聚合器从固定集原始逐题记录重建 `results_long.csv`，自动输出主结果、消融、类别、
+难度、效率和显著性表，并包含置信区间与效应量。完整定义见
+[`docs/fair_budget_and_statistics_zh-CN.md`](docs/fair_budget_and_statistics_zh-CN.md)。
 
 ### 客观难度定义
 

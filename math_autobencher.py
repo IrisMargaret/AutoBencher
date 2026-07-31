@@ -31,6 +31,11 @@ from autobencher.config import (
     load_project_config,
     str2bool,
 )
+from autobencher.budget_ledger import (
+    BudgetExhausted,
+    active_ledger,
+    estimate_tokens,
+)
 from autobencher.attribution_eval import export_review_sample
 from autobencher.coverage import coverage_metrics, generation_schedule
 from autobencher.dataset import (
@@ -1661,6 +1666,7 @@ answers or question text:
     feedback = str(repair_feedback or "").strip()
     failures = []
     accepted_questions = []
+    raw_generator_output_count = 0
     for attempt in range(1, max_retry + 1):
         feedback_block = ""
         if feedback:
@@ -1671,6 +1677,10 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
 """
         response = ""
         try:
+            ledger = active_ledger()
+            if ledger is not None:
+                ledger.assert_generation_available()
+            generation_call_started = time.monotonic()
             request_result = gen_from_prompt(
                 model=agent_lm,
                 tokenizer=agent_tokenizer,
@@ -1682,15 +1692,28 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 process_func=None,
                 service=agent_client,
                 terminate_by_linebreak="no",
+                budget_role="generation",
                 **_request_control_kwargs(research_config),
             )
             response = request_result.completions[0].text
+            if ledger is not None and agent_client is None:
+                ledger.record_generation_call(
+                    input_tokens=estimate_tokens(context + feedback_block),
+                    output_tokens=estimate_tokens(response),
+                    wall_time_seconds=(
+                        time.monotonic() - generation_call_started
+                    ),
+                    retry=attempt > 1,
+                    api_calls=0,
+                    exact_tokens=False,
+                )
             extracted = extract_json_v2(response, None)
             items = extracted[0]
             if not isinstance(items, list) or not items:
                 raise ValueError(
                     "Expected a non-empty question-only JSON array"
                 )
+            raw_generator_output_count += len(items)
             format_errors = []
             normalized_items = []
             for item_index, item in enumerate(items):
@@ -2265,6 +2288,32 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
     failure_counts = defaultdict(int)
     for failure in failures:
         failure_counts[str(failure.get("failure_type", "unknown"))] += 1
+    ledger = active_ledger()
+    if ledger is not None:
+        difficulty_rejections = int(
+            failure_counts.get(
+                FailureType.DIFFICULTY_REJECTED.value,
+                0,
+            )
+        )
+        ledger.record_generation_batch(
+            requested=question_count,
+            output=raw_generator_output_count,
+            accepted=len(solved_questions),
+            failed=max(
+                max(
+                    0,
+                    raw_generator_output_count - len(solved_questions),
+                ),
+                sum(int(value) for value in failure_counts.values()),
+            ),
+            difficulty_rejections=difficulty_rejections,
+            sympy_validations=len(accepted_questions),
+            validation_failures=max(
+                0,
+                len(accepted_questions) - len(solved_questions),
+            ),
+        )
     dump_standard_json(
         {
             "gold_solver_backend": gold_solver_backend,
@@ -2272,7 +2321,7 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 len(accepted_questions) if evaluator_enabled else 0
             ),
             "requested_questions": question_count,
-            "generator_output_questions": len(accepted_questions),
+            "generator_output_questions": raw_generator_output_count,
             "valid_truth_solved_questions": len(solved_questions),
             "discarded_questions": max(
                 0,
@@ -2530,16 +2579,32 @@ def _ask_question_v3(
                     if error_counts
                     else None
                 )
-            question_json = _generate_question_text_with_truth(
-                plan_line,
-                agent_lm,
-                agent_tokenizer,
-                agent_client,
-                outfile_prefix2,
-                hard_sample_context=variant_context,
-                question_count=target_count,
-                research_config=research_config,
-            )
+            try:
+                question_json = _generate_question_text_with_truth(
+                    plan_line,
+                    agent_lm,
+                    agent_tokenizer,
+                    agent_client,
+                    outfile_prefix2,
+                    hard_sample_context=variant_context,
+                    question_count=target_count,
+                    research_config=research_config,
+                )
+            except BudgetExhausted as exc:
+                subcategory_shortfalls.append(
+                    {
+                        "category": plan_line["category"],
+                        "sub_category": plan_line["sub_category"],
+                        "requested": target_count,
+                        "verified": 0,
+                        "shortfall": target_count,
+                        "repair_rounds": 0,
+                        "reason": "cost_budget_exhausted",
+                        "detail": str(exc),
+                    }
+                )
+                print(f"[Budget] generation_stopped reason={exc}", flush=True)
+                break
             if len(question_json) == 1:
                 question_json = question_json[0]
             question_json = [
@@ -2578,25 +2643,32 @@ def _ask_question_v3(
             ):
                 repair_round += 1
                 missing_count = target_count - len(question_json)
-                question_json_new = _generate_question_text_with_truth(
-                    plan_line,
-                    agent_lm,
-                    agent_tokenizer,
-                    agent_client,
-                    outfile_prefix2,
-                    questions_old=question_json,
-                    hard_sample_context=variant_context,
-                    question_count=missing_count,
-                    research_config=research_config,
-                    repair_feedback=(
-                        f"The previous batch still has {missing_count} "
-                        "unfilled positions because some candidates were "
-                        "duplicate, malformed, ambiguous, or failed gold "
-                        "verification. Skip those failed candidates and "
-                        "generate new structurally different questions while "
-                        "preserving the assigned subcategory."
-                    ),
-                )
+                try:
+                    question_json_new = _generate_question_text_with_truth(
+                        plan_line,
+                        agent_lm,
+                        agent_tokenizer,
+                        agent_client,
+                        outfile_prefix2,
+                        questions_old=question_json,
+                        hard_sample_context=variant_context,
+                        question_count=missing_count,
+                        research_config=research_config,
+                        repair_feedback=(
+                            f"The previous batch still has {missing_count} "
+                            "unfilled positions because some candidates were "
+                            "duplicate, malformed, ambiguous, or failed gold "
+                            "verification. Skip those failed candidates and "
+                            "generate new structurally different questions while "
+                            "preserving the assigned subcategory."
+                        ),
+                    )
+                except BudgetExhausted as exc:
+                    print(
+                        f"[Budget] quota_repair_stopped reason={exc}",
+                        flush=True,
+                    )
+                    break
                 question_json_new = question_json_new[0]
                 repair_summary_records = read_json_records(
                     f"{outfile_prefix2}.generation_batch_summary.json"
@@ -3672,6 +3744,7 @@ def _study_runtime_metadata(config, question_budget=None):
         if question_budget is None
         else question_budget
     )
+    metadata["budget_protocol"] = str(config["budget"]["protocol"])
     return metadata
 
 
@@ -3698,6 +3771,7 @@ def _load_completed_cycle_history(output_root, cycles):
         if cycle.get("status") not in {
             "completed",
             "completed_without_training",
+            "collecting_data_budget",
         }:
             continue
         cycle_number = int(cycle.get("cycle", 0))
@@ -4692,6 +4766,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
             experiment_summary,
             args.research_run.run_dir / "experiment_summary.json",
         )
+        if hasattr(args.research_run, "budget_ledger"):
+            args.research_run.budget_ledger.record_accuracy(
+                baseline_accuracy,
+                baseline_accuracy,
+            )
         args.research_run.finalize(
             "completed",
             {
@@ -4730,10 +4809,16 @@ def _run_autobencher(args, agent_info, evaluator_info):
         list(cycles_by_number.values()),
     )
     for cycle_number in range(1, cycle_limit + 1):
+        data_matched_protocol = bool(
+            getattr(args, "research_run", None)
+            and args.research_run.config["budget"]["protocol"]
+            == "data_matched"
+        )
         prior_cycle = cycles_by_number.get(cycle_number)
         if prior_cycle and prior_cycle.get("status") in {
             "completed",
             "completed_without_training",
+            "collecting_data_budget",
         }:
             current_test_taker_model = prior_cycle.get(
                 "next_test_taker_model",
@@ -4861,11 +4946,16 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     / "training"
                 )
                 training_dir.mkdir(parents=True, exist_ok=True)
+                data_matched_protocol = (
+                    args.research_run.config["budget"]["protocol"]
+                    == "data_matched"
+                )
                 candidates = [
                     record
                     for iteration_records in history_dict
                     for record in iteration_records
-                    if int(record.get("cycle_id", -1))
+                    if data_matched_protocol
+                    or int(record.get("cycle_id", -1))
                     == int(cycle_number)
                 ]
                 selected, dataset_manifest, rejected = build_training_dataset(
@@ -4874,6 +4964,101 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     seed=int(args.research_run.config["experiment"]["seed"]),
                     holdout_records=fixed_questions,
                 )
+                if data_matched_protocol:
+                    target_samples = int(
+                        args.research_run.config["budget"][
+                            "data_matched_target_samples"
+                        ]
+                    )
+                    if len(selected) < target_samples:
+                        dataset_manifest["budget_protocol"] = "data_matched"
+                        dataset_manifest["data_matched_target_samples"] = (
+                            target_samples
+                        )
+                        dataset_manifest["data_matched_shortfall"] = (
+                            target_samples - len(selected)
+                        )
+                        if hasattr(args.research_run, "budget_ledger"):
+                            args.research_run.budget_ledger.record_dataset(
+                                dataset_manifest,
+                                [],
+                            )
+                        if cycle_number < cycle_limit:
+                            cycle_entry["status"] = "collecting_data_budget"
+                            cycle_entry["finetune_status"] = (
+                                "waiting_for_data_matched_target"
+                            )
+                            cycle_entry["training_sample_count"] = 0
+                            cycle_entry["completed_at"] = _utc_timestamp()
+                            _save_cycle_record(cycle_record_path, cycle_record)
+                            _save_research_cycle_manifest(args, cycle_entry)
+                            args.research_run.logger.event(
+                                "INFO",
+                                "BuildDataset",
+                                "data_budget_shortfall",
+                                (
+                                    f"eligible={len(selected)} "
+                                    f"target={target_samples}; "
+                                    "continuing generation"
+                                ),
+                                cycle=cycle_number,
+                                metrics=dataset_manifest,
+                            )
+                            continue
+                        raise RuntimeError(
+                            "Data-matched target was not reached before the "
+                            f"generation safety limit: eligible={len(selected)} "
+                            f"target={target_samples}"
+                        )
+                    correct_target = target_samples // 4
+                    wrong_target = target_samples - correct_target
+                    correct_records = [
+                        item
+                        for item in selected
+                        if item.get("_metadata", {}).get("training_source")
+                        == "correct_retention_samples"
+                    ]
+                    wrong_records = [
+                        item
+                        for item in selected
+                        if item.get("_metadata", {}).get("training_source")
+                        != "correct_retention_samples"
+                    ]
+                    if (
+                        target_samples % 4
+                        or len(correct_records) < correct_target
+                        or len(wrong_records) < wrong_target
+                    ):
+                        raise RuntimeError(
+                            "Data-matched target cannot preserve the configured "
+                            "25/75 correct/incorrect training ratio"
+                        )
+                    selected = [
+                        *correct_records[:correct_target],
+                        *wrong_records[:wrong_target],
+                    ]
+                    dataset_manifest.update(
+                        {
+                            "budget_protocol": "data_matched",
+                            "data_matched_target_samples": target_samples,
+                            "selected_count_before_budget_cap": int(
+                                dataset_manifest["selected_count"]
+                            ),
+                            "selected_count": len(selected),
+                            "selected_correct_count": correct_target,
+                            "selected_incorrect_count": wrong_target,
+                            "strict_ratio_satisfied": True,
+                            "selected_mix_counts": dict(
+                                Counter(
+                                    item.get("_metadata", {}).get(
+                                        "training_source",
+                                        "unknown",
+                                    )
+                                    for item in selected
+                                )
+                            ),
+                        }
+                    )
                 if (
                     selected
                     and bool(
@@ -4897,6 +5082,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 )
                 export_path = str(training_dir / "dataset_selected.jsonl")
                 exported_count = write_alpaca_jsonl(selected, export_path)
+                if hasattr(args.research_run, "budget_ledger"):
+                    args.research_run.budget_ledger.record_dataset(
+                        dataset_manifest,
+                        selected,
+                    )
                 atomic_json(
                     {
                         **args.research_run.metadata(),
@@ -5023,6 +5213,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
             )
             cycle_entry["finetune_status"] = "running"
             _save_cycle_record(cycle_record_path, cycle_record)
+            if hasattr(args.research_run, "budget_ledger"):
+                args.research_run.budget_ledger.assert_training_available()
             result = call_local_finetune(
                 current_test_taker_model,
                 export_path,
@@ -5033,6 +5225,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 finetune_output,
                 metrics_path=(
                     str(training_dir / "finetune_metrics.jsonl")
+                    if getattr(args, "research_run", None)
+                    else None
+                ),
+                summary_path=(
+                    str(training_dir / "training_cost_summary.json")
                     if getattr(args, "research_run", None)
                     else None
                 ),
@@ -5105,6 +5302,14 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     else 42
                 ),
             )
+            training_cost_summary = result.get("training_summary") or {}
+            if getattr(args, "research_run", None) and hasattr(
+                args.research_run,
+                "budget_ledger",
+            ):
+                args.research_run.budget_ledger.record_training(
+                    training_cost_summary
+                )
             if not result["success"]:
                 raise RuntimeError(
                     result.get("error")
@@ -5178,6 +5383,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         "seed": int(
                             args.research_run.config["experiment"]["seed"]
                         ),
+                        "training_cost": training_cost_summary,
                     },
                     training_dir / "finetune_summary.json",
                 )
@@ -5206,6 +5412,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
             cycle_record["active_test_taker_model"] = current_test_taker_model
             _save_cycle_record(cycle_record_path, cycle_record)
             _save_research_cycle_manifest(args, cycle_entry)
+            if data_matched_protocol:
+                break
         except (Exception, KeyboardInterrupt) as exc:
             cycle_entry["status"] = "failed"
             cycle_entry["failed_stage"] = stage
@@ -5299,6 +5507,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "active_test_taker_model": current_test_taker_model,
             "fixed_test": cycle_record.get("fixed_test", {}),
         }
+        if hasattr(args.research_run, "budget_ledger"):
+            args.research_run.budget_ledger.record_accuracy(
+                experiment_summary["baseline_accuracy"],
+                experiment_summary["final_accuracy"],
+            )
         atomic_json(
             experiment_summary,
             args.research_run.run_dir / "experiment_summary.json",

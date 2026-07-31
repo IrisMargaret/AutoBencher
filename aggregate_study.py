@@ -12,6 +12,7 @@ from typing import Any
 sys.dont_write_bytecode = True
 
 from autobencher.experiment import atomic_json
+from autobencher.paper_results import build_paper_tables
 from autobencher.result_schema import ExperimentRecord, validate_registry
 from autobencher.statistics import aggregate_records
 
@@ -40,6 +41,7 @@ def collect_results(index_path: Path) -> list[dict[str, Any]]:
                 "study_id": record.study_id,
                 "method": record.method,
                 "variant": record.variant,
+                "budget_protocol": record.budget_protocol,
                 "seed": record.seed,
                 "model": record.model,
                 "budget": record.budget,
@@ -59,6 +61,10 @@ def main() -> int:
     )
     parser.add_argument("--index", required=True)
     parser.add_argument("--output")
+    parser.add_argument(
+        "--results-dir",
+        help="Directory for paper-ready CSV tables; defaults to INDEX_DIR/results.",
+    )
     parser.add_argument(
         "--metric",
         choices=("baseline_accuracy", "final_accuracy", "accuracy_delta"),
@@ -100,6 +106,13 @@ def main() -> int:
         writer.writerows(records)
     print(f"Aggregate JSON: {output_path}")
     print(f"Per-experiment CSV: {csv_path}")
+    results_dir = (
+        Path(args.results_dir).expanduser().resolve()
+        if args.results_dir
+        else index_path.parent / "results"
+    )
+    paper = build_paper_tables(index_path, results_dir)
+    print(f"Paper tables: {paper['output_dir']}")
     return 0
 
 

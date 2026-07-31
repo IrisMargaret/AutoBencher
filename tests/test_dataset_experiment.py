@@ -457,6 +457,7 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
     assert run.run_dir.name == "test_1"
     assert (run.run_dir / "cycle").is_dir()
     assert (run.run_dir / "environment.json").is_file()
+    assert (run.run_dir / "budget_ledger.json").is_file()
     manifest_path = run.run_dir / "run_manifest.json"
     assert manifest_path.is_file()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -491,6 +492,7 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
         "semantic_judge",
         "combined_sha256",
     }
+    assert manifest["budget_protocol"] == "question_matched"
 
 
 def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(

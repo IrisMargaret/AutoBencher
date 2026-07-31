@@ -181,6 +181,26 @@ def test_registry_resume_skips_completed_and_continues_next(tmp_path):
         validate_registry(json.load(handle))
 
 
+def test_runner_expands_data_and_cost_matched_protocols(tmp_path):
+    suite = _write_suite(tmp_path)
+    payload = yaml.safe_load(suite.read_text(encoding="utf-8"))
+    payload["study_suite"]["protocols"] = [
+        {"name": "data_matched", "target_training_samples": 4},
+        {"name": "cost_matched", "max_generation_tokens": 1000},
+    ]
+    suite.write_text(
+        yaml.safe_dump(payload, sort_keys=False),
+        encoding="utf-8",
+    )
+    plan = StudyRunner(suite, project_root=ROOT).build_plan()
+    assert len(plan) == 14
+    assert {item.budget_protocol for item in plan} == {
+        "data_matched",
+        "cost_matched",
+    }
+    assert len({item.experiment_dir for item in plan}) == 14
+
+
 def test_fairness_rejects_non_strategy_training_change(tmp_path):
     unfair_config = tmp_path / "unfair_random.yaml"
     unfair_config.write_text(

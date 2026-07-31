@@ -89,6 +89,16 @@ def _model_entry(value: Any) -> dict[str, str]:
     )
 
 
+def _protocol_entry(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {"name": value}
+    if isinstance(value, Mapping) and value.get("name"):
+        return dict(value)
+    raise StudyConfigurationError(
+        "Each protocol must be a string or a mapping with a name."
+    )
+
+
 def _override(path: str, value: Any) -> str:
     encoded = yaml.safe_dump(
         value,
@@ -199,6 +209,13 @@ class StudyRunner:
         seeds = [int(value) for value in self.suite["seeds"]]
         models = [_model_entry(value) for value in self.suite["models"]]
         budgets = list(self.suite["budgets"])
+        protocols = [
+            _protocol_entry(value)
+            for value in self.suite.get(
+                "protocols",
+                [{"name": "question_matched"}],
+            )
+        ]
         if not all((methods, seeds, models, budgets)):
             raise StudyConfigurationError(
                 "methods, seeds, models, and budgets must be non-empty"
@@ -218,62 +235,89 @@ class StudyRunner:
                 )
                 for seed in seeds:
                     for raw_budget in budgets:
-                        budget = parse_budget(
-                            raw_budget,
-                            int(base_config["experiment"]["num_iterations"]),
-                            int(base_config["experiment"]["max_cycles"]),
-                        )
-                        experiment_dir = (
-                            self.study_root
-                            / _slug(model["name"])
-                            / method
-                            / f"seed_{seed}"
-                            / f"budget_{budget.total_questions}"
-                        )
-                        overrides = [
+                        for protocol in protocols:
+                            protocol_name = str(protocol["name"])
+                            budget = parse_budget(
+                                raw_budget,
+                                int(base_config["experiment"]["num_iterations"]),
+                                int(base_config["experiment"]["max_cycles"]),
+                            )
+                            experiment_dir = (
+                                self.study_root
+                                / _slug(model["name"])
+                                / protocol_name
+                                / method
+                                / f"seed_{seed}"
+                                / f"budget_{budget.total_questions}"
+                            )
+                            overrides = [
                             *self._common_overrides(),
                             _override("experiment.seed", seed),
                             *budget.overrides(),
+                            _override("budget.protocol", protocol_name),
                             _override(
                                 "models.test_taker.model_path",
                                 model["path"],
                             ),
-                        ]
-                        for field in RUNTIME_PATH_FIELDS:
-                            overrides.append(
+                            ]
+                            if protocol_name == "data_matched":
+                                overrides.append(
+                                    _override(
+                                        "budget.data_matched_target_samples",
+                                        int(protocol["target_training_samples"]),
+                                    )
+                                )
+                            if protocol_name == "cost_matched":
+                                overrides.append(
+                                    _override(
+                                        "budget.max_generation_tokens",
+                                        int(protocol["max_generation_tokens"]),
+                                    )
+                                )
+                                if protocol.get("max_total_api_calls") is not None:
+                                    overrides.append(
+                                        _override(
+                                            "budget.max_total_api_calls",
+                                            int(protocol["max_total_api_calls"]),
+                                        )
+                                    )
+                            for field in RUNTIME_PATH_FIELDS:
+                                overrides.append(
                                 _override(
                                     f"paths.{field}",
                                     str(experiment_dir / field),
                                 )
-                            )
-                        overrides.append(
+                                )
+                            overrides.append(
                             _override(
                                 "paths.outfile_prefix",
                                 str(experiment_dir / "legacy" / "output"),
                             )
-                        )
-                        config, provenance = load_resolved_config(
+                            )
+                            config, provenance = load_resolved_config(
                             config_path,
                             environment,
                             temporary_overrides=overrides,
                             validate_paths=False,
-                        )
-                        identity = {
+                            )
+                            identity = {
                             "suite": self.name,
                             "method": method,
                             "variant": str(config["study"]["variant"]),
+                            "budget_protocol": protocol_name,
                             "seed": seed,
                             "model": model["name"],
                             "budget": budget.total_questions,
                             "config_hash": provenance["config_hash"],
                             "git_commit": current_commit,
-                        }
-                        study_id = (
+                            }
+                            study_id = (
                             f"{_slug(self.name)}-{_slug(model['name'])}-"
-                            f"{method}-s{seed}-b{budget.total_questions}-"
+                            f"{protocol_name}-{method}-s{seed}-"
+                            f"b{budget.total_questions}-"
                             f"{canonical_sha256(identity)[:10]}"
-                        )
-                        command = [
+                            )
+                            command = [
                             sys.executable,
                             "-B",
                             str(self.project_root / "math_autobencher.py"),
@@ -281,10 +325,10 @@ class StudyRunner:
                             "no",
                             "--config",
                             str(config_path),
-                        ]
-                        if environment:
-                            command.extend(["--environment", str(environment)])
-                        command.extend(
+                            ]
+                            if environment:
+                                command.extend(["--environment", str(environment)])
+                            command.extend(
                             [
                                 "--run_id",
                                 study_id,
@@ -293,15 +337,15 @@ class StudyRunner:
                                 "--override",
                                 *overrides,
                             ]
-                        )
-                        allow_missing = bool(
+                            )
+                            allow_missing = bool(
                             self.suite.get("allow_missing_artifacts", False)
-                        )
-                        fixed_path = resolve_project_path(
+                            )
+                            fixed_path = resolve_project_path(
                             self.project_root,
                             str(config["fixed_test"]["dataset_path"]),
-                        )
-                        fingerprints = {
+                            )
+                            fingerprints = {
                             "base_model": self._artifact(
                                 str(config["models"]["test_taker"]["model_path"]),
                                 allow_missing,
@@ -317,8 +361,8 @@ class StudyRunner:
                             "training_config_sha256": canonical_sha256(
                                 thaw_config(config["finetune"])
                             ),
-                        }
-                        record = ExperimentRecord(
+                            }
+                            record = ExperimentRecord(
                             study_id=study_id,
                             method=method,
                             variant=str(config["study"]["variant"]),
@@ -327,12 +371,13 @@ class StudyRunner:
                             budget=budget.total_questions,
                             config_hash=str(provenance["config_hash"]),
                             git_commit=current_commit,
+                            budget_protocol=protocol_name,
                             experiment_dir=str(experiment_dir),
                             command=command,
                             fingerprints=fingerprints,
-                        )
-                        records.append(record)
-                        resolved_by_id[study_id] = config
+                            )
+                            records.append(record)
+                            resolved_by_id[study_id] = config
         self._validate_isolation(records)
         self._validate_fairness(records, resolved_by_id)
         return records
@@ -364,9 +409,19 @@ class StudyRunner:
         records: list[ExperimentRecord],
         configs: Mapping[str, Mapping[str, Any]],
     ) -> None:
-        groups: dict[tuple[str, int, int], list[ExperimentRecord]] = defaultdict(list)
+        groups: dict[
+            tuple[str, str, int, int],
+            list[ExperimentRecord],
+        ] = defaultdict(list)
         for record in records:
-            groups[(record.model, record.seed, record.budget)].append(record)
+            groups[
+                (
+                    record.model,
+                    record.budget_protocol,
+                    record.seed,
+                    record.budget,
+                )
+            ].append(record)
         for key, group in groups.items():
             model_hashes = {
                 item.fingerprints["base_model"]["sha256"] for item in group
