@@ -37,3 +37,13 @@ fixed_test:
   enabled: true
   evaluate_baseline: true
   evaluate_after_each_training_cycle: false
+
+evaluation_provenance:
+  require_checkpoint_binding: true
+  execution_policy: eval_only
+  evaluated_method: null
+  source_study_id: null
+  source_run_id: null
+  source_seed: null
+  checkpoint_path: null
+  checkpoint_sha256: null

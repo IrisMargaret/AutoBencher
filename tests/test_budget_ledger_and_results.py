@@ -5,8 +5,15 @@ import json
 from pathlib import Path
 
 import pytest
+from unittest.mock import Mock
 
-from autobencher.budget_ledger import BudgetExhausted, BudgetLedger
+import util
+
+from autobencher.budget_ledger import (
+    BudgetExhausted,
+    BudgetLedger,
+    set_active_ledger,
+)
 from autobencher.config import ConfigurationError, load_resolved_config
 from autobencher.paper_results import build_paper_tables
 from autobencher.result_schema import ExperimentRecord
@@ -14,6 +21,7 @@ from autobencher.statistics import (
     holm_correction,
     mcnemar_test,
     paired_bootstrap,
+    summarize_values,
 )
 from artifact_fixtures import write_completed_run
 
@@ -25,7 +33,7 @@ def _ledger_config(protocol="question_matched"):
     return {
         "protocol": protocol,
         "data_matched_target_samples": 4 if protocol == "data_matched" else None,
-        "max_generation_tokens": 10 if protocol == "cost_matched" else None,
+        "max_generation_tokens": 10 if protocol == "generation_token_matched" else None,
         "max_total_api_calls": None,
         "max_gpu_hours": None,
         "pricing": {
@@ -93,23 +101,56 @@ def test_budget_ledger_records_all_cost_sections_and_efficiency(tmp_path):
     assert payload["efficiency"][
         "accuracy_gain_per_1k_training_tokens"
     ] == pytest.approx(0.1 / 300 * 1000)
-    assert payload["estimated_cost"]["complete"] is True
+    assert payload["estimated_cost"]["complete"] is False
+    assert payload["estimated_cost"]["cost_quality"] == "estimated"
 
 
-def test_cost_matched_stops_after_recorded_token_cap(tmp_path):
+def test_generation_token_matched_reserves_before_provider_call(tmp_path):
     ledger = BudgetLedger(
         tmp_path / "ledger.json",
-        _ledger_config("cost_matched"),
+        _ledger_config("generation_token_matched"),
         {"study_id": "cost"},
     )
-    ledger.record_generation_call(
-        input_tokens=6,
-        output_tokens=4,
-        wall_time_seconds=0.1,
-    )
-    with pytest.raises(BudgetExhausted, match="token budget"):
-        ledger.assert_generation_available()
+    with pytest.raises(BudgetExhausted, match="token reservation exceeds budget"):
+        ledger.assert_generation_available(
+            reserved_input_tokens=6,
+            reserved_output_tokens=5,
+        )
     assert ledger.data["protocol"]["exhausted"] is True
+
+
+def test_each_real_validation_provider_retry_is_recorded(tmp_path):
+    ledger = BudgetLedger(
+        tmp_path / "ledger.json", _ledger_config(), {"study_id": "judge"}
+    )
+    client = Mock()
+    completion = Mock()
+    completion.choices = [Mock(message=Mock(content='{"ok": true}'))]
+    completion.usage = Mock(prompt_tokens=7, completion_tokens=4)
+    client.chat.completions.create.side_effect = [RuntimeError("transient"), completion]
+    set_active_ledger(ledger)
+    try:
+        result = util.query_openai_compatible(
+            client,
+            "judge",
+            ["compare"],
+            0.0,
+            32,
+            1,
+            False,
+            max_num_retries=2,
+            retry_delay_seconds=0,
+            budget_role="validation",
+        )
+    finally:
+        set_active_ledger(None)
+    assert result == ['{"ok": true}']
+    assert ledger.data["validation"]["api_call_count"] == 2
+    assert ledger.data["validation"]["judge_call_count"] == 2
+    assert ledger.data["validation"]["validation_failure_count"] == 1
+    assert ledger.data["validation"]["token_count_exact_calls"] == 1
+    assert ledger.data["validation"]["token_count_estimated_calls"] == 1
+    assert ledger.data["cost_quality"] == "mixed"
 
 
 def test_resumed_ledger_cycle_events_are_idempotent(tmp_path):
@@ -165,6 +206,15 @@ def test_statistics_are_deterministic_and_report_effect_size():
     assert paired_bootstrap(pairs, seed=7) == paired_bootstrap(pairs, seed=7)
     adjusted = holm_correction([0.01, 0.04, 0.03])
     assert all(0 <= value <= 1 for value in adjusted)
+
+
+def test_three_seed_interval_uses_student_t_not_normal_critical_value():
+    result = summarize_values([0.1, 0.2, 0.3])
+    assert result["ci_method"] == "student_t_across_seeds"
+    assert result["critical_value"] == pytest.approx(4.303, abs=0.001)
+    expected_margin = 4.303 * 0.1 / (3 ** 0.5)
+    assert result["ci95_low"] == pytest.approx(0.2 - expected_margin, abs=1e-4)
+    assert result["ci95_high"] == pytest.approx(0.2 + expected_margin, abs=1e-4)
 
 
 def test_paper_tables_rebuild_from_raw_item_artifacts(tmp_path):

@@ -39,3 +39,13 @@ fixed_test:
 
 retention_test:
   enabled: true
+
+evaluation_provenance:
+  require_checkpoint_binding: true
+  execution_policy: eval_only
+  evaluated_method: null
+  source_study_id: null
+  source_run_id: null
+  source_seed: null
+  checkpoint_path: null
+  checkpoint_sha256: null

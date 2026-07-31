@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from aggregate_study import collect_results
+from run_formal_evaluation import main as run_formal_evaluation
 from autobencher.baseline import build_baseline_manifest
 from autobencher.budget import BudgetSpec
 from autobencher.config import load_resolved_config
@@ -85,11 +86,19 @@ def test_prompt_bundle_hashes_actual_file_contents(tmp_path):
         ("generator_question.txt", "generator v1"),
         ("test_taker.txt", "test taker v1"),
         ("semantic.txt", "semantic v1"),
+        ("evaluator_solver.txt", "solver v1"),
+        ("evaluator_independent_solver.txt", "independent v1"),
+        ("evaluator_postcheck.txt", "postcheck v1"),
+        ("tora_strategy.txt", "strategy v1"),
     ):
         (prompt_dir / name).write_text(text, encoding="utf-8")
     config = {
         "evaluator_pipeline": {
-            "semantic_judge_prompt_path": "prompts/semantic.txt"
+            "semantic_judge_prompt_path": "prompts/semantic.txt",
+            "solver_prompt_path": "prompts/evaluator_solver.txt",
+            "independent_solver_prompt_path": "prompts/evaluator_independent_solver.txt",
+            "postcheck_prompt_path": "prompts/evaluator_postcheck.txt",
+            "solver_strategy_path": "prompts/tora_strategy.txt",
         }
     }
     first = prompt_bundle_snapshot(config, tmp_path)
@@ -188,12 +197,61 @@ def test_return_code_zero_without_complete_artifacts_stays_partial(tmp_path):
         validate_registry(json.load(handle))
 
 
-def test_runner_expands_data_and_cost_matched_protocols(tmp_path):
+def test_formal_runner_binds_registry_method_seed_and_checkpoint(tmp_path, capsys):
+    record = ExperimentRecord(
+        study_id="source-full-42",
+        method="full",
+        variant="full",
+        seed=42,
+        model="fixture",
+        budget=12,
+        config_hash="placeholder",
+        git_commit="commit",
+        status="completed",
+        experiment_dir=str(tmp_path / "experiment"),
+    )
+    write_completed_run(record, [False, True], [True, True])
+    index = tmp_path / "index.json"
+    index.write_text(
+        json.dumps(
+            {"schema_version": "1.0", "experiments": [record.to_dict()]}
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_manifest = json.loads(
+        next(
+            Path(record.run_dir).glob(
+                "cycle/cycle_*/training/checkpoint_manifest.json"
+            )
+        ).read_text(encoding="utf-8")
+    )
+    checkpoint = checkpoint_manifest["merged_model_path"]
+    checkpoint_sha = checkpoint_manifest["merged_model_sha256"]
+    assert run_formal_evaluation(
+        [
+            "--config", str(ROOT / "configs/experiments/official_fixed_eval.yaml"),
+            "--source-index", str(index),
+            "--source-study-id", record.study_id,
+            "--source-method", "full",
+            "--source-seed", "42",
+            "--checkpoint-path", checkpoint,
+            "--checkpoint-sha256", checkpoint_sha,
+            "--run-id", "official-full-42",
+            "--dry-run",
+        ]
+    ) == 0
+    command = capsys.readouterr().out
+    assert "evaluation_provenance.evaluated_method" in command
+    assert "evaluation_provenance.source_run_id" in command
+    assert checkpoint in command
+
+
+def test_runner_expands_data_and_generation_token_protocols(tmp_path):
     suite = _write_suite(tmp_path)
     payload = yaml.safe_load(suite.read_text(encoding="utf-8"))
     payload["study_suite"]["protocols"] = [
         {"name": "data_matched", "target_training_samples": 4},
-        {"name": "cost_matched", "max_generation_tokens": 1000},
+        {"name": "generation_token_matched", "max_generation_tokens": 1000},
     ]
     suite.write_text(
         yaml.safe_dump(payload, sort_keys=False),
@@ -203,7 +261,7 @@ def test_runner_expands_data_and_cost_matched_protocols(tmp_path):
     assert len(plan) == 18
     assert {item.budget_protocol for item in plan} == {
         "data_matched",
-        "cost_matched",
+        "generation_token_matched",
     }
     assert len({item.experiment_dir for item in plan}) == 18
 

@@ -34,7 +34,52 @@ from tool_util import (
     dump_standard_json,
     generate_math_inference,
     manage_hard_pool,
+    update_hard_pool_lifecycle,
 )
+
+
+def test_hard_pool_lifecycle_retests_mastered_and_retires_stale(tmp_path):
+    pool_path = tmp_path / "hard_pool.json"
+    dump_standard_json(
+        [
+            {
+                "unique_key": "hard-1",
+                "question": "Compute 7 + 8.",
+                "gold_answer": "15",
+                "category": "Arithmetic",
+                "sub_category": "Integer Operations",
+                "sample_grade": "train_eligible",
+                "lifecycle_state": "active",
+                "last_seen_cycle": 1,
+                "occurrences": 2,
+            }
+        ],
+        pool_path,
+    )
+    for cycle, model in ((2, "model-v2"), (3, "model-v3")):
+        update_hard_pool_lifecycle(
+            pool_path,
+            [{"unique_key": "hard-1", "is_correct": True}],
+            model_version=model,
+            current_cycle=cycle,
+            mastered_correct_streak=2,
+            stale_after_cycles=2,
+            retire_after_cycles=4,
+        )
+    mastered = json.loads(pool_path.read_text(encoding="utf-8"))[0]
+    assert mastered["lifecycle_state"] == "mastered"
+    assert mastered["consecutive_correct"] == 2
+    assert HardSamplePool(pool_path).get_variant_context(
+        "Arithmetic", "Integer Operations"
+    ) == ""
+    result = update_hard_pool_lifecycle(
+        pool_path,
+        [],
+        model_version="model-v5",
+        current_cycle=5,
+        retire_after_cycles=4,
+    )
+    assert result["state_counts"] == {"retired": 1}
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -496,6 +541,10 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
         "generator",
         "test_taker",
         "semantic_judge",
+        "evaluator_solver",
+        "independent_solver",
+        "postcheck",
+        "tora_strategy",
         "combined_sha256",
     }
     assert manifest["budget_protocol"] == "question_matched"
@@ -745,8 +794,15 @@ def test_blind_attribution_packets_require_consensus_or_adjudication(tmp_path):
             encoding="utf-8-sig",
         )
     merged_path = review_dir / "adjudication.csv"
+    assert not (review_dir / "system_predictions.sealed.csv").exists()
+    assert "verification_tier" not in packet
+    assert "evidence_json" not in packet
+    public_manifest = json.loads(
+        (review_dir / "review_manifest.json").read_text(encoding="utf-8")
+    )
+    assert "path" not in public_manifest["files"]["system_predictions"]
     merged = merge_blinded_reviews(
-        review_dir / "system_predictions.sealed.csv",
+        manifest["operator_sealed_system_path"],
         review_dir / "annotator_1.csv",
         review_dir / "annotator_2.csv",
         merged_path,

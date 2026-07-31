@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -13,6 +15,72 @@ from .evaluation_sets import validate_evaluation_coverage
 from .experiment import atomic_json
 from .structured import answers_equivalent, normalize_generated_gold_contract
 from .truth_solver import TruthSolver
+from .similarity import build_similarity_batch
+
+
+AUDIT_ALGORITHM_VERSION = "evaluation_leakage_v3_template_ast_embedding"
+
+
+def math_structure_signature(question: Any) -> str:
+    """Language-light signature preserving equation/operator structure."""
+    text = str(question or "").lower()
+    text = re.sub(r"\b\d+(?:\.\d+)?\b", "N", text)
+    text = re.sub(r"\b[a-z]\b", "V", text)
+    functions = re.findall(
+        r"\b(?:sin|cos|tan|log|ln|sqrt|integrate|differentiate|determinant|probability)\b",
+        text,
+    )
+    operators = re.findall(r"<=|>=|!=|==|[=+\-*/^<>()[\]{},]", text)
+    relation_words = re.findall(
+        r"\b(?:sum|product|ratio|percent|solve|prove|matrix|derivative|integral)\b",
+        text,
+    )
+    return "|".join([*functions, *relation_words, *operators])
+
+
+def math_ast_signature(question: Any) -> str:
+    """Best-effort operator-tree signature without evaluating expressions."""
+    text = str(question or "").replace("^", "**")
+    candidates = re.findall(
+        r"[A-Za-z0-9_.()+\-*/]+(?:\s*(?:=|<=|>=|<|>)\s*"
+        r"[A-Za-z0-9_.()+\-*/]+)?",
+        text,
+    )
+    signatures = []
+    for candidate in candidates:
+        if not re.search(r"[+\-*/=<>]", candidate):
+            continue
+        parts = re.split(r"(<=|>=|=|<|>)", candidate, maxsplit=1)
+        relation = parts[1] if len(parts) == 3 else "expression"
+        expressions = (parts[0], parts[2]) if len(parts) == 3 else (parts[0],)
+        nodes = [relation]
+        try:
+            for expression in expressions:
+                tree = ast.parse(expression.strip(), mode="eval")
+                nodes.extend(
+                    type(node).__name__
+                    for node in ast.walk(tree)
+                    if isinstance(
+                        node,
+                        (
+                            ast.BinOp,
+                            ast.UnaryOp,
+                            ast.Call,
+                            ast.Compare,
+                            ast.Add,
+                            ast.Sub,
+                            ast.Mult,
+                            ast.Div,
+                            ast.Pow,
+                            ast.Mod,
+                        ),
+                    )
+                )
+        except (SyntaxError, ValueError):
+            continue
+        if len(nodes) > 1:
+            signatures.append(":".join(nodes))
+    return "|".join(signatures)
 
 
 # Curated, executable recomputation certificates for development-regression
@@ -128,6 +196,8 @@ def audit_evaluation_questions(
     solver: TruthSolver,
     training_records: Iterable[Mapping[str, Any]] = (),
     semantic_leakage_threshold: float = 0.82,
+    embedding_leakage_threshold: float = 0.90,
+    require_embedding_audit: bool = False,
 ) -> dict[str, Any]:
     """Audit without treating the checked-in gold answer as solver truth."""
     items = [dict(item) for item in questions]
@@ -141,12 +211,26 @@ def audit_evaluation_questions(
     training_templates = {
         template_signature(question) for question in training_questions
     }
+    training_structures = {
+        math_structure_signature(question) for question in training_questions
+        if math_structure_signature(question)
+    }
+    training_ast_structures = {
+        math_ast_signature(question) for question in training_questions
+        if math_ast_signature(question)
+    }
+    similarity_batch = None
+    if require_embedding_audit and items and training_questions:
+        similarity_batch = build_similarity_batch(
+            [str(item.get("question", "")) for item in items] + training_questions,
+            normalization_config["dataset"],
+        )
     reports: list[dict[str, Any]] = []
     status_counts: Counter[str] = Counter()
     normalized_seen: dict[str, str] = {}
     template_groups: dict[str, list[str]] = defaultdict(list)
 
-    for item in items:
+    for item_index, item in enumerate(items):
         identifier = str(item.get("question_id", item.get("id", "")))
         question = str(item.get("question", ""))
         gold = str(item.get("canonical_answer", item.get("gold_answer", "")))
@@ -204,6 +288,12 @@ def audit_evaluation_questions(
             leakage.append("training_exact_match")
         if template and template in training_templates:
             leakage.append("training_template_match")
+        structure = math_structure_signature(question)
+        if structure and structure in training_structures:
+            leakage.append("training_math_structure_match")
+        ast_structure = math_ast_signature(question)
+        if ast_structure and ast_structure in training_ast_structures:
+            leakage.append("training_math_ast_match")
         closest_similarity = 0.0
         for training_question in training_questions:
             closest_similarity = max(
@@ -212,7 +302,22 @@ def audit_evaluation_questions(
                 token_jaccard(question, training_question, ngram=2),
             )
         if closest_similarity >= semantic_leakage_threshold:
-            leakage.append("training_lexical_semantic_match")
+            leakage.append("training_lexical_near_match")
+        max_embedding_similarity = None
+        if similarity_batch is not None:
+            scores = [
+                similarity_batch.pair(item_index, len(items) + training_index)[
+                    "sentence_transformers_similarity"
+                ]
+                for training_index in range(len(training_questions))
+            ]
+            available = [score for score in scores if score is not None]
+            max_embedding_similarity = max(available) if available else None
+            if (
+                max_embedding_similarity is not None
+                and max_embedding_similarity >= float(embedding_leakage_threshold)
+            ):
+                leakage.append("training_embedding_match")
         if duplicate_of:
             status = "duplicate_rejected"
         if leakage:
@@ -238,12 +343,25 @@ def audit_evaluation_questions(
                 "template_signature_sha256": hashlib.sha256(
                     template.encode("utf-8")
                 ).hexdigest(),
+                "math_structure_signature_sha256": hashlib.sha256(
+                    structure.encode("utf-8")
+                ).hexdigest(),
+                "math_ast_signature_sha256": hashlib.sha256(
+                    ast_structure.encode("utf-8")
+                ).hexdigest(),
                 "training_leakage_flags": sorted(set(leakage)),
                 "max_training_lexical_similarity": closest_similarity,
+                "max_training_embedding_similarity": max_embedding_similarity,
             }
         )
     return {
         "schema_version": "1.0",
+        "audit_algorithm_version": AUDIT_ALGORITHM_VERSION,
+        "thresholds": {
+            "lexical": float(semantic_leakage_threshold),
+            "embedding": float(embedding_leakage_threshold),
+        },
+        "embedding_audit_required": bool(require_embedding_audit),
         "question_count": len(items),
         "status_counts": dict(sorted(status_counts.items())),
         "all_independently_verified": (
@@ -281,6 +399,26 @@ def assemble_official_set(
             f"Immutable evaluation set already exists: {output}"
         )
     records = [dict(item) for item in questions]
+    audit = dict(training_leakage_audit or {})
+    required_audit_fields = {
+        "training_corpus_sha256",
+        "generation_corpus_sha256",
+        "candidate_corpus_sha256",
+        "audit_algorithm_version",
+        "thresholds",
+        "audit_report_sha256",
+        "all_independently_verified",
+        "leaking_question_count",
+    }
+    if required_audit_fields - set(audit):
+        raise ValueError(
+            "Official release leakage audit is incomplete: "
+            + ", ".join(sorted(required_audit_fields - set(audit)))
+        )
+    if not audit["all_independently_verified"] or int(audit["leaking_question_count"]):
+        raise ValueError(
+            "Official release requires all independent solutions to pass and zero leakage"
+        )
     spec = {
         "minimum_questions_per_subcategory": int(
             minimum_questions_per_subcategory
@@ -358,7 +496,7 @@ def assemble_official_set(
         "coverage": coverage,
         "template_cluster_count": len(templates),
         "max_template_cluster_size": max(templates.values(), default=0),
-        "training_leakage_audit": dict(training_leakage_audit or {}),
+        "training_leakage_audit": audit,
     }
     atomic_json(manifest, output.with_suffix(output.suffix + ".manifest.json"))
     return manifest

@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-PROTOCOLS = ("question_matched", "data_matched", "cost_matched")
+PROTOCOLS = (
+    "question_matched",
+    "data_matched",
+    "generation_token_matched",
+)
 
 
 class BudgetExhausted(RuntimeError):
@@ -109,6 +113,12 @@ class BudgetLedger:
                 "max_gpu_hours": self.config.get("max_gpu_hours"),
                 "exhausted": False,
                 "exhausted_reason": None,
+                "budget_cap": self.config.get("max_generation_tokens"),
+                "used_before_last_call": None,
+                "last_call_cost": None,
+                "overshoot": 0,
+                "overshoot_ratio": 0.0,
+                "reservation_rejected_count": 0,
             },
             "generation": {
                 "requested_question_count": 0,
@@ -134,6 +144,8 @@ class BudgetLedger:
                 "output_tokens": 0,
                 "api_call_count": 0,
                 "wall_time_seconds": 0.0,
+                "token_count_exact_calls": 0,
+                "token_count_estimated_calls": 0,
             },
             "training": {
                 "selected_pool_count": 0,
@@ -235,6 +247,18 @@ class BudgetLedger:
             pricing.get("output_per_million_tokens"),
             pricing.get("gpu_hour"),
         )
+        estimated_calls = int(generation.get("token_count_estimated_calls", 0)) + int(
+            validation.get("token_count_estimated_calls", 0)
+        )
+        exact_calls = int(generation.get("token_count_exact_calls", 0)) + int(
+            validation.get("token_count_exact_calls", 0)
+        )
+        self.data["cost_quality"] = (
+            "exact" if exact_calls and not estimated_calls
+            else "mixed" if exact_calls and estimated_calls
+            else "estimated" if estimated_calls
+            else "no_token_calls"
+        )
         if all(value is not None for value in rates):
             input_tokens = (
                 int(generation["input_tokens"])
@@ -252,8 +276,11 @@ class BudgetLedger:
             self.data["estimated_cost"] = {
                 "currency": str(pricing.get("currency", "USD")),
                 "amount": amount,
-                "complete": True,
-                "reason": None,
+                "complete": estimated_calls == 0,
+                "cost_quality": self.data["cost_quality"],
+                "reason": (
+                    None if estimated_calls == 0 else "estimated_token_calls_present"
+                ),
             }
 
     def flush(self) -> None:
@@ -261,9 +288,14 @@ class BudgetLedger:
             self._derive()
             _atomic_json(self.data, self.path)
 
-    def assert_generation_available(self) -> None:
+    def assert_generation_available(
+        self,
+        *,
+        reserved_input_tokens: int = 0,
+        reserved_output_tokens: int = 0,
+    ) -> None:
         with self._lock:
-            if self.protocol != "cost_matched":
+            if self.protocol != "generation_token_matched":
                 return
             generation = self.data["generation"]
             used_tokens = (
@@ -273,11 +305,13 @@ class BudgetLedger:
             token_cap = self.data["protocol"].get("max_generation_tokens")
             call_cap = self.data["protocol"].get("max_total_api_calls")
             reason = None
-            if token_cap is not None and used_tokens >= int(token_cap):
+            reserved = int(reserved_input_tokens) + int(reserved_output_tokens)
+            if token_cap is not None and used_tokens + reserved > int(token_cap):
                 reason = (
-                    f"generation token budget exhausted: "
-                    f"{used_tokens}/{int(token_cap)}"
+                    "generation token reservation exceeds budget: "
+                    f"used={used_tokens} reserved={reserved} cap={int(token_cap)}"
                 )
+                self.data["protocol"]["reservation_rejected_count"] += 1
             elif call_cap is not None and int(
                 self.data["totals"].get("total_api_calls", 0)
             ) >= int(call_cap):
@@ -303,6 +337,7 @@ class BudgetLedger:
     ) -> None:
         with self._lock:
             section = self.data["generation"]
+            used_before = int(section["input_tokens"]) + int(section["output_tokens"])
             section["input_tokens"] += int(input_tokens)
             section["output_tokens"] += int(output_tokens)
             section["wall_time_seconds"] += float(wall_time_seconds)
@@ -314,22 +349,23 @@ class BudgetLedger:
                 else "token_count_estimated_calls"
             )
             section[key] += 1
+            cap = self.data["protocol"].get("budget_cap")
+            call_cost = int(input_tokens) + int(output_tokens)
+            self.data["protocol"]["used_before_last_call"] = used_before
+            self.data["protocol"]["last_call_cost"] = call_cost
+            if cap is not None:
+                used_after = used_before + call_cost
+                overshoot = max(0, used_after - int(cap))
+                self.data["protocol"]["overshoot"] = overshoot
+                self.data["protocol"]["overshoot_ratio"] = (
+                    overshoot / int(cap) if int(cap) else 0.0
+                )
             self.flush()
 
     def assert_training_available(self) -> None:
-        with self._lock:
-            if self.protocol != "cost_matched":
-                return
-            gpu_cap = self.data["protocol"].get("max_gpu_hours")
-            used = float(self.data["training"]["gpu_hours"])
-            if gpu_cap is not None and used >= float(gpu_cap):
-                reason = (
-                    f"GPU-hour budget exhausted: {used:g}/{float(gpu_cap):g}"
-                )
-                self.data["protocol"]["exhausted"] = True
-                self.data["protocol"]["exhausted_reason"] = reason
-                self.flush()
-                raise BudgetExhausted(reason)
+        # generation_token_matched deliberately constrains generation tokens
+        # only. GPU hours remain measured outcomes, never a hidden second cap.
+        return
 
     def record_generation_batch(
         self,
@@ -380,8 +416,46 @@ class BudgetLedger:
             section["input_tokens"] += int(input_tokens) * int(attempts)
             section["output_tokens"] += int(output_tokens)
             section["wall_time_seconds"] += float(wall_time_seconds)
+            section["token_count_estimated_calls"] += int(api_calls or attempts)
             if not success:
                 section["validation_failure_count"] += 1
+            self.flush()
+
+    def record_provider_call(
+        self,
+        *,
+        role: str,
+        input_tokens: int,
+        output_tokens: int,
+        wall_time_seconds: float,
+        api_calls: int = 1,
+        exact_tokens: bool,
+        retry: bool = False,
+        success: bool = True,
+    ) -> None:
+        """Record one real provider attempt at the lowest common call layer."""
+        if role == "generation":
+            self.record_generation_call(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                wall_time_seconds=wall_time_seconds,
+                retry=retry,
+                api_calls=api_calls,
+                exact_tokens=exact_tokens,
+            )
+            return
+        if role != "validation":
+            return
+        with self._lock:
+            section = self.data["validation"]
+            section["judge_call_count"] += 1
+            section["api_call_count"] += int(api_calls)
+            section["input_tokens"] += int(input_tokens)
+            section["output_tokens"] += int(output_tokens)
+            section["wall_time_seconds"] += float(wall_time_seconds)
+            section["validation_failure_count"] += int(not success)
+            key = "token_count_exact_calls" if exact_tokens else "token_count_estimated_calls"
+            section[key] += 1
             self.flush()
 
     def record_dataset(

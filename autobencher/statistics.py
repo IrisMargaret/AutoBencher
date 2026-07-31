@@ -9,6 +9,37 @@ from collections import defaultdict
 from typing import Any, Iterable, Mapping
 
 
+_T_975 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+    6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+    11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+    16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+    21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060,
+    26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042,
+}
+
+
+def _student_t_critical_95(sample_count: int) -> float:
+    """Two-sided 95% t critical value without a SciPy dependency."""
+    degrees = int(sample_count) - 1
+    if degrees in _T_975:
+        return _T_975[degrees]
+    if degrees <= 0:
+        raise ValueError("Student-t interval requires at least two samples")
+    # Cornish-Fisher expansion around the normal 97.5th percentile. At
+    # df>30 its error is negligible for the reported table precision.
+    z = 1.959963984540054
+    inverse = 1.0 / degrees
+    return (
+        z
+        + (z**3 + z) * inverse / 4
+        + (5 * z**5 + 16 * z**3 + 3 * z) * inverse**2 / 96
+        + (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z)
+        * inverse**3
+        / 384
+    )
+
+
 def summarize_values(values: Iterable[float]) -> dict[str, float | int | None]:
     samples = [float(value) for value in values]
     if not samples:
@@ -20,10 +51,12 @@ def summarize_values(values: Iterable[float]) -> dict[str, float | int | None]:
             "max": None,
             "ci95_low": None,
             "ci95_high": None,
+            "ci_method": "undefined_empty_sample",
         }
     mean = statistics.fmean(samples)
     std = statistics.stdev(samples) if len(samples) > 1 else 0.0
-    margin = 1.96 * std / math.sqrt(len(samples)) if len(samples) > 1 else 0.0
+    critical = _student_t_critical_95(len(samples)) if len(samples) > 1 else None
+    margin = critical * std / math.sqrt(len(samples)) if critical else 0.0
     return {
         "n": len(samples),
         "mean": mean,
@@ -32,6 +65,8 @@ def summarize_values(values: Iterable[float]) -> dict[str, float | int | None]:
         "max": max(samples),
         "ci95_low": mean - margin,
         "ci95_high": mean + margin,
+        "ci_method": "student_t_across_seeds" if len(samples) > 1 else "single_seed_no_uncertainty",
+        "critical_value": critical,
     }
 
 

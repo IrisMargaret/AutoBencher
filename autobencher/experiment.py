@@ -542,6 +542,9 @@ class ResearchRun:
                     "total_question_budget"
                 ],
                 "budget_protocol": str(self.config["budget"]["protocol"]),
+                "evaluation_provenance": thaw_config(
+                    self.config["evaluation_provenance"]
+                ),
                 "prompt_version": "content-addressed-v1",
                 "prompt_hash": prompt_bundle["combined_sha256"],
                 "prompt_bundle": prompt_bundle,

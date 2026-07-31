@@ -314,6 +314,7 @@ def _model_json(
         if isinstance(config, Mapping)
         else {}
     )
+    call_started = time.monotonic()
     request_result = gen_from_prompt(
         model=model,
         tokenizer=tokenizer,
@@ -341,10 +342,37 @@ def _model_json(
         retry_delay_seconds=float(
             evaluator_model_config.get("retry_delay_seconds", 5)
         ),
+        budget_role="validation",
     )
     if not request_result.completions:
         raise EvaluatorProtocolError("evaluator returned no completion")
-    return _strict_json_object(request_result.completions[0].text)
+    completion_text = request_result.completions[0].text
+    if service is None:
+        from autobencher.budget_ledger import active_ledger, estimate_tokens
+
+        ledger = active_ledger()
+        if ledger is not None:
+            exact = callable(tokenizer)
+            try:
+                input_tokens = len(
+                    tokenizer(prompt, add_special_tokens=False)["input_ids"]
+                ) if exact else estimate_tokens(prompt)
+                output_tokens = len(
+                    tokenizer(completion_text, add_special_tokens=False)["input_ids"]
+                ) if exact else estimate_tokens(completion_text)
+            except (TypeError, ValueError, KeyError, AttributeError):
+                exact = False
+                input_tokens = estimate_tokens(prompt)
+                output_tokens = estimate_tokens(completion_text)
+            ledger.record_provider_call(
+                role="validation",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                wall_time_seconds=time.monotonic() - call_started,
+                api_calls=0,
+                exact_tokens=exact,
+            )
+    return _strict_json_object(completion_text)
 
 
 def validate_generated_python(
@@ -1128,7 +1156,6 @@ def judge_answer_semantics(
         },
     )
     last_error: Exception | None = None
-    judge_started = time.monotonic()
     for attempt in range(1, int(pipeline["semantic_judge_attempts"]) + 1):
         try:
             result = _model_json(
@@ -1162,27 +1189,6 @@ def judge_answer_semantics(
                 raise EvaluatorProtocolError(
                     "semantic judge confidence must be within [0, 1]"
                 )
-            from autobencher.budget_ledger import (
-                active_ledger,
-                estimate_tokens,
-            )
-
-            ledger = active_ledger()
-            if ledger is not None:
-                ledger.record_judge(
-                    success=True,
-                    attempts=attempt,
-                    input_tokens=estimate_tokens(prompt),
-                    output_tokens=estimate_tokens(
-                        json.dumps(result, ensure_ascii=False)
-                    ),
-                    wall_time_seconds=time.monotonic() - judge_started,
-                    api_calls=(
-                        attempt
-                        if evaluator_info[2] is not None
-                        else 0
-                    ),
-                )
             return {
                 **result,
                 "confidence": confidence,
@@ -1194,22 +1200,6 @@ def judge_answer_semantics(
             }
         except (EvaluatorProtocolError, TypeError, ValueError) as exc:
             last_error = exc
-    from autobencher.budget_ledger import active_ledger, estimate_tokens
-
-    ledger = active_ledger()
-    if ledger is not None:
-        ledger.record_judge(
-            success=False,
-            attempts=int(pipeline["semantic_judge_attempts"]),
-            input_tokens=estimate_tokens(prompt),
-            output_tokens=0,
-            wall_time_seconds=time.monotonic() - judge_started,
-            api_calls=(
-                int(pipeline["semantic_judge_attempts"])
-                if evaluator_info[2] is not None
-                else 0
-            ),
-        )
     return {
         "semantically_equivalent": False,
         "confidence": 0.0,

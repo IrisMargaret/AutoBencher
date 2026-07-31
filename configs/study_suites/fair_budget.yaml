@@ -31,13 +31,13 @@ study_suite:
     - name: qwen2.5-7b-instruct
       path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
   # This is a safety ceiling. data_matched can stop after reaching its sample
-  # target; cost_matched can stop earlier when its token cap is exhausted.
+  # target; generation_token_matched stops at its generation-token cap.
   budgets:
     - 13500
   protocols:
     - name: data_matched
       target_training_samples: 1000
-    - name: cost_matched
+    - name: generation_token_matched
       max_generation_tokens: 1000000
   common_overrides:
     - experiment.num_iterations=5

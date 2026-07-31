@@ -11,6 +11,7 @@ from typing import Any, Mapping
 PROMPT_RELATIVE_PATHS = {
     "generator": "prompts/generator_question.txt",
     "test_taker": "prompts/test_taker.txt",
+    "tora_strategy": "prompts/tora_evaluator_strategy.txt",
 }
 
 
@@ -56,18 +57,30 @@ def prompt_bundle_snapshot(
     *,
     prompt_paths: Mapping[str, str | Path] | None = None,
 ) -> dict[str, Any]:
-    """Hash the actual prompt file bytes used by the three critical roles."""
+    """Hash every checked-in prompt file that can affect a run."""
     root = Path(project_root).resolve()
     declared = dict(PROMPT_RELATIVE_PATHS)
     declared["semantic_judge"] = str(
         config["evaluator_pipeline"]["semantic_judge_prompt_path"]
+    )
+    declared["evaluator_solver"] = str(
+        config["evaluator_pipeline"]["solver_prompt_path"]
+    )
+    declared["independent_solver"] = str(
+        config["evaluator_pipeline"]["independent_solver_prompt_path"]
+    )
+    declared["postcheck"] = str(
+        config["evaluator_pipeline"]["postcheck_prompt_path"]
+    )
+    declared["tora_strategy"] = str(
+        config["evaluator_pipeline"]["solver_strategy_path"]
     )
     if prompt_paths:
         declared.update(prompt_paths)
 
     entries: dict[str, dict[str, str]] = {}
     combined_inputs = []
-    for role in ("generator", "test_taker", "semantic_judge"):
+    for role in sorted(declared):
         path = resolve_project_path(root, declared[role])
         if not path.is_file():
             raise FileNotFoundError(
@@ -80,7 +93,7 @@ def prompt_bundle_snapshot(
             {"role": role, "path": portable, "sha256": digest}
         )
     return {
-        **entries,
+        **dict(sorted(entries.items())),
         "combined_sha256": canonical_sha256(combined_inputs),
     }
 

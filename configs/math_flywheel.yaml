@@ -32,7 +32,7 @@ study:
 
 budget:
   # question_matched preserves the legacy planned-question comparison.
-  # Study suites may override this with data_matched or cost_matched.
+  # Study suites may override this with data_matched or generation_token_matched.
   protocol: question_matched
   data_matched_target_samples: null
   max_generation_tokens: null
@@ -298,6 +298,10 @@ hard_pool:
   stratify_by_subcategory: true
   stratify_by_error_type: true
   hide_reference_answers: true
+  retest_samples_per_model_version: 20
+  mastered_correct_streak: 2
+  stale_after_cycles: 2
+  retire_after_cycles: 4
 
 adaptive_sampling:
   enabled: true
@@ -371,7 +375,14 @@ error_attribution:
   require_evidence: true
   low_confidence_tag: unknown_error
   export_review_csv: true
-  review_sample_size: 100
+  review_sample_size: 400
+  minimum_reviewed_count: 300
+  minimum_cohen_kappa: 0.70
+  minimum_high_confidence_accuracy: 0.80
+  minimum_high_confidence_count: 50
+  minimum_completion_rate: 0.90
+  maximum_unresolved_rate: 0.0
+  minimum_per_label_count: 5
 
 dataset:
   exact_dedup: true
@@ -446,6 +457,7 @@ retention_test:
   # avoid extra model calls on every smoke cycle.
   enabled: false
   dataset_path: benchmarks/retention_regression_set.json
+  minimum_question_count: 100
   evaluate_baseline: true
   evaluate_after_each_training_cycle: true
 

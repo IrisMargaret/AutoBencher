@@ -17,7 +17,11 @@ import numpy as np
 
 from .difficulty import DEFAULT_WEIGHTS
 from .experiment import atomic_json, utc_now
-from .fingerprints import canonical_sha256, file_sha256
+from .fingerprints import (
+    artifact_fingerprint,
+    canonical_sha256,
+    file_sha256,
+)
 
 
 CALIBRATED_RUBRIC_VERSION = "calibrated_math_v2"
@@ -29,6 +33,13 @@ FORBIDDEN_DATASET_ROLES = {
     "final_blind_test",
 }
 DIMENSIONS = tuple(DEFAULT_WEIGHTS)
+DIMENSION_RAW_SCALES = {
+    "reasoning_steps": 10.0,
+    "operation_count": 20.0,
+    "constraint_count": 10.0,
+    "symbolic_depth": 10.0,
+    "representation_load": 10.0,
+}
 
 
 class DifficultyCalibrationError(ValueError):
@@ -89,10 +100,14 @@ def prepare_panel_schedule(
     panel_models: Sequence[Mapping[str, Any]],
     *,
     dataset_role: str,
+    project_root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Create deterministic item × model response tasks."""
 
     _assert_calibration_role(dataset_role)
+    root = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
+    prompt_path = root / "prompts" / "test_taker.txt"
+    prompt_sha = file_sha256(prompt_path)
     models = []
     for model in panel_models:
         model_id = str(model.get("model_id", "")).strip()
@@ -102,7 +117,35 @@ def prepare_panel_schedule(
             raise DifficultyCalibrationError(
                 "Each panel model needs model_id, tier, and model_path."
             )
-        models.append((model_id, tier, model_path))
+        snapshot = artifact_fingerprint(
+            model_path,
+            project_root=root,
+            allow_missing=False,
+        )
+        tokenizer_path = str(model.get("tokenizer_path", model_path)).strip()
+        tokenizer_snapshot = artifact_fingerprint(
+            tokenizer_path,
+            project_root=root,
+            allow_missing=False,
+        )
+        decoding = dict(model.get("decoding", {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "do_sample": False,
+        }))
+        models.append(
+            (
+                model_id,
+                tier,
+                model_path,
+                snapshot["sha256"],
+                tokenizer_snapshot["sha256"],
+                prompt_sha,
+                canonical_sha256(decoding),
+                str(model.get("provider_revision", "local_snapshot")),
+                decoding,
+            )
+        )
     if len({item[0] for item in models}) < 3:
         raise DifficultyCalibrationError(
             "The empirical panel must contain at least three distinct models."
@@ -110,13 +153,29 @@ def prepare_panel_schedule(
     tasks = []
     for question in sorted(questions, key=_question_id):
         question_id = _question_id(question)
-        for model_id, tier, model_path in sorted(models):
+        for (
+            model_id,
+            tier,
+            model_path,
+            model_sha,
+            tokenizer_sha,
+            inference_prompt_sha,
+            decoding_sha,
+            provider_revision,
+            decoding,
+        ) in sorted(models):
             tasks.append(
                 {
                     "question_id": question_id,
                     "model_id": model_id,
                     "model_tier": tier,
                     "model_path": model_path,
+                    "model_sha256": model_sha,
+                    "tokenizer_sha256": tokenizer_sha,
+                    "inference_prompt_sha256": inference_prompt_sha,
+                    "decoding_config": decoding,
+                    "decoding_config_sha256": decoding_sha,
+                    "provider_revision": provider_revision,
                     "dataset_role": dataset_role,
                     "status": "pending",
                 }
@@ -292,14 +351,63 @@ def _dimension_matrix(items: Sequence[Mapping[str, Any]]) -> np.ndarray:
         dimensions = profile.get("dimensions", item.get("dimensions", {}))
         row = []
         for name in DIMENSIONS:
-            value = dimensions.get(name, 0.0)
+            if name not in dimensions:
+                raise DifficultyCalibrationError(
+                    f"Item {_question_id(item)} is missing difficulty dimension {name}"
+                )
+            value = dimensions[name]
             if isinstance(value, Mapping):
-                value = value.get("normalized", value.get("value", 0.0))
-            row.append(float(value))
+                if "normalized" in value:
+                    numeric = float(value["normalized"])
+                elif "value" in value:
+                    numeric = float(value["value"]) / DIMENSION_RAW_SCALES[name]
+                else:
+                    raise DifficultyCalibrationError(
+                        f"Dimension {name} lacks normalized or value"
+                    )
+            else:
+                numeric = float(value) / DIMENSION_RAW_SCALES[name]
+            if not math.isfinite(numeric) or not 0 <= numeric <= 1:
+                raise DifficultyCalibrationError(
+                    f"Dimension {name} must map to fixed [0,1], got {numeric}"
+                )
+            row.append(numeric)
         matrix.append(row)
-    values = np.asarray(matrix, dtype=float)
-    maximum = np.maximum(values.max(axis=0), 1.0)
-    return values / maximum
+    return np.asarray(matrix, dtype=float)
+
+
+def _cross_validated_calibration(features, target, item_ids, folds=5):
+    fold_count = min(max(2, int(folds)), len(item_ids))
+    assignments = np.asarray([
+        int(canonical_sha256(identifier)[:8], 16) % fold_count
+        for identifier in item_ids
+    ])
+    # Hash assignment can leave a fold empty on small sets; stable round-robin
+    # is used as a deterministic fallback.
+    if len(set(assignments.tolist())) < min(fold_count, len(item_ids)):
+        order = np.argsort([canonical_sha256(identifier) for identifier in item_ids])
+        assignments = np.empty(len(item_ids), dtype=int)
+        for rank, index in enumerate(order):
+            assignments[index] = rank % fold_count
+    predictions = np.zeros(len(item_ids), dtype=float)
+    fold_weights = []
+    for fold in range(fold_count):
+        validation = assignments == fold
+        training = ~validation
+        if not validation.any() or not training.any():
+            raise DifficultyCalibrationError("Calibration fold is empty")
+        weights = _fit_nonnegative_weights(features[training], target[training])
+        predictions[validation] = np.clip(features[validation] @ weights, 0.0, 1.0)
+        fold_weights.append(weights.tolist())
+    return predictions, {
+        "method": "deterministic_item_hash_cross_validation",
+        "fold_count": fold_count,
+        "fold_assignments": {
+            identifier: int(assignments[index])
+            for index, identifier in enumerate(item_ids)
+        },
+        "fold_weights": fold_weights,
+    }
 
 
 def _fit_nonnegative_weights(
@@ -362,9 +470,38 @@ def calibrate_difficulty(
     model_index = {value: index for index, value in enumerate(model_ids)}
     matrix = np.full((len(model_ids), len(item_ids)), np.nan)
     tiers: dict[str, str] = {}
+    seen_pairs = set()
+    snapshot_by_model: dict[str, tuple[str, ...]] = {}
     for row in responses:
         question_id = _question_id(row)
         model_id = str(row["model_id"])
+        pair = (model_id, question_id)
+        if pair in seen_pairs:
+            raise DifficultyCalibrationError(
+                f"Duplicate panel response for model/item: {pair}"
+            )
+        seen_pairs.add(pair)
+        if not str(row.get("raw_response", "")).strip():
+            raise DifficultyCalibrationError(
+                f"Panel response lacks raw_response: {pair}"
+            )
+        provenance_fields = (
+            "model_sha256",
+            "tokenizer_sha256",
+            "inference_prompt_sha256",
+            "decoding_config_sha256",
+            "provider_revision",
+        )
+        snapshot = tuple(str(row.get(field, "")).strip() for field in provenance_fields)
+        if not all(snapshot):
+            raise DifficultyCalibrationError(
+                f"Panel response lacks immutable inference provenance: {pair}"
+            )
+        if model_id in snapshot_by_model and snapshot_by_model[model_id] != snapshot:
+            raise DifficultyCalibrationError(
+                f"Model snapshot changed within panel responses: {model_id}"
+            )
+        snapshot_by_model[model_id] = snapshot
         if question_id not in item_index:
             raise DifficultyCalibrationError(
                 f"Panel response references unknown item {question_id!r}."
@@ -376,6 +513,20 @@ def calibrate_difficulty(
     if np.any(np.all(np.isnan(matrix), axis=0)):
         raise DifficultyCalibrationError(
             "Every calibration item needs at least one panel response."
+        )
+    model_coverage = (~np.isnan(matrix)).mean(axis=1)
+    item_coverage = (~np.isnan(matrix)).sum(axis=0)
+    missing_rate = float(np.isnan(matrix).mean())
+    if np.any(model_coverage < 0.80):
+        raise DifficultyCalibrationError("Every panel model needs at least 80% item coverage")
+    if np.any(item_coverage < 3):
+        raise DifficultyCalibrationError("Every item needs at least three distinct model answers")
+    if missing_rate > 0.20:
+        raise DifficultyCalibrationError("Panel missing-response rate exceeds 20%")
+    tier_counts = {tier: list(tiers.values()).count(tier) for tier in set(tiers.values())}
+    if len(tier_counts) < 3:
+        raise DifficultyCalibrationError(
+            "Calibration panel needs at least three declared ability tiers"
         )
     accuracy = np.nanmean(matrix, axis=0)
     empirical = 1.0 - accuracy
@@ -390,6 +541,9 @@ def calibrate_difficulty(
     features = _dimension_matrix(ordered_items)
     weights = _fit_nonnegative_weights(features, empirical)
     calibrated = np.clip(features @ weights, 0.0, 1.0)
+    calibrated_validation, cross_validation = _cross_validated_calibration(
+        features, empirical, item_ids
+    )
     irt_1pl = fit_irt(matrix, model="1pl")
     irt_2pl = fit_irt(matrix, model="2pl")
     irt_bootstrap = bootstrap_irt_standard_errors(matrix)
@@ -413,7 +567,10 @@ def calibrate_difficulty(
                 "panel_accuracy": float(accuracy[index]),
                 "empirical_difficulty": float(empirical[index]),
                 "structural_difficulty": float(structural[index]),
-                "calibrated_difficulty": float(calibrated[index]),
+            "calibrated_difficulty": float(calibrated[index]),
+                "calibrated_validation_difficulty": float(
+                    calibrated_validation[index]
+                ),
                 "rasch_1pl_difficulty": irt_1pl["item_difficulty"][index],
                 "rasch_1pl_standard_error": irt_bootstrap[
                     "item_standard_error"
@@ -440,6 +597,20 @@ def calibrate_difficulty(
         "item_count": len(item_ids),
         "model_count": len(model_ids),
         "model_ids": model_ids,
+        "model_snapshots": {
+            model_id: dict(zip(provenance_fields, snapshot_by_model[model_id]))
+            for model_id in model_ids
+        },
+        "panel_coverage": {
+            "model_coverage": {
+                model_id: float(model_coverage[model_index[model_id]])
+                for model_id in model_ids
+            },
+            "minimum_models_per_item": int(item_coverage.min()),
+            "missing_rate": missing_rate,
+            "tier_model_counts": dict(sorted(tier_counts.items())),
+        },
+        "raw_response_records": [dict(row) for row in responses],
         "weights": {
             name: float(value) for name, value in zip(DIMENSIONS, weights)
         },
@@ -449,11 +620,21 @@ def calibrate_difficulty(
                 _ranks(structural), _ranks(empirical)
             ),
             "observable_mae": float(np.mean(np.abs(structural - empirical))),
-            "calibrated_pearson": _correlation(calibrated, empirical),
+            "calibrated_pearson": _correlation(calibrated_validation, empirical),
             "calibrated_spearman": _correlation(
-                _ranks(calibrated), _ranks(empirical)
+                _ranks(calibrated_validation), _ranks(empirical)
             ),
-            "calibrated_mae": float(np.mean(np.abs(calibrated - empirical))),
+            "calibrated_mae": float(
+                np.mean(np.abs(calibrated_validation - empirical))
+            ),
+            "calibrated_metric_scope": "held_out_cross_validation",
+            "calibrated_in_sample_pearson_descriptive_only": _correlation(
+                calibrated, empirical
+            ),
+            "calibrated_in_sample_mae_descriptive_only": float(
+                np.mean(np.abs(calibrated - empirical))
+            ),
+            "cross_validation": cross_validation,
             "binned_calibration": _binned_metrics(structural, empirical),
             "model_tier_consistency": tier_consistency,
         },

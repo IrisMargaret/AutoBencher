@@ -318,7 +318,13 @@ deduplication, training, GPU, and timing events. It separately records selected
 pool, train, validation, internal-test, and actually trained counts.
 `data_matched` accumulates filtered candidates until methods have the same
 post-template-split train count and the same configured correct/error ratio;
-`cost_matched` stops new generation calls at a shared token/API cap.
+`generation_token_matched` reserves the estimated prompt plus declared maximum
+output before every generator call and stops at the shared generation-token
+cap. It is intentionally not called cost-matched: judge tokens, retries,
+training tokens, and GPU time are measured but are not one fungible hard
+budget. Provider usage is exact when available; fallback counts set
+`cost_quality=estimated` or `mixed` and cannot be marked complete. The ledger
+also records the last-call cost and any overshoot.
 
 ```bash
 python -B run_study.py \
@@ -333,7 +339,9 @@ creates main, ablation, category, difficulty, efficiency, and significance
 tables without mixing evaluation-set hashes, budget protocols, budgets,
 methods, variants, or seeds. Significance tests run only preregistered pairs;
 the primary test combines per-seed McNemar results and reports a seed/item
-cluster-bootstrap interval. Pooled McNemar is descriptive only. See
+cluster-bootstrap interval. Across-seed summaries use a Student-t 95% interval
+(critical value 4.303 for three seeds), not the large-sample 1.96 shortcut.
+Pooled McNemar is descriptive only. See
 [Fair budgets and statistics](docs/fair_budget_and_statistics_zh-CN.md).
 
 ### Observable difficulty definition
@@ -391,8 +399,15 @@ calibration, model-tier consistency, Rasch/1PL, exploratory 2PL, and calibrated
 five-dimension weights. Rasch identification fixes only mean item difficulty
 to zero; panel ability is not separately recentered. The artifact includes
 optimization loss/convergence and model-cluster-bootstrap item standard errors.
-2PL remains explicitly exploratory when the panel is small. A v2 runtime config
-must use the artifact's SHA-256 and exact weights.
+Five difficulty dimensions use frozen raw scales (or validated pre-normalized
+values); missing, non-finite, or out-of-range dimensions fail. Reported
+calibrated correlations/MAE are out-of-fold, while full-data fit is explicitly
+descriptive. Duplicate model×item rows, insufficient model/item coverage, or
+fewer than three declared ability tiers fail. Every response binds model and
+tokenizer directory SHA, prompt SHA, decoding SHA, provider revision, and raw
+response, so a reused model ID cannot silently change snapshots. 2PL remains
+explicitly exploratory when the panel is small. A v2 runtime config must use
+the artifact's SHA-256 and exact weights.
 
 ### Adaptive difficulty and question allocation
 
@@ -600,17 +615,22 @@ no check isolates a defensible mechanism, the system emits `unknown_error`
 instead of inferring a cognitive cause from keywords.
 
 For publication-quality validation, export two independently shuffled blind
-packets (default 400 errors). Annotators cannot see the system label or each
-other's label. Merge completed packets, have a third reviewer adjudicate every
-remaining disagreement, then score the merged file:
+packets (default 400 errors). Sampling is stratified by predicted tag,
+confidence, verification tier, category, and difficulty; inverse-probability
+weights recover population metrics. Annotators see only the question, gold,
+raw answer/reasoning, and the frozen codebook. System labels, evidence, and
+first-error predictions are stored in an operator-only directory outside the
+public packets. Merge completed packets, adjudicate every disagreement, then
+score the merged file:
 
 ```bash
 python evaluate_error_attribution.py export-blinded \
   --input /vepfs-mlp2/queue010/20262202597/math_flywheel/review/errors.jsonl \
-  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1
+  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1 \
+  --sealed-output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review_private/blind_v1
 
 python evaluate_error_attribution.py merge \
-  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/system_predictions.sealed.csv \
+  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review_private/blind_v1/system_predictions.csv \
   --annotator-1 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_1.csv \
   --annotator-2 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_2.csv \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv
@@ -622,8 +642,11 @@ python evaluate_error_attribution.py score \
 
 The report includes coverage, selective accuracy, Macro-F1, Cohen's kappa,
 Brier score, a confusion matrix, and the unknown-error ratio. The conservative
-readiness gate requires at least 300 resolved samples, kappa ≥ 0.70,
-high-confidence accuracy ≥ 0.80, and zero unresolved adjudications.
+readiness gate requires at least 300 resolved samples, at least 50
+high-confidence samples, kappa ≥ 0.70, high-confidence accuracy ≥ 0.80,
+at least 90% completion, no unresolved adjudication in formal mode, and the
+configured minimum count for every observed label. Unknown or misspelled
+labels fail against the frozen taxonomy.
 
 ## Fixed test and leakage protection
 
@@ -662,6 +685,42 @@ Keep the test-set file under version control. Changing it changes its SHA-256
 and creates a different benchmark; do not compare the resulting scores as if
 they came from the same holdout.
 
+The auxiliary retention holdout contains 120 project-authored items across six
+dimensions (instruction, language transformation, strict formatting, stable
+knowledge, logic, and non-target string reasoning). It is included in every
+training-leakage filter and reports Wilson 95% intervals for overall and
+per-dimension forgetting. Development, retention, every locally visible
+non-blind registry set, and frozen official questions are holdouts; blind text
+remains unavailable to the training process.
+
+Official and blind evaluation must be launched through the checkpoint-bound
+runner. Direct loading of either YAML fails until source study, method, seed,
+run ID, checkpoint path, and checkpoint SHA are supplied and verified against
+the completed experiment registry:
+
+```bash
+python run_formal_evaluation.py \
+  --config configs/experiments/official_fixed_eval.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --source-index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
+  --source-study-id '<registered-study-id>' \
+  --source-method full --source-seed 42 \
+  --checkpoint-path /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/.../model \
+  --checkpoint-sha256 '<directory-sha256>' \
+  --run-id official-full-seed42
+```
+
+Official assembly requires every item to pass independent recomputation, two
+distinct validation methods and actors, template/lexical/math-AST/embedding
+leakage checks, and an audit manifest binding candidate and training-corpus
+hashes, thresholds, algorithm version, and report hash. Blind release also
+requires an independently provisioned release-token SHA-256.
+
+Hard-pool samples now move through `active`, `mastered`, `stale`, and `retired`.
+Each new model version retests high-priority active/stale samples. Repeatedly
+correct samples become mastered; aged samples become stale/retired; only active
+samples may guide prompts or enter legacy hard-pool training export.
+
 ## Training dataset contract
 
 Only records from the current cycle are eligible. After quality filtering,
@@ -676,6 +735,17 @@ format/instruction errors according to `training_mix`. If a source is short,
 other wrong records may fill its share, but correct records never fill a wrong
 slot. Incomplete four-example blocks are not exported. The manifest records the
 selected counts and asserts the exact ratio before fine-tuning.
+
+Template clusters are assigned as indivisible groups with a target-deviation
+objective rather than placing the largest clusters into fixed splits. The
+25/75 ratio is re-enforced on the actual train split, and manifests report
+train/validation/internal-test fractions plus category, source, correctness,
+and difficulty distributions. `data_matched` matches the post-split train
+sample count and ratio. If the training-token cap truncates data, the trainer
+uses deterministic round-robin sampling over category, source, correctness,
+difficulty, and template strata instead of retaining a file prefix. Effective
+optimizer steps bound eval/save intervals so even a short capped run evaluates
+and saves at least once.
 
 Every eligible record must also contain a concrete
 `gold_reasoning_summary` within the configured step and character limits. The

@@ -28,7 +28,8 @@ DeepSeek/OpenAI 兼容接口提供 usage 时使用供应商的精确 Token；供
 
 ## 三种协议
 
-`budget.protocol` 支持 `question_matched`、`data_matched` 和 `cost_matched`。
+`budget.protocol` 支持 `question_matched`、`data_matched` 和
+`generation_token_matched`。
 `question_matched` 保留原有计划题数比较，只作兼容基线。
 
 ### Data-matched
@@ -45,18 +46,21 @@ budget:
 并结束该运行。目标必须能被 4 整除。声明的问题预算是防止无限生成的安全上限；上限
 内仍未达到目标则实验失败并报告 shortfall，不能拿不足样本冒充 data-matched。
 
-### Cost-matched
+### Generation-token-matched
 
 ```yaml
 budget:
-  protocol: cost_matched
+  protocol: generation_token_matched
   max_generation_tokens: 1000000
   max_total_api_calls: null
 ```
 
-每次新生成调用前检查已消费 Token/API 数；达到上限后不再发起调用，保留已有样本
-继续过滤和训练。供应商只能在响应返回后报告输出 Token，因此最后一个在途请求可能
-使 Token 数略高于边界，但边界耗尽后不会启动下一请求。账本保留 `exhausted` 和原因。
+每次新生成调用前预留输入估算 Token 与声明的最大输出 Token；预算无法容纳完整预留
+时不会发起请求。账本记录 `budget_cap`、`used_before_last_call`、`last_call_cost`、
+`overshoot` 和 `overshoot_ratio`。Judge、验证、训练 Token 与 GPU 时间仍完整计量，
+但本协议只匹配生成 Token，所以不能解释为统一 Cost-matched。每次真实 provider 重试
+都在底层记账；缺少 provider usage 时标记 `cost_quality=estimated/mixed`，正式成本不
+能标为 complete。
 
 同时运行两种协议：
 
@@ -102,7 +106,8 @@ study/method/variant/seed/cycle、题号、类别、难度、金标、预测、�
 延迟和 Token。其余表从该长表、`experiment_summary.json` 和
 `budget_ledger.json` 自动生成，不接受手填准确率。
 
-主结果报告跨 Seed 均值、标准差、95% 区间与相对 Base 增量；类别和难度指标先逐
+主结果报告跨 Seed 均值、标准差、95% 区间与相对 Base 增量；三个 seed 的区间使用
+Student-t 临界值 4.303，不使用 1.96。类别和难度指标先逐
 seed 计算再汇总。显著性检验只执行 suite 中的 `comparison_pairs`。论文主 p 值来自
 逐 seed 双侧精确 McNemar 的组合，主区间使用 Seed × Item 簇 Bootstrap；直接池化
 不同 seed 的 McNemar 和 Item Bootstrap 只标为描述性结果。所有预注册运行、seed 和

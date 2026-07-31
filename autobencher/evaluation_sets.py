@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from collections import Counter
 from pathlib import Path
@@ -21,6 +20,7 @@ EVALUATION_ROLES = frozenset(
 BLIND_PATH_ENV = "AUTOBENCHER_BLIND_TEST_PATH"
 BLIND_SHA256_ENV = "AUTOBENCHER_BLIND_TEST_SHA256"
 BLIND_TOKEN_ENV = "AUTOBENCHER_BLIND_RELEASE_TOKEN"
+BLIND_TOKEN_SHA256_ENV = "AUTOBENCHER_BLIND_RELEASE_TOKEN_SHA256"
 
 
 def file_sha256(path: str | Path) -> str:
@@ -155,10 +155,20 @@ def resolve_active_evaluation_set(
             "Blind evaluation requires evaluation_sets.allow_blind_evaluation=true."
         )
     token_env = str(selected.get("release_token_env", BLIND_TOKEN_ENV))
+    token_hash_env = str(
+        selected.get("release_token_sha256_env", BLIND_TOKEN_SHA256_ENV)
+    )
     path_env = str(selected.get("dataset_path_env", BLIND_PATH_ENV))
     hash_env = str(selected.get("dataset_sha256_env", BLIND_SHA256_ENV))
-    if not str(env.get(token_env, "")).strip():
-        raise PermissionError(f"Blind evaluation release token is missing: {token_env}")
+    token = str(env.get(token_env, "")).strip()
+    expected_token_hash = str(env.get(token_hash_env, "")).strip().lower()
+    if not token or not expected_token_hash:
+        raise PermissionError(
+            "Blind evaluation requires a release token and its independently "
+            f"provisioned SHA-256 ({token_env}, {token_hash_env})"
+        )
+    if hashlib.sha256(token.encode("utf-8")).hexdigest() != expected_token_hash:
+        raise PermissionError("Blind evaluation release token hash mismatch")
     raw_path = str(env.get(path_env, "")).strip()
     expected_sha256 = str(env.get(hash_env, "")).strip().lower()
     if not raw_path or not expected_sha256:
@@ -270,7 +280,42 @@ def validate_evaluation_coverage(
                 if isinstance(evidence, Mapping)
                 else []
             )
-            if status != "verified" or not isinstance(sources, list) or len(sources) < 2:
+            source_ids = [
+                str(source.get("source_id", "")).strip()
+                for source in sources if isinstance(source, Mapping)
+            ] if isinstance(sources, list) else []
+            methods = [
+                str(source.get("method", source.get("source_type", ""))).strip()
+                for source in sources if isinstance(source, Mapping)
+            ] if isinstance(sources, list) else []
+            actors = [
+                str(
+                    source.get(
+                        "solver_id",
+                        source.get("model_id", source.get("annotator_id", "")),
+                    )
+                ).strip()
+                for source in sources if isinstance(source, Mapping)
+            ] if isinstance(sources, list) else []
+            answers = [
+                " ".join(str(source.get("answer", "")).split()).lower()
+                for source in sources if isinstance(source, Mapping)
+            ] if isinstance(sources, list) else []
+            gold = " ".join(
+                str(item.get("canonical_answer", item.get("gold_answer", ""))).split()
+            ).lower()
+            independent_sources = (
+                len(source_ids) >= 2
+                and all(source_ids)
+                and len(set(source_ids)) == len(source_ids)
+                and all(methods)
+                and len(set(methods)) >= 2
+                and all(actors)
+                and len(set(actors)) == len(actors)
+                and all(answers)
+                and all(answer == gold for answer in answers)
+            )
+            if status != "verified" or not independent_sources:
                 invalid_evidence.append(
                     str(item.get("question_id", item.get("id", "<unknown>")))
                 )
@@ -316,8 +361,10 @@ def validate_evaluation_coverage(
                     )
     if invalid_evidence:
         raise ValueError(
-            "Official/blind questions require verified status and at least "
-            "two validation sources; proof/text items also require two human "
+            "Official/blind questions require verified status, distinct non-empty "
+            "source and solver/model/annotator IDs, at least two methods, and "
+            "answers agreeing with gold; "
+            "proof/text items also require two human "
             "annotations and adjudication on disagreement: "
             + ", ".join(invalid_evidence[:20])
         )

@@ -47,6 +47,7 @@ sets:
     dataset_path_env: AUTOBENCHER_BLIND_TEST_PATH
     dataset_sha256_env: AUTOBENCHER_BLIND_TEST_SHA256
     release_token_env: AUTOBENCHER_BLIND_RELEASE_TOKEN
+    release_token_sha256_env: AUTOBENCHER_BLIND_RELEASE_TOKEN_SHA256
     expected_question_count: 540
     minimum_questions_per_subcategory: 20
     require_all_subcategories: true

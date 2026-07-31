@@ -1,6 +1,7 @@
 """Built-in offline QLoRA fine-tuning for AutoBencher math datasets."""
 
 import argparse
+import hashlib
 import importlib
 import inspect
 import json
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from collections import Counter
 
 
 LOGGER = logging.getLogger("TrainLLM")
@@ -25,6 +27,78 @@ REQUIRED_PACKAGES = (
     "datasets",
     "accelerate",
 )
+
+
+def _training_stratum(record):
+    metadata = record.get("_metadata") or {}
+    difficulty = int(metadata.get("difficulty", 5) or 5)
+    return (
+        str(metadata.get("category", "unknown")),
+        str(metadata.get("training_source", "unknown")),
+        "correct" if metadata.get("training_source") == "correct_retention_samples" else "incorrect",
+        "basic" if difficulty <= 3 else "intermediate" if difficulty <= 6 else "hard",
+        str(metadata.get("template_signature", "unknown")),
+    )
+
+
+def stratified_token_budget_indices(records, token_counts, cap, *, seed):
+    """Deterministically retain diverse strata without prefix-order bias."""
+    if len(records) != len(token_counts):
+        raise ValueError("records and token_counts must align")
+    buckets = {}
+    for index, record in enumerate(records):
+        buckets.setdefault(_training_stratum(record), []).append(index)
+    for key, indices in buckets.items():
+        indices.sort(
+            key=lambda index: hashlib.sha256(
+                f"{seed}|{key}|{json.dumps(records[index], sort_keys=True)}".encode("utf-8")
+            ).hexdigest()
+        )
+    selected = []
+    used = 0
+    keys = sorted(buckets, key=lambda key: hashlib.sha256(f"{seed}|{key}".encode()).hexdigest())
+    while any(buckets[key] for key in keys):
+        consumed = False
+        for key in keys:
+            if not buckets[key]:
+                continue
+            index = buckets[key].pop(0)
+            consumed = True
+            count = int(token_counts[index])
+            if used + count <= int(cap):
+                selected.append(index)
+                used += count
+        if not consumed:
+            break
+    if not selected:
+        raise RuntimeError("No training sample fits within max_training_tokens")
+    selected.sort()
+    strata = {}
+    for index in selected:
+        key = "|".join(_training_stratum(records[index]))
+        strata[key] = strata.get(key, 0) + 1
+    def distributions(indices):
+        dimensions = ("category", "training_source", "correctness", "difficulty")
+        counters = {name: Counter() for name in dimensions}
+        for index in indices:
+            values = _training_stratum(records[index])
+            for name, value in zip(dimensions, values[:4]):
+                counters[name][value] += 1
+        return {
+            name: dict(sorted(counter.items()))
+            for name, counter in counters.items()
+        }
+    return selected, {
+        "strategy": "deterministic_stratified_token_budget_v1",
+        "requested_count": len(records),
+        "retained_count": len(selected),
+        "token_cap_per_epoch": int(cap),
+        "retained_tokens_per_epoch": used,
+        "rejected_by_token_cap_count": len(records) - len(selected),
+        "stratum_counts": dict(sorted(strata.items())),
+        "population_distributions": distributions(range(len(records))),
+        "retained_distributions": distributions(selected),
+    }
 
 
 def _transformers_dtype_kwargs(transformers_module, dtype):
@@ -207,10 +281,15 @@ def load_alpaca_records(dataset_path):
                 raise ValueError(
                     f"Invalid JSONL record at line {line_number}: {exc.msg}"
                 ) from exc
-            if not isinstance(record, dict) or set(record) != ALPACA_FIELDS:
+            if not isinstance(record, dict) or not ALPACA_FIELDS.issubset(record):
                 raise ValueError(
-                    f"Line {line_number} must contain exactly: "
-                    "instruction, input, output"
+                    f"Line {line_number} must contain instruction, input, output"
+                )
+            unexpected = set(record) - (ALPACA_FIELDS | {"_metadata"})
+            if unexpected:
+                raise ValueError(
+                    f"Line {line_number} contains unexpected fields: "
+                    + ", ".join(sorted(unexpected))
                 )
             normalized = {
                 key: str(record[key]).strip()
@@ -227,6 +306,8 @@ def load_alpaca_records(dataset_path):
                 raise ValueError(
                     f"Line {line_number} contains non-English CJK text"
                 )
+            if isinstance(record.get("_metadata"), dict):
+                normalized["_metadata"] = dict(record["_metadata"])
             records.append(normalized)
     if not records:
         raise ValueError("Training dataset contains no usable Alpaca records")
@@ -280,12 +361,16 @@ def _training_config(
 ):
     from transformers import TrainingArguments
 
+    effective_steps = max(
+        1,
+        min(int(planned_optimizer_steps), int(args.max_optimizer_steps)),
+    )
     checkpoint_steps = max(
         1,
         min(
             int(args.eval_steps),
             int(args.save_steps),
-            int(planned_optimizer_steps),
+            effective_steps,
         ),
     )
     values = {
@@ -324,8 +409,8 @@ def _training_config(
         "seed": args.seed,
         "data_seed": args.seed,
     }
-    if int(planned_optimizer_steps) > int(args.max_optimizer_steps):
-        values["max_steps"] = int(args.max_optimizer_steps)
+    if int(planned_optimizer_steps) > effective_steps:
+        values["max_steps"] = effective_steps
     try:
         from trl import SFTConfig
 
@@ -410,24 +495,24 @@ def train_and_merge(
 
     formatted_records, train_token_counts = prepare_dataset(records)
     per_epoch_cap = max(1, int(args.max_training_tokens) // int(args.epoch))
-    kept_count = 0
-    kept_tokens = 0
-    for count in train_token_counts:
-        if kept_count and kept_tokens + count > per_epoch_cap:
-            break
-        kept_count += 1
-        kept_tokens += count
-    if kept_count < len(formatted_records):
+    selected_indices, token_selection_audit = stratified_token_budget_indices(
+        records,
+        train_token_counts,
+        per_epoch_cap,
+        seed=args.seed,
+    )
+    kept_tokens = sum(train_token_counts[index] for index in selected_indices)
+    if len(selected_indices) < len(formatted_records):
         LOGGER.info(
             "stage=token_budget requested_samples=%d retained_samples=%d "
             "per_epoch_tokens=%d cap=%d",
             len(formatted_records),
-            kept_count,
+            len(selected_indices),
             kept_tokens,
             per_epoch_cap,
         )
-        formatted_records = formatted_records[:kept_count]
-    records = records[:kept_count]
+    formatted_records = [formatted_records[index] for index in selected_indices]
+    records = [records[index] for index in selected_indices]
     dataset_token_count = kept_tokens
     dataset = Dataset.from_list(formatted_records)
     formatted_eval, eval_token_counts = prepare_dataset(eval_records)
@@ -445,6 +530,10 @@ def train_and_merge(
     planned_optimizer_steps = max(
         1,
         math.ceil(len(records) / max(1, int(args.batch))) * int(args.epoch),
+    )
+    effective_optimizer_steps = min(
+        planned_optimizer_steps,
+        int(args.max_optimizer_steps),
     )
 
     quantization_config = BitsAndBytesConfig(
@@ -666,6 +755,8 @@ def train_and_merge(
         "max_training_tokens": int(args.max_training_tokens),
         "max_optimizer_steps": int(args.max_optimizer_steps),
         "planned_optimizer_steps": planned_optimizer_steps,
+        "effective_optimizer_steps": effective_optimizer_steps,
+        "token_budget_selection": token_selection_audit,
         "best_checkpoint": (
             Path(best_checkpoint).name if best_checkpoint else None
         ),

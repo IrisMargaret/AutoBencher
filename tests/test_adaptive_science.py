@@ -118,26 +118,50 @@ def test_difficulty_calibration_rejects_blind_data_and_freezes(tmp_path):
             )
         }
         item.pop("difficulty_profile")
-    panel = [
-        {"model_id": "small", "tier": "small", "model_path": "/models/small"},
-        {"model_id": "medium", "tier": "medium", "model_path": "/models/medium"},
-        {"model_id": "strong", "tier": "strong", "model_path": "/models/strong"},
-    ]
+    model_root = tmp_path / "models"
+    panel = []
+    for name in ("small", "medium", "strong"):
+        model_path = model_root / name
+        model_path.mkdir(parents=True)
+        (model_path / "config.json").write_text(
+            json.dumps({"model_type": "fixture", "tier": name}),
+            encoding="utf-8",
+        )
+        panel.append(
+            {"model_id": name, "tier": name, "model_path": str(model_path)}
+        )
     with pytest.raises(DifficultyCalibrationError, match="blind"):
         prepare_panel_schedule(items, panel, dataset_role="blind_test")
     schedule = prepare_panel_schedule(
-        items, panel, dataset_role="difficulty_calibration"
+        items,
+        panel,
+        dataset_role="difficulty_calibration",
     )
     assert len(schedule) == 15
+    tasks = {
+        (task["question_id"], task["model_id"]): task for task in schedule
+    }
     responses = []
     for item_index, item in enumerate(items):
         for model_index, model in enumerate(panel):
+            task = tasks[(item["question_id"], model["model_id"])]
             responses.append(
                 {
                     "question_id": item["question_id"],
                     "model_id": model["model_id"],
                     "model_tier": model["tier"],
                     "is_correct": model_index >= item_index - 1,
+                    "raw_response": f"fixture answer {model_index}:{item_index}",
+                    **{
+                        key: task[key]
+                        for key in (
+                            "model_sha256",
+                            "tokenizer_sha256",
+                            "inference_prompt_sha256",
+                            "decoding_config_sha256",
+                            "provider_revision",
+                        )
+                    },
                 }
             )
     candidate = calibrate_difficulty(

@@ -13,6 +13,7 @@ from autobencher.evaluation_audit import (
     load_json_questions,
 )
 from autobencher.experiment import atomic_json
+from autobencher.fingerprints import file_sha256
 from autobencher.fixed_benchmark import load_fixed_test_set
 from autobencher.truth_solver import TruthSolver
 
@@ -49,7 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument(
         "--training-data",
         required=True,
-        help="All train/generation corpora used for leakage rejection.",
+        help="Final training corpus used for leakage rejection.",
+    )
+    assemble.add_argument(
+        "--generation-data",
+        required=True,
+        help="All raw/accepted generation records considered during development.",
     )
     return parser
 
@@ -57,8 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "assemble-official":
+        output_path = Path(args.output).expanduser().resolve()
+        allowed_root = Path(args.allowed_data_root).expanduser().resolve()
+        if not output_path.is_relative_to(allowed_root):
+            raise ValueError(
+                f"Official output and audit must be beneath {allowed_root}"
+            )
         candidates = load_json_questions(args.candidates)
         training = load_json_questions(args.training_data)
+        generation = load_json_questions(args.generation_data)
         config, _ = load_project_config(
             "configs/math_flywheel.yaml",
             validate_paths=False,
@@ -67,7 +80,8 @@ def main(argv=None) -> int:
             candidates,
             normalization_config=config,
             solver=TruthSolver.from_config(config),
-            training_records=training,
+            training_records=[*training, *generation],
+            require_embedding_audit=True,
         )
         leaking = [
             item["question_id"]
@@ -79,6 +93,12 @@ def main(argv=None) -> int:
                 "Official candidates overlap training/generation corpora: "
                 + ", ".join(leaking[:20])
             )
+        if not audit["all_independently_verified"]:
+            raise ValueError(
+                "Official candidates contain unresolved independent-solver conflicts"
+            )
+        audit_path = output_path.with_suffix(".leakage_audit.json")
+        atomic_json(audit, audit_path)
         result = assemble_official_set(
             candidates,
             name=args.name,
@@ -90,7 +110,16 @@ def main(argv=None) -> int:
             near_duplicate_threshold=args.near_duplicate_threshold,
             training_leakage_audit={
                 "training_record_count": len(training),
+                "generation_record_count": len(generation),
                 "leaking_question_count": 0,
+                "training_corpus_sha256": file_sha256(args.training_data),
+                "generation_corpus_sha256": file_sha256(args.generation_data),
+                "candidate_corpus_sha256": file_sha256(args.candidates),
+                "audit_algorithm_version": audit["audit_algorithm_version"],
+                "thresholds": audit["thresholds"],
+                "audit_report_sha256": file_sha256(audit_path),
+                "audit_report_path": audit_path.as_posix(),
+                "all_independently_verified": True,
             },
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))

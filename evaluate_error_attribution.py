@@ -87,6 +87,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     blind.add_argument("--input", required=True)
     blind.add_argument("--output-dir", required=True)
+    blind.add_argument(
+        "--sealed-output-dir",
+        help="operator-only directory outside the annotator packet directory",
+    )
     blind.add_argument("--sample-size", type=int, default=400)
     blind.add_argument("--seed", type=int, default=42)
 
@@ -105,6 +109,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     score.add_argument("--review-csv", required=True)
     score.add_argument("--output", required=True)
+    score.add_argument("--minimum-reviewed-count", type=int, default=300)
+    score.add_argument("--minimum-kappa", type=float, default=0.70)
+    score.add_argument("--minimum-high-confidence-accuracy", type=float, default=0.80)
+    score.add_argument("--minimum-high-confidence-count", type=int, default=50)
+    score.add_argument("--minimum-completion-rate", type=float, default=0.90)
+    score.add_argument("--maximum-unresolved-rate", type=float, default=0.0)
+    score.add_argument("--minimum-per-label-count", type=int, default=5)
     return parser
 
 
@@ -133,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
             output_dir,
             sample_size=args.sample_size,
             seed=args.seed,
+            sealed_output_dir=(
+                _contained_path(args.sealed_output_dir, allowed)
+                if args.sealed_output_dir
+                else None
+            ),
         )
     elif args.command == "merge":
         result = merge_blinded_reviews(
@@ -144,7 +160,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         review_path = _contained_path(args.review_csv, allowed)
         output_path = _contained_path(args.output, allowed)
-        result = evaluate_review_csv(review_path, output_path)
+        result = evaluate_review_csv(
+            review_path,
+            output_path,
+            minimum_reviewed_count=args.minimum_reviewed_count,
+            minimum_cohen_kappa=args.minimum_kappa,
+            minimum_high_confidence_accuracy=(
+                args.minimum_high_confidence_accuracy
+            ),
+            minimum_high_confidence_count=args.minimum_high_confidence_count,
+            minimum_completion_rate=args.minimum_completion_rate,
+            maximum_unresolved_rate=args.maximum_unresolved_rate,
+            minimum_per_label_count=args.minimum_per_label_count,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

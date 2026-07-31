@@ -299,7 +299,11 @@ suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
 每个运行都会从真实 generator、SymPy、Judge、去重、训练、GPU 和耗时事件生成
 `budget_ledger.json`，并分别记录候选池、train、validation、internal test 与真实参与
 训练的样本数。`data_matched` 在模板簇划分后匹配实际 train 数量及正确/错题比例；
-`cost_matched` 在统一 Token/API 上限耗尽后停止新的生成调用。
+`generation_token_matched` 会在每次生成前预留输入估算 Token 与声明的最大输出
+Token，并在生成 Token 上限耗尽后停止。它不再被误称为 Cost-matched：Judge、重试、
+训练 Token 与 GPU 时间都会计量，但并未被压缩成一个可交换的统一硬预算。provider
+usage 可用时使用精确 Token；否则标记 `cost_quality=estimated` 或 `mixed`，成本不能
+标成 complete；账本同时记录末次调用成本和越界量。
 
 ```bash
 python -B run_study.py \
@@ -311,8 +315,9 @@ python -B aggregate_study.py \
 
 聚合器从固定集原始逐题记录重建 `results_long.csv`，按评测集 ID/版本/哈希、预算协议、
 模型、预算、方法、变体与 seed 隔离结果。显著性检验只运行 suite 预注册的比较；主检验
-按 seed 分别做 McNemar 后组合，并报告 seed/item 簇 Bootstrap 区间，跨 seed 池化
-McNemar 仅作描述。完整定义见
+按 seed 分别做 McNemar 后组合，并报告 seed/item 簇 Bootstrap 区间。跨 seed 汇总的
+95% 区间使用 Student-t（3 个 seed 的临界值为 4.303），不再使用大样本 1.96；跨 seed
+池化 McNemar 仅作描述。完整定义见
 [`docs/fair_budget_and_statistics_zh-CN.md`](docs/fair_budget_and_statistics_zh-CN.md)。
 
 ### 客观难度定义
@@ -363,7 +368,11 @@ python calibrate_difficulty.py calibrate \
 Rasch/1PL、探索性 2PL 和校准后的五维权重。Rasch 只施加“题目难度均值为零”这一
 个位置约束，不再同时把模型能力强制中心化；产物会报告收敛损失和按模型聚类
 Bootstrap 的题目难度标准误。模型数量较少时，2PL 只能解释为探索分析。启用 v2 时，配置中的产物 SHA-256 与
-权重必须和冻结文件完全一致。
+权重必须和冻结文件完全一致。五个难度维度使用冻结的原始量纲（或已验证的 0–1
+归一化值），维度缺失、非有限值或越界都会失败。论文指标使用逐题确定性交叉验证的
+out-of-fold 预测，不把全数据拟合指标冒充验证结果。重复的 model×item、覆盖不足或
+少于三个能力层都会失败；每条响应必须绑定模型目录 SHA、tokenizer SHA、提示词 SHA、
+解码配置 SHA、provider revision 和原始响应，防止相同 model ID 静默指向不同快照。
 
 ### 自适应难度与题目分配
 
@@ -516,15 +525,17 @@ TruthSolver 候选解回代、SymPy 常数等式验证、推理结果到最终�
 没有检查能够隔离出可靠机制时，系统输出 `unknown_error`，不会根据关键词猜测模型的
 “认知原因”。
 
-论文级验证默认抽取 400 条错误，并导出两份独立乱序盲标包：
+论文级验证默认抽取 400 条错误，并按预测标签、置信度、验证层级、类别与难度分层，
+导出两份独立乱序盲标包；非自然比例抽样通过密封文件中的逆概率权重恢复总体指标：
 
 ```bash
 python evaluate_error_attribution.py export-blinded \
   --input /vepfs-mlp2/queue010/20262202597/math_flywheel/review/errors.jsonl \
-  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1
+  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1 \
+  --sealed-output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review_private/blind_v1
 
 python evaluate_error_attribution.py merge \
-  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/system_predictions.sealed.csv \
+  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review_private/blind_v1/system_predictions.csv \
   --annotator-1 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_1.csv \
   --annotator-2 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_2.csv \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv
@@ -534,10 +545,13 @@ python evaluate_error_attribution.py score \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/metrics.json
 ```
 
-标注者看不到系统标签和对方标签；一致标签自动成为共识，分歧必须由第三方填写
+标注者只能看到题目、gold、模型原始答案/推理和冻结的标签 codebook；看不到系统标签、
+首错步骤、验证证据或对方标签。系统预测存放在公共评审目录之外的受限目录中。一致标签自动成为共识，分歧必须由第三方填写
 `adjudicated_label`。报告 Coverage、Selective Accuracy、Macro-F1、Cohen’s Kappa、
 Brier Score、混淆矩阵和 `unknown_error` 比例。只有已裁决样本不少于 300、
-Kappa ≥ 0.70、高置信度准确率 ≥ 0.80 且无未决分歧时，错误类型才可作为论文核心信号。
+Kappa ≥ 0.70、高置信度准确率 ≥ 0.80、高置信度样本不少于 50、完成率不少于 90%、
+正式模式无未决分歧且各已出现标签达到最小样本数时，错误类型才可作为论文核心信号。
+拼写错误或 taxonomy 外标签会直接失败。
 
 ## 固定测试集与泄漏防护
 
@@ -567,6 +581,35 @@ Kappa ≥ 0.70、高置信度准确率 ≥ 0.80 且无未决分歧时，错误�
 固定测试集应纳入版本控制。修改它会改变 SHA-256，也就形成了新的测试基准，不能
 再把修改前后的分数当作同一测试集结果直接比较。
 
+辅助留存集已经扩展为 120 道项目原创题，均匀覆盖一般指令、语言变换、严格格式、
+稳定常识、逻辑一致性和非目标字符串推理六个维度。它与开发集、所有本地可见的非盲
+评测集、冻结后的正式集一起进入训练泄漏过滤；总体与分维度遗忘率均报告 Wilson 95%
+区间。盲测题面始终不向训练进程开放。
+
+正式集和盲测只能由 checkpoint 绑定入口启动。直接加载对应 YAML 会因缺少来源信息
+而失败；入口会把 source study/method/seed/run ID、checkpoint 路径及目录 SHA 与已完成
+Registry 逐项核对：
+
+```bash
+python run_formal_evaluation.py \
+  --config configs/experiments/official_fixed_eval.yaml \
+  --environment configs/environments/volcengine.yaml \
+  --source-index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
+  --source-study-id '<registered-study-id>' \
+  --source-method full --source-seed 42 \
+  --checkpoint-path /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/.../model \
+  --checkpoint-sha256 '<directory-sha256>' \
+  --run-id official-full-seed42
+```
+
+正式集发布要求：每题独立重求解通过；两个验证来源的 source ID、方法和执行者均独立；
+通过参数模板、词法、数学 AST/方程结构与 embedding 泄漏审计；发布清单绑定候选语料、
+训练语料、算法版本、阈值与审计报告哈希。盲测发布还必须校验独立提供的 token SHA-256。
+
+错题池采用 `active`、`mastered`、`stale`、`retired` 生命周期。每个新模型版本复测高
+优先级 active/stale 题；连续答对后转为 mastered，长期未复现则 stale/retired；只有
+active 题能注入生成提示或进入旧版错题训练导出。
+
 ## 训练集协议
 
 只有本 Cycle 产生的记录才有训练资格。质量过滤、固定测试集过滤和去重后，系统按
@@ -578,6 +621,13 @@ Kappa ≥ 0.70、高置信度准确率 ≥ 0.80 且无未决分歧时，错误�
 错题部分按 `training_mix` 分配给边界错题、覆盖修复和格式/指令错误。某一错题来源
 不足时可以由其他错题补足，但正确题绝不会占用错题位置。不完整的四条数据块不会
 导出；微调前 manifest 会记录计数并断言比例严格正确。
+
+模板簇使用目标偏差最小化算法整体划分，不再把第二、第三大簇机械放入留出集。25/75
+比例会在真实 train split 上再次强制；manifest 报告 train/validation/internal-test 的
+比例，以及类别、来源、正确性和难度分布。`data_matched` 匹配划分后的真实 train 样本
+数和比例。触发训练 Token 上限时，Trainer 按类别、来源、正确性、难度和模板簇进行
+确定性轮询抽样，不再保留文件前缀；eval/save 间隔受有效 optimizer steps 约束，短训练
+也至少执行一次评测和保存。
 
 每条合格记录还必须包含满足配置步数和单步字符限制的具体
 `gold_reasoning_summary`。默认流程根据 SymPy 的精确求解、规范最终答案和回代

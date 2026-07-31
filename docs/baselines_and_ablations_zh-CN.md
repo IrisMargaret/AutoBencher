@@ -155,7 +155,7 @@ git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
 | `pilot.yaml` | 第一轮九方法、两个 seed 的先导实验 |
 | `main.yaml` | 第一轮九方法 × 3 seeds × 1 model × 1350 总题目 |
 | `budget_curve.yaml` | 第一轮九方法在 135/270/675/1350 总题目下的预算曲线 |
-| `fair_budget.yaml` | Data-matched 与 Cost-matched × 第一轮九方法 × 三个 seed |
+| `fair_budget.yaml` | Data-matched 与 Generation-token-matched × 第一轮九方法 × 三个 seed |
 | `ablation_round2.yaml` | 完整方法与四个第二轮单组件消融 |
 | `history_modes.yaml` | cumulative、cycle_reset、time_decay 后验比较 |
 

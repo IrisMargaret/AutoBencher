@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -278,6 +279,8 @@ def _write_alpaca(records: Iterable[Mapping[str, Any]], path: Path) -> int:
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         for record in records:
             payload = {key: str(record[key]) for key in ALPACA_FIELDS}
+            if isinstance(record.get("_metadata"), Mapping):
+                payload["_metadata"] = dict(record["_metadata"])
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
             count += 1
         handle.flush()
@@ -361,6 +364,13 @@ def write_precomputed_training_splits(
         )
         for name in SPLIT_NAMES
     }
+    manifest["difficulty_counts"] = {
+        name: dict(sorted(Counter(
+            str((record.get("_metadata") or {}).get("difficulty", "unknown"))
+            for record in materialized[name]
+        ).items()))
+        for name in SPLIT_NAMES
+    }
     root = Path(output_dir).expanduser().resolve()
     paths = {}
     for name in SPLIT_NAMES:
@@ -373,3 +383,56 @@ def write_precomputed_training_splits(
     }
     atomic_json(manifest, root / "split_manifest.json")
     return manifest
+
+
+def enforce_train_correct_incorrect_ratio(
+    splits: Mapping[str, Iterable[Mapping[str, Any]]],
+    *,
+    correct_fraction: float,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Downsample only train after clustering to preserve a declared mix."""
+    if not 0 < float(correct_fraction) < 1:
+        raise ValueError("correct_fraction must be strictly between zero and one")
+    materialized = {
+        name: [dict(item) for item in splits[name]] for name in SPLIT_NAMES
+    }
+    train = materialized["train"]
+    correct = [
+        item for item in train
+        if item.get("_metadata", {}).get("training_source")
+        == "correct_retention_samples"
+    ]
+    incorrect = [
+        item for item in train
+        if item.get("_metadata", {}).get("training_source")
+        != "correct_retention_samples"
+    ]
+    # The production ratio is rational (currently 1/4). Search the largest
+    # feasible exact count rather than accepting post-split drift.
+    denominator = 1000
+    numerator = round(float(correct_fraction) * denominator)
+    divisor = math.gcd(numerator, denominator)
+    numerator //= divisor
+    denominator //= divisor
+    incorrect_units = denominator - numerator
+    units = min(
+        len(correct) // numerator,
+        len(incorrect) // incorrect_units,
+    )
+    if units <= 0:
+        raise ValueError(
+            "Post-split train data cannot satisfy the configured correct/error ratio"
+        )
+    kept_correct = correct[: units * numerator]
+    kept_incorrect = incorrect[: units * incorrect_units]
+    materialized["train"] = [*kept_correct, *kept_incorrect]
+    return materialized, {
+        "requested_correct_fraction": float(correct_fraction),
+        "pre_cap_train_count": len(train),
+        "pre_cap_correct_count": len(correct),
+        "pre_cap_incorrect_count": len(incorrect),
+        "post_cap_train_count": len(materialized["train"]),
+        "post_cap_correct_count": len(kept_correct),
+        "post_cap_incorrect_count": len(kept_incorrect),
+        "post_cap_correct_fraction": len(kept_correct) / len(materialized["train"]),
+    }

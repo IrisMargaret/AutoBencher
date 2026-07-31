@@ -675,12 +675,17 @@ def query_openai_compatible(
                 flush=True,
             )
             ledger = None
-            if budget_role == "generation":
+            if budget_role in {"generation", "validation"}:
                 from autobencher.budget_ledger import active_ledger
 
                 ledger = active_ledger()
-                if ledger is not None:
-                    ledger.assert_generation_available()
+                if ledger is not None and budget_role == "generation":
+                    from autobencher.budget_ledger import estimate_tokens
+
+                    ledger.assert_generation_available(
+                        reserved_input_tokens=estimate_tokens(prompt),
+                        reserved_output_tokens=int(max_tokens),
+                    )
             try:
                 request_kwargs = dict(
                     model=model,
@@ -692,11 +697,10 @@ def query_openai_compatible(
                     top_p=top_p,
                     n=num_completions,
                 )
-                # DeepSeek API requests intentionally omit an output-token cap.
-                # Local/other providers still use the caller's max_tokens
-                # because they require an explicit generation safety bound.
-                if not model.lower().startswith("deepseek"):
-                    request_kwargs["max_tokens"] = max_tokens
+                # A declared output reserve is enforceable only if the same
+                # cap is sent to every provider, including DeepSeek-compatible
+                # endpoints.
+                request_kwargs["max_tokens"] = max_tokens
                 if stop_sequences:
                     request_kwargs["stop"] = list(stop_sequences)
                 if timeout_seconds is not None:
@@ -721,7 +725,8 @@ def query_openai_compatible(
                         input_tokens is not None
                         and output_tokens is not None
                     )
-                    ledger.record_generation_call(
+                    ledger.record_provider_call(
+                        role=budget_role,
                         input_tokens=(
                             int(input_tokens)
                             if input_tokens is not None
@@ -747,16 +752,18 @@ def query_openai_compatible(
                 break
             except Exception as exc:
                 elapsed = time.monotonic() - started
-                if budget_role == "generation" and ledger is not None:
+                if budget_role in {"generation", "validation"} and ledger is not None:
                     from autobencher.budget_ledger import estimate_tokens
 
-                    ledger.record_generation_call(
+                    ledger.record_provider_call(
+                        role=budget_role,
                         input_tokens=estimate_tokens(prompt),
                         output_tokens=0,
                         wall_time_seconds=elapsed,
                         retry=retry > 0,
                         api_calls=1,
                         exact_tokens=False,
+                        success=False,
                     )
                 if retry == retry_count - 1:
                     raise RuntimeError(

@@ -21,7 +21,7 @@ study_suite:
   protocols:
     - name: data_matched
       target_training_samples: 4
-    - name: cost_matched
+    - name: generation_token_matched
       max_generation_tokens: 100000
   common_overrides:
     - experiment.num_iterations=1

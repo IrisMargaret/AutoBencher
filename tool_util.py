@@ -1,6 +1,7 @@
 import copy
 import contextlib
 import hashlib
+import math
 import re
 import requests
 import os, argparse, ast, json, tqdm
@@ -781,6 +782,10 @@ def manage_hard_pool(
                 sample.get("sub_category_accuracy", 0.0)
             ),
             "occurrences": max(1, _as_int(sample.get("occurrences"), 1)),
+            "lifecycle_state": str(sample.get("lifecycle_state", "active")),
+            "consecutive_correct": max(0, _as_int(sample.get("consecutive_correct"), 0)),
+            "last_retested_cycle": sample.get("last_retested_cycle"),
+            "model_version_failures": dict(sample.get("model_version_failures", {})),
         }
         existing[hard_sample["unique_key"]] = hard_sample
 
@@ -817,6 +822,10 @@ def manage_hard_pool(
             "accuracy_bucket": accuracy_bucket,
             "sub_category_accuracy": sub_category_accuracy,
             "occurrences": 1,
+            "lifecycle_state": "active",
+            "consecutive_correct": 0,
+            "last_retested_cycle": None,
+            "model_version_failures": {},
         }
         previous = existing.get(sample["unique_key"])
         if previous:
@@ -840,6 +849,8 @@ def manage_hard_pool(
                     "sample_grade": sample_grade,
                     "accuracy_bucket": accuracy_bucket,
                     "sub_category_accuracy": sub_category_accuracy,
+                    "lifecycle_state": "active",
+                    "consecutive_correct": 0,
                     "occurrences": (
                         previous.get("occurrences", 1)
                         if already_seen_in_iteration
@@ -861,6 +872,59 @@ def manage_hard_pool(
     return len(existing) - before, len(samples)
 
 
+def update_hard_pool_lifecycle(
+    hard_pool_file,
+    retest_records,
+    *,
+    model_version,
+    current_cycle,
+    mastered_correct_streak=2,
+    stale_after_cycles=2,
+    retire_after_cycles=4,
+):
+    """Update active/mastered/stale/retired states from a new model retest."""
+    samples = [
+        dict(item) for item in read_json_records(hard_pool_file)
+        if isinstance(item, dict) and item.get("unique_key")
+    ]
+    outcomes = {
+        str(item.get("unique_key")): bool(item.get("is_correct"))
+        for item in retest_records
+        if isinstance(item, dict) and item.get("unique_key")
+    }
+    counts = defaultdict(int)
+    for sample in samples:
+        state = str(sample.get("lifecycle_state", "active"))
+        age = max(0, int(current_cycle) - int(sample.get("last_seen_cycle", 0) or 0))
+        outcome = outcomes.get(str(sample["unique_key"]))
+        failures = dict(sample.get("model_version_failures", {}))
+        if outcome is not None:
+            sample["last_retested_cycle"] = int(current_cycle)
+            sample["last_retested_model"] = str(model_version)
+            if outcome:
+                sample["consecutive_correct"] = int(
+                    sample.get("consecutive_correct", 0)
+                ) + 1
+                if sample["consecutive_correct"] >= int(mastered_correct_streak):
+                    state = "mastered"
+            else:
+                sample["consecutive_correct"] = 0
+                failures[str(model_version)] = int(failures.get(str(model_version), 0)) + 1
+                state = "active"
+        elif state not in {"mastered", "retired"} and age >= int(stale_after_cycles):
+            state = "stale"
+        if age >= int(retire_after_cycles) and state in {"mastered", "stale"}:
+            state = "retired"
+        sample["model_version_failures"] = failures
+        sample["cross_version_failure_count"] = len(
+            [value for value in failures.values() if int(value) > 0]
+        )
+        sample["lifecycle_state"] = state
+        counts[state] += 1
+    dump_standard_json(samples, hard_pool_file)
+    return {"total": len(samples), "state_counts": dict(sorted(counts.items()))}
+
+
 # [ADDED] Export eligible hard samples as Alpaca JSONL.
 def export_training_dataset(hard_pool_file, output_file):
     records = [
@@ -868,6 +932,7 @@ def export_training_dataset(hard_pool_file, output_file):
         for record in read_json_records(hard_pool_file)
         if isinstance(record, dict)
         and record.get("sample_grade") == "train_eligible"
+        and str(record.get("lifecycle_state", "active")) == "active"
         and record.get("question")
         and record.get("gold_answer")
     ]
@@ -1199,6 +1264,31 @@ class HardSamplePool:
     def total_count(self):
         return len(self.samples)
 
+    def select_retest(
+        self,
+        *,
+        current_cycle,
+        max_samples=20,
+        decay_lambda=0.5,
+    ):
+        eligible = []
+        for sample in self.samples:
+            if sample.get("sample_grade") != "train_eligible":
+                continue
+            if str(sample.get("lifecycle_state", "active")) not in {"active", "stale"}:
+                continue
+            age = max(0, int(current_cycle) - int(sample.get("last_seen_cycle", 0) or 0))
+            weight = math.exp(-float(decay_lambda) * age)
+            priority = weight * (
+                1.0
+                + float(sample.get("attribution_confidence", 0.0) or 0.0)
+                + math.log1p(int(sample.get("occurrences", 1) or 1))
+                + 0.25 * int(sample.get("cross_version_failure_count", 0) or 0)
+            )
+            eligible.append((priority, sample))
+        eligible.sort(key=lambda item: (item[0], item[1]["unique_key"]), reverse=True)
+        return [dict(item) for _, item in eligible[: int(max_samples)]]
+
     @staticmethod
     def accuracy(records):
         records = [record for record in records if isinstance(record, dict)]
@@ -1223,8 +1313,9 @@ class HardSamplePool:
             sample
             for sample in self.samples
             if sample.get("sample_grade") == "train_eligible"
+            and str(sample.get("lifecycle_state", "active")) == "active"
         ]
-        samples = eligible or self.samples
+        samples = eligible
         samples = samples if max_samples is None else samples[-max_samples:]
         grouped = defaultdict(list)
         for sample in samples:
@@ -1255,6 +1346,7 @@ class HardSamplePool:
             sample
             for sample in self.samples
             if sample.get("sample_grade") == "train_eligible"
+            and str(sample.get("lifecycle_state", "active")) == "active"
             and sample.get("category") == category
             and sample.get("sub_category") == sub_category
         ]
@@ -1263,6 +1355,7 @@ class HardSamplePool:
                 sample
                 for sample in self.samples
                 if sample.get("sample_grade") == "train_eligible"
+                and str(sample.get("lifecycle_state", "active")) == "active"
                 and sample.get("category") == category
             ]
         samples.sort(

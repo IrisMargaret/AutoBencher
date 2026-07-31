@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -79,6 +80,9 @@ def test_blind_set_fails_closed_and_uses_only_environment_path(tmp_path):
         "BLIND_PATH": str(dataset),
         "BLIND_HASH": file_sha256(dataset),
         "BLIND_TOKEN": "released",
+        "AUTOBENCHER_BLIND_RELEASE_TOKEN_SHA256": hashlib.sha256(
+            b"released"
+        ).hexdigest(),
     }
     with pytest.raises(PermissionError):
         resolve_active_evaluation_set(config, tmp_path, environment=env)
@@ -147,3 +151,25 @@ def test_all_81_development_questions_have_independent_recomputation():
     assert audit["question_count"] == 81
     assert audit["all_independently_verified"] is True
     assert audit["status_counts"] == {"independently_verified": 81}
+
+
+def test_retention_holdout_has_paper_sized_dimension_coverage():
+    root = Path(__file__).resolve().parents[1]
+    questions, metadata = load_fixed_test_set(
+        {
+            "fixed_test": {
+                "dataset_path": "benchmarks/retention_regression_set.json",
+                "require_all_subcategories": False,
+            }
+        },
+        root,
+    )
+    dimensions = {}
+    for question in questions:
+        dimension = question["retention_dimension"]
+        dimensions[dimension] = dimensions.get(dimension, 0) + 1
+        assert question["source_dataset"] == "project_native"
+        assert question["verification"]["training_use_prohibited"] is True
+    assert metadata["question_count"] == 120
+    assert len(dimensions) == 6
+    assert set(dimensions.values()) == {20}

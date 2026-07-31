@@ -519,7 +519,7 @@ class StudyRunner:
                                         int(protocol["target_training_samples"]),
                                     )
                                 )
-                            if protocol_name == "cost_matched":
+                            if protocol_name == "generation_token_matched":
                                 overrides.append(
                                     _override(
                                         "budget.max_generation_tokens",

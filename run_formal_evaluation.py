@@ -1,0 +1,114 @@
+"""Run official/blind evaluation only from a registry-bound checkpoint."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from autobencher.fingerprints import artifact_fingerprint
+from autobencher.result_schema import ExperimentRecord, validate_registry
+from autobencher.study_runner import validate_experiment_completion
+
+
+def _json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _override(name, value):
+    return f"{name}={json.dumps(value, ensure_ascii=False)}"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Checkpoint-bound official or blind evaluation runner."
+    )
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--environment")
+    parser.add_argument("--source-index", required=True)
+    parser.add_argument("--source-study-id", required=True)
+    parser.add_argument("--source-method", required=True)
+    parser.add_argument("--source-seed", required=True, type=int)
+    parser.add_argument("--checkpoint-path", required=True)
+    parser.add_argument("--checkpoint-sha256", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    registry = _json(Path(args.source_index).expanduser().resolve())
+    validate_registry(registry)
+    matches = [
+        ExperimentRecord.from_dict(item)
+        for item in registry["experiments"]
+        if item.get("study_id") == args.source_study_id
+    ]
+    if len(matches) != 1:
+        raise SystemExit("source_study_id must identify exactly one registry run")
+    source = matches[0]
+    if source.status != "completed":
+        raise SystemExit("source training run is not completed")
+    if source.method != args.source_method or source.seed != args.source_seed:
+        raise SystemExit("source method/seed does not match the registry")
+    completion = validate_experiment_completion(source)
+    checkpoint = Path(args.checkpoint_path).expanduser().resolve()
+    observed_sha = artifact_fingerprint(checkpoint, allow_missing=False)["sha256"]
+    if observed_sha != args.checkpoint_sha256.lower():
+        raise SystemExit("explicit checkpoint hash does not match checkpoint_path")
+    if observed_sha != completion["checkpoint_sha256"]:
+        raise SystemExit("checkpoint hash does not match source registry binding")
+    if source.method != "base":
+        manifests = sorted(
+            Path(source.run_dir).glob(
+                "cycle/cycle_*/training/checkpoint_manifest.json"
+            )
+        )
+        bound_path = Path(
+            str(_json(manifests[-1])["merged_model_path"])
+        ).resolve()
+        if checkpoint != bound_path:
+            raise SystemExit("checkpoint_path is not the source run's selected model")
+
+    command = [
+        sys.executable,
+        "-B",
+        str(Path(__file__).resolve().parent / "run_scripts.py"),
+        "math",
+        "--config",
+        str(Path(args.config).expanduser().resolve()),
+    ]
+    if args.environment:
+        command.extend(
+            ["--environment", str(Path(args.environment).expanduser().resolve())]
+        )
+    command.extend(
+        [
+            "--run-id",
+            args.run_id,
+            "--test-taker-modelname",
+            str(checkpoint),
+            "--override",
+            _override("evaluation_provenance.require_checkpoint_binding", True),
+            _override("evaluation_provenance.execution_policy", "eval_only"),
+            _override("evaluation_provenance.evaluated_method", source.method),
+            _override("evaluation_provenance.source_study_id", source.study_id),
+            _override("evaluation_provenance.source_run_id", source.study_id),
+            _override("evaluation_provenance.source_seed", source.seed),
+            _override("evaluation_provenance.checkpoint_path", str(checkpoint)),
+            _override("evaluation_provenance.checkpoint_sha256", observed_sha),
+            _override("models.test_taker.model_path", str(checkpoint)),
+        ]
+    )
+    print(subprocess.list2cmdline(command))
+    if args.dry_run:
+        return 0
+    return subprocess.run(
+        command,
+        cwd=Path(__file__).resolve().parent,
+        check=False,
+    ).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

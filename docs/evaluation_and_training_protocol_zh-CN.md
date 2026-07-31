@@ -53,22 +53,27 @@ python prepare_evaluation_sets.py audit-development \
 ```bash
 python prepare_evaluation_sets.py assemble-official \
   --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates.json \
-  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_training_and_generation_questions.json \
+  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
+  --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
   --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json \
   --minimum-per-subcategory 20
 ```
 
 组装器不会为了凑数降低门槛。某子类不足、缺少双来源验证、存在重复题或目标文件
-已存在都会失败。成功后生成 `.manifest.json`，记录版本、题数、覆盖率和整体
-SHA-256。正式文件不可覆盖；修改题目必须发布新版本。
+已存在都会失败。成功后生成 `.manifest.json`，记录版本、题数、覆盖率、训练语料、
+生成语料、候选语料、算法版本、阈值、审计报告和整体 SHA-256。正式文件不可覆盖；
+修改题目必须发布新版本。
 
 冻结后对选定模型运行正式集：
 
 ```bash
-python run_scripts.py math \
+python run_formal_evaluation.py \
   --config configs/experiments/official_fixed_eval.yaml \
   --environment configs/environments/volcengine.yaml \
-  --test-taker-modelname /vepfs-mlp2/queue010/20262202597/math_flywheel/models/selected_model \
+  --source-index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
+  --source-study-id '<registered-study-id>' --source-method full --source-seed 42 \
+  --checkpoint-path /vepfs-mlp2/queue010/20262202597/math_flywheel/models/selected_model \
+  --checkpoint-sha256 '<directory-sha256>' \
   --run-id official-fixed-v1
 ```
 

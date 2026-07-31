@@ -532,6 +532,10 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "stratify_by_subcategory": True,
         "stratify_by_error_type": True,
         "hide_reference_answers": True,
+        "retest_samples_per_model_version": 20,
+        "mastered_correct_streak": 2,
+        "stale_after_cycles": 2,
+        "retire_after_cycles": 4,
     },
     "adaptive_sampling": {
         "enabled": True,
@@ -601,7 +605,14 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "require_evidence": True,
         "low_confidence_tag": "unknown_error",
         "export_review_csv": True,
-        "review_sample_size": 100,
+        "review_sample_size": 400,
+        "minimum_reviewed_count": 300,
+        "minimum_cohen_kappa": 0.70,
+        "minimum_high_confidence_accuracy": 0.80,
+        "minimum_high_confidence_count": 50,
+        "minimum_completion_rate": 0.90,
+        "maximum_unresolved_rate": 0.0,
+        "minimum_per_label_count": 5,
     },
     "dataset": {
         "exact_dedup": True,
@@ -672,9 +683,20 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "model_selection_source": "internal_validation",
         "prohibit_evaluation_set_checkpoint_selection": True,
     },
+    "evaluation_provenance": {
+        "require_checkpoint_binding": False,
+        "execution_policy": None,
+        "evaluated_method": None,
+        "source_study_id": None,
+        "source_run_id": None,
+        "source_seed": None,
+        "checkpoint_path": None,
+        "checkpoint_sha256": None,
+    },
     "retention_test": {
         "enabled": False,
         "dataset_path": "benchmarks/retention_regression_set.json",
+        "minimum_question_count": 100,
         "evaluate_baseline": True,
         "evaluate_after_each_training_cycle": True,
     },
@@ -1233,6 +1255,17 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "must be an integer greater than or equal to 1",
             injection,
         )
+    for field in (
+        "retest_samples_per_model_version",
+        "mastered_correct_streak",
+        "stale_after_cycles",
+        "retire_after_cycles",
+    ):
+        value = _get(config, f"hard_pool.{field}")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ConfigurationError(
+                f"hard_pool.{field}", "must be a positive integer", value
+            )
     prompt_batch = _get(config, "generation.max_questions_per_prompt")
     if (
         not isinstance(prompt_batch, int)
@@ -1522,11 +1555,11 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
     if budget_protocol not in {
         "question_matched",
         "data_matched",
-        "cost_matched",
+        "generation_token_matched",
     }:
         raise ConfigurationError(
             "budget.protocol",
-            "must be question_matched, data_matched, or cost_matched",
+            "must be question_matched, data_matched, or generation_token_matched",
             budget_protocol,
         )
     target_samples = _get(config, "budget.data_matched_target_samples")
@@ -1551,14 +1584,14 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             target_samples,
         )
     generation_token_cap = _get(config, "budget.max_generation_tokens")
-    if budget_protocol == "cost_matched" and (
+    if budget_protocol == "generation_token_matched" and (
         not isinstance(generation_token_cap, int)
         or isinstance(generation_token_cap, bool)
         or generation_token_cap <= 0
     ):
         raise ConfigurationError(
             "budget.max_generation_tokens",
-            "must be a positive integer for cost_matched",
+            "must be a positive integer for generation_token_matched",
             generation_token_cap,
         )
     for path in (
@@ -1598,6 +1631,30 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             "must be true when study.policy is base",
             False,
         )
+    provenance = _get(config, "evaluation_provenance")
+    if bool(provenance.get("require_checkpoint_binding", False)):
+        required = (
+            "execution_policy",
+            "evaluated_method",
+            "source_study_id",
+            "source_run_id",
+            "source_seed",
+            "checkpoint_path",
+            "checkpoint_sha256",
+        )
+        missing = [field for field in required if provenance.get(field) in {None, ""}]
+        if missing:
+            raise ConfigurationError(
+                "evaluation_provenance",
+                f"formal evaluation requires explicit fields: {missing}",
+                provenance,
+            )
+        if str(provenance["execution_policy"]) not in {"base", "eval_only"}:
+            raise ConfigurationError(
+                "evaluation_provenance.execution_policy",
+                "must be base or eval_only",
+                provenance["execution_policy"],
+            )
     if study_policy == "base" and not bool(
         _get(config, "fixed_test.evaluate_baseline")
     ):
@@ -1890,6 +1947,10 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "error_attribution.confidence_threshold",
         "error_attribution.rounding_relative_tolerance",
         "error_attribution.rounding_absolute_tolerance",
+        "error_attribution.minimum_cohen_kappa",
+        "error_attribution.minimum_high_confidence_accuracy",
+        "error_attribution.minimum_completion_rate",
+        "error_attribution.maximum_unresolved_rate",
         "evaluator_pipeline.semantic_judge_confidence_threshold",
     ):
         value = _get(config, path)
@@ -1899,6 +1960,16 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             ("dataset.", "error_attribution.", "evaluator_pipeline.")
         ) and float(value) > 1:
             raise ConfigurationError(path, "threshold must not exceed 1", value)
+    for path in (
+        "error_attribution.review_sample_size",
+        "error_attribution.minimum_reviewed_count",
+        "error_attribution.minimum_high_confidence_count",
+        "error_attribution.minimum_per_label_count",
+        "retention_test.minimum_question_count",
+    ):
+        value = _get(config, path)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ConfigurationError(path, "must be a positive integer", value)
     for path in (
         "evaluator_pipeline.temperature",
         "evaluator_pipeline.code_execution_timeout_seconds",

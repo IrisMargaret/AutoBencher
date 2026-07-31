@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -53,7 +54,7 @@ class OllamaRoutingTests(unittest.TestCase):
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["stop"], ["Human:", "<|im_end|>"])
 
-    def test_deepseek_request_has_no_output_token_limit(self):
+    def test_deepseek_request_has_explicit_output_token_limit(self):
         client = Mock()
         completion = Mock()
         completion.choices = [Mock(message=Mock(content='{"answer":"4"}'))]
@@ -71,7 +72,7 @@ class OllamaRoutingTests(unittest.TestCase):
         )
 
         kwargs = client.chat.completions.create.call_args.kwargs
-        self.assertNotIn("max_tokens", kwargs)
+        self.assertEqual(kwargs["max_tokens"], 12)
         self.assertNotIn("extra_body", kwargs)
         self.assertEqual(kwargs["timeout"], 17)
 
@@ -274,6 +275,101 @@ class OllamaRoutingTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_training_loader_preserves_only_audited_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "train.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "instruction": "Solve",
+                        "input": "1 + 1",
+                        "output": "2",
+                        "_metadata": {
+                            "category": "Arithmetic",
+                            "training_source": "correct_retention_samples",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            records = train_llm.load_alpaca_records(path)
+        self.assertEqual(records[0]["_metadata"]["category"], "Arithmetic")
+
+    def test_token_cap_selection_is_deterministic_and_stratified(self):
+        records = []
+        for index in range(12):
+            records.append(
+                {
+                    "instruction": "Solve",
+                    "input": str(index),
+                    "output": str(index),
+                    "_metadata": {
+                        "category": "Algebra" if index % 2 else "Arithmetic",
+                        "training_source": (
+                            "correct_retention_samples"
+                            if index % 4 == 0
+                            else "incorrect_boundary_samples"
+                        ),
+                        "difficulty": 2 if index < 6 else 8,
+                        "template_signature": f"template-{index % 3}",
+                    },
+                }
+            )
+        first, audit = train_llm.stratified_token_budget_indices(
+            records, [10] * len(records), 60, seed=17
+        )
+        second, _ = train_llm.stratified_token_budget_indices(
+            records, [10] * len(records), 60, seed=17
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(audit["retained_count"], 6)
+        retained = audit["retained_distributions"]
+        self.assertEqual(set(retained["category"]), {"Algebra", "Arithmetic"})
+        self.assertEqual(set(retained["difficulty"]), {"basic", "hard"})
+
+    def test_checkpoint_interval_uses_effective_optimizer_steps(self):
+        parsed = train_llm.build_parser().parse_args(
+            [
+                "--model_name_or_path", "model",
+                "--dataset_path", "train.jsonl",
+                "--output_path", "output",
+                "--max_optimizer_steps", "3",
+                "--eval_steps", "25",
+                "--save_steps", "25",
+            ]
+        )
+
+        class FakeTrainingArguments:
+            def __init__(
+                self,
+                max_steps=None,
+                eval_steps=None,
+                save_steps=None,
+                **kwargs,
+            ):
+                self.values = {
+                    "max_steps": max_steps,
+                    "eval_steps": eval_steps,
+                    "save_steps": save_steps,
+                    **kwargs,
+                }
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.TrainingArguments = FakeTrainingArguments
+        fake_trl = types.ModuleType("trl")
+        with patch.dict(sys.modules, {"transformers": fake_transformers, "trl": fake_trl}):
+            config = train_llm._training_config(
+                parsed,
+                Path("adapter"),
+                use_bfloat16=False,
+                has_evaluation=True,
+                planned_optimizer_steps=20,
+            )
+        self.assertEqual(config.values["max_steps"], 3)
+        self.assertEqual(config.values["eval_steps"], 3)
+        self.assertEqual(config.values["save_steps"], 3)
+
     def test_finetune_seed_reaches_training_arguments(self):
         parsed = train_llm.build_parser().parse_args(
             [

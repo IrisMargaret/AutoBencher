@@ -1,11 +1,12 @@
 {
-  "schema_version": "1.0",
-  "name": "autobencher_retention_regression_v1",
-  "description": "Project-authored auxiliary set for instruction, format, simple-task, and non-target retention checks.",
+  "schema_version": "2.0",
+  "name": "autobencher_retention_regression_v2",
+  "description": "Project-authored holdout for instruction, formatting, language, stable knowledge, logic, and non-target string retention.",
   "selection_policy": {
     "training_use_prohibited": true,
     "checkpoint_selection_prohibited": true,
-    "external_question_copying": false
+    "external_question_copying": false,
+    "minimum_items_per_dimension": 20
   },
   "questions": [
     {
@@ -13,144 +14,2040 @@
       "category": "Arithmetic",
       "sub_category": "Integer Operations",
       "difficulty": 1,
-      "question": "Follow the instruction exactly: compute 2 + 3 and give the integer result.",
+      "question": "Add 11 and 32. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "5",
+      "canonical_answer": "43",
       "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-002",
       "category": "Arithmetic",
-      "sub_category": "Fraction and Decimal Operations",
-      "difficulty": 2,
-      "question": "Compute 1/2 + 1/3. Keep the answer as an exact reduced fraction rather than a decimal.",
-      "answer_type": "rational",
-      "canonical_answer": "5/6",
-      "retention_dimension": "format_following",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 12 and 31. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-003",
-      "category": "Geometry & Trigonometry",
-      "sub_category": "Plane Geometry",
-      "difficulty": 2,
-      "question": "A square has side length 4. Return only the numerical area in the final answer.",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 13 and 30. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "16",
-      "retention_dimension": "format_following",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "formula_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-004",
-      "category": "Algebra",
-      "sub_category": "Linear Equations",
-      "difficulty": 2,
-      "question": "Solve for x: x + 9 = 14.",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 14 and 29. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "5",
-      "retention_dimension": "simple_base_capability",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-005",
-      "category": "Probability & Statistics",
-      "sub_category": "Basic Probability",
-      "difficulty": 2,
-      "question": "A fair coin is tossed once. What is the probability of heads?",
-      "answer_type": "rational",
-      "canonical_answer": "1/2",
-      "retention_dimension": "simple_base_capability",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 15 and 28. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "enumeration_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-006",
-      "category": "Number Theory",
-      "sub_category": "Divisibility and Factors",
-      "difficulty": 2,
-      "question": "Find the greatest common divisor of 18 and 30.",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 16 and 27. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "6",
-      "retention_dimension": "simple_base_capability",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-007",
-      "category": "Calculus",
-      "sub_category": "Differentiation",
-      "difficulty": 3,
-      "question": "Differentiate x^2 with respect to x.",
-      "answer_type": "symbolic_expression",
-      "canonical_answer": "2*x",
-      "retention_dimension": "untrained_math_category",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 17 and 26. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-008",
-      "category": "Linear Algebra",
-      "sub_category": "Matrix Operations",
-      "difficulty": 3,
-      "question": "Find the determinant of [[1, 2], [3, 4]].",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 18 and 25. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "-2",
-      "retention_dimension": "untrained_math_category",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-009",
-      "category": "Geometry & Trigonometry",
-      "sub_category": "Trigonometric Reasoning",
-      "difficulty": 3,
-      "question": "Give the exact symbolic value of sin(pi/6); do not use a decimal.",
-      "answer_type": "rational",
-      "canonical_answer": "1/2",
-      "retention_dimension": "format_following",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 19 and 24. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "sympy_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-010",
-      "category": "Word Problems",
-      "sub_category": "Rate and Distance",
-      "difficulty": 2,
-      "question": "A runner moves at 8 kilometers per hour for 2 hours. How many kilometers are covered?",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 20 and 23. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "16",
+      "canonical_answer": "43",
       "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "formula_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-011",
-      "category": "Composite Comprehensive",
-      "sub_category": "Proof and Mathematical Reasoning",
-      "difficulty": 2,
-      "question": "Answer true or false: zero is an even integer.",
-      "answer_type": "boolean",
-      "canonical_answer": "true",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 21 and 22. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
       "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "definition_plus_two_reviewers", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     },
     {
       "question_id": "retention-012",
-      "category": "Probability & Statistics",
-      "sub_category": "Descriptive Statistics",
-      "difficulty": 2,
-      "question": "Find the arithmetic mean of 2, 4, and 6.",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 22 and 21. Return only the integer result.",
       "answer_type": "integer",
-      "canonical_answer": "4",
-      "retention_dimension": "simple_base_capability",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
       "source_dataset": "project_native",
-      "verification": {"backend": "formula_plus_human_review", "canonical_parse_passed": true}
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-013",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 23 and 20. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-014",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 24 and 19. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-015",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 25 and 18. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-016",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 26 and 17. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-017",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 27 and 16. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-018",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 28 and 15. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-019",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 29 and 14. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-020",
+      "category": "Arithmetic",
+      "sub_category": "Integer Operations",
+      "difficulty": 1,
+      "question": "Add 30 and 13. Return only the integer result.",
+      "answer_type": "integer",
+      "canonical_answer": "43",
+      "retention_dimension": "basic_instruction_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-021",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'amber' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "AMBER",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-022",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'birch' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "BIRCH",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-023",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'cedar' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "CEDAR",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-024",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'delta' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "DELTA",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-025",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'ember' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "EMBER",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-026",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'fable' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "FABLE",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-027",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'globe' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "GLOBE",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-028",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'harbor' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "HARBOR",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-029",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'indigo' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "INDIGO",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-030",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'jasmine' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "JASMINE",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-031",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'kernel' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "KERNEL",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-032",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'linen' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "LINEN",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-033",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'maple' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "MAPLE",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-034",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'nectar' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "NECTAR",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-035",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'oasis' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "OASIS",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-036",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'pebble' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "PEBBLE",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-037",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'quartz' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "QUARTZ",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-038",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'raven' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "RAVEN",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-039",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'silver' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "SILVER",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-040",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Convert the lowercase word 'timber' to uppercase. Return only the word.",
+      "answer_type": "text",
+      "canonical_answer": "TIMBER",
+      "retention_dimension": "language_transformation",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-041",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-21-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-21-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-042",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-22-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-22-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-043",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-23-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-23-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-044",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-24-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-24-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-045",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-25-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-25-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-046",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-26-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-26-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-047",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-27-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-27-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-048",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-28-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-28-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-049",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-29-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-29-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-050",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-30-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-30-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-051",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-31-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-31-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-052",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-32-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-32-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-053",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-33-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-33-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-054",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-34-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-34-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-055",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-35-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-35-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-056",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-36-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-36-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-057",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-37-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-37-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-058",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-38-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-38-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-059",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-39-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-39-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-060",
+      "category": "Composite Comprehensive",
+      "sub_category": "Constraint Synthesis",
+      "difficulty": 1,
+      "question": "Return exactly this token, preserving capitalization and hyphens: ID-40-OK",
+      "answer_type": "text",
+      "canonical_answer": "ID-40-OK",
+      "retention_dimension": "strict_format_following",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-061",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the capital of Japan.",
+      "answer_type": "text",
+      "canonical_answer": "Tokyo",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-062",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the capital of France.",
+      "answer_type": "text",
+      "canonical_answer": "Paris",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-063",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the capital of Italy.",
+      "answer_type": "text",
+      "canonical_answer": "Rome",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-064",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the largest planet in the Solar System.",
+      "answer_type": "text",
+      "canonical_answer": "Jupiter",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-065",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the planet known as the Red Planet.",
+      "answer_type": "text",
+      "canonical_answer": "Mars",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-066",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the gas plants absorb during photosynthesis.",
+      "answer_type": "text",
+      "canonical_answer": "carbon dioxide",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-067",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the chemical symbol for gold.",
+      "answer_type": "text",
+      "canonical_answer": "Au",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-068",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the chemical symbol for water.",
+      "answer_type": "text",
+      "canonical_answer": "H2O",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-069",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the author of Hamlet.",
+      "answer_type": "text",
+      "canonical_answer": "William Shakespeare",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-070",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the ocean between Africa and Australia.",
+      "answer_type": "text",
+      "canonical_answer": "Indian Ocean",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-071",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the continent containing Kenya.",
+      "answer_type": "text",
+      "canonical_answer": "Africa",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-072",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the primary language of Brazil.",
+      "answer_type": "text",
+      "canonical_answer": "Portuguese",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-073",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the instrument used to measure temperature.",
+      "answer_type": "text",
+      "canonical_answer": "thermometer",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-074",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the process by which liquid becomes gas.",
+      "answer_type": "text",
+      "canonical_answer": "evaporation",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-075",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the first month of the year.",
+      "answer_type": "text",
+      "canonical_answer": "January",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-076",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the day after Friday.",
+      "answer_type": "text",
+      "canonical_answer": "Saturday",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-077",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the opposite cardinal direction to north.",
+      "answer_type": "text",
+      "canonical_answer": "south",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-078",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the number of sides in a hexagon.",
+      "answer_type": "integer",
+      "canonical_answer": "6",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-079",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the mammal commonly described as the largest animal.",
+      "answer_type": "text",
+      "canonical_answer": "blue whale",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-080",
+      "category": "Composite Comprehensive",
+      "sub_category": "Cross-Domain Multi-Step Problems",
+      "difficulty": 1,
+      "question": "Give the standard short answer for the star at the center of the Solar System.",
+      "answer_type": "text",
+      "canonical_answer": "Sun",
+      "retention_dimension": "stable_common_knowledge",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-081",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 10 is greater than 9.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-082",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 11 is greater than 12.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-083",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 12 is greater than 11.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-084",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 13 is greater than 14.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-085",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 14 is greater than 13.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-086",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 15 is greater than 16.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-087",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 16 is greater than 15.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-088",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 17 is greater than 18.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-089",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 18 is greater than 17.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-090",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 19 is greater than 20.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-091",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 20 is greater than 19.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-092",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 21 is greater than 22.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-093",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 22 is greater than 21.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-094",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 23 is greater than 24.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-095",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 24 is greater than 23.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-096",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 25 is greater than 26.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-097",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 26 is greater than 25.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-098",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 27 is greater than 28.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-099",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 28 is greater than 27.",
+      "answer_type": "boolean",
+      "canonical_answer": "true",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-100",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 2,
+      "question": "Answer true or false: 29 is greater than 30.",
+      "answer_type": "boolean",
+      "canonical_answer": "false",
+      "retention_dimension": "logical_consistency",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-101",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'apple' or 'pear'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "apple",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-102",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'zebra' or 'yak'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "yak",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-103",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'violet' or 'amber'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "amber",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-104",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'river' or 'ocean'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "ocean",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-105",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'north' or 'south'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "north",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-106",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'circle' or 'square'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "circle",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-107",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'winter' or 'summer'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "summer",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-108",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'copper' or 'silver'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "copper",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-109",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'piano' or 'violin'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "piano",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-110",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'tiger' or 'lion'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "lion",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-111",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'cloud' or 'rain'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "cloud",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-112",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'forest' or 'desert'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "desert",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-113",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'coffee' or 'tea'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "coffee",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-114",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'novel' or 'poem'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "novel",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-115",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'glass' or 'stone'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "glass",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-116",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'green' or 'blue'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "blue",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-117",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'Monday' or 'Friday'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "Friday",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-118",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'seven' or 'three'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "seven",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-119",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'east' or 'west'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "east",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
+    },
+    {
+      "question_id": "retention-120",
+      "category": "Composite Comprehensive",
+      "sub_category": "Proof and Mathematical Reasoning",
+      "difficulty": 1,
+      "question": "Which comes first alphabetically: 'large' or 'small'? Return only that word.",
+      "answer_type": "text",
+      "canonical_answer": "large",
+      "retention_dimension": "non_target_string_reasoning",
+      "source_dataset": "project_native",
+      "verification": {
+        "status": "verified",
+        "backend": "deterministic_reference_plus_schema_check",
+        "canonical_parse_passed": true,
+        "training_use_prohibited": true
+      }
     }
   ]
 }

@@ -1,7 +1,7 @@
 import glob
 import gc
 import hashlib
-import random
+import math
 import signal
 import sys
 import threading
@@ -30,6 +30,7 @@ from autobencher.config import (
     cli_config_overrides,
     load_project_config,
     str2bool,
+    thaw_config,
 )
 from autobencher.budget_ledger import (
     BudgetExhausted,
@@ -72,10 +73,13 @@ from autobencher.structured import (
 from autobencher.storage import configure_runtime_storage
 from autobencher.truth_solver import FailureType, TruthSolver
 from autobencher.training_protocol import (
+    enforce_train_correct_incorrect_ratio,
     split_by_template_cluster,
     write_precomputed_training_splits,
     write_training_splits,
 )
+from autobencher.evaluation_sets import load_evaluation_registry
+from autobencher.evaluation_audit import load_json_questions
 from autobencher.fingerprints import artifact_fingerprint
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
 from tool_util import (
@@ -96,6 +100,7 @@ from tool_util import (
     generate_math_inference,
     load_math_inference,
     manage_hard_pool,
+    update_hard_pool_lifecycle,
     normalize_math_category,
     normalize_sub_category,
     read_json_records,
@@ -4296,7 +4301,9 @@ def _run_math_iteration(
                     "iteration_id": iter_number,
                     "iteration_uid": iteration_uid,
                     "config_hash": research_run.config_hash,
-                    "prompt_hash": research_run.provenance["config_hash"],
+                    "prompt_hash": research_run.prompt_bundle[
+                        "combined_sha256"
+                    ],
                     "cache_status": (
                         "hit" if migrated_records else "generated"
                     ),
@@ -4716,6 +4723,25 @@ def _run_fixed_test_benchmark(
 
 
 def _retention_delta(baseline, current):
+    def wilson_interval(successes, total, z=1.959963984540054):
+        if total <= 0:
+            return {"lower": None, "upper": None, "method": "wilson_95"}
+        proportion = successes / total
+        denominator = 1 + z * z / total
+        center = (proportion + z * z / (2 * total)) / denominator
+        radius = (
+            z
+            * math.sqrt(
+                proportion * (1 - proportion) / total
+                + z * z / (4 * total * total)
+            )
+            / denominator
+        )
+        return {
+            "lower": max(0.0, center - radius),
+            "upper": min(1.0, center + radius),
+            "method": "wilson_95",
+        }
     baseline_items = {
         item["question_id"]: bool(item["is_correct"])
         for item in (baseline or {}).get("item_outcomes", [])
@@ -4756,6 +4782,9 @@ def _retention_delta(baseline, current):
             if baseline_correct
             else 0.0
         ),
+        "forgetting_rate_ci95": wilson_interval(
+            len(forgotten), len(baseline_correct)
+        ),
         "forgotten_question_ids": forgotten,
         "dimension_statistics": {
             name: {
@@ -4765,10 +4794,43 @@ def _retention_delta(baseline, current):
                     if counts["baseline_correct"]
                     else 0.0
                 ),
+                "forgetting_rate_ci95": wilson_interval(
+                    counts["forgotten"], counts["baseline_correct"]
+                ),
             }
             for name, counts in sorted(by_dimension.items())
         },
     }
+
+
+def _evaluation_leakage_holdouts(config, project_root, fixed, retention):
+    """Collect every locally visible non-blind evaluation question."""
+    records = [*fixed, *retention]
+    sources = {
+        "active_fixed": len(fixed),
+        "retention": len(retention),
+    }
+    evaluation = config.get("evaluation_sets", {})
+    registry_path = evaluation.get("registry_path")
+    if registry_path:
+        registry = load_evaluation_registry(registry_path, project_root)
+        for identifier, spec in registry["sets"].items():
+            if spec.get("role") == "blind_final" or not spec.get("dataset_path"):
+                continue
+            path = Path(str(spec["dataset_path"])).expanduser()
+            if not path.is_absolute():
+                path = Path(project_root) / path
+            if path.is_file():
+                loaded = load_json_questions(path)
+                records.extend(loaded)
+                sources[f"evaluation_set:{identifier}"] = len(loaded)
+    deduplicated = {}
+    for record in records:
+        key = str(record.get("question_id", record.get("id", ""))) or str(
+            record.get("question", record.get("input", ""))
+        )
+        deduplicated[key] = dict(record)
+    return list(deduplicated.values()), dict(sorted(sources.items()))
 
 
 # [ADDED] Execute eval or the complete evaluation-training flywheel.
@@ -4903,6 +4965,16 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 retention_config,
                 args.research_run.project_root,
             )
+            minimum_retention_questions = int(
+                args.research_run.config["retention_test"][
+                    "minimum_question_count"
+                ]
+            )
+            if len(retention_questions) < minimum_retention_questions:
+                raise ValueError(
+                    "Retention set is too small: "
+                    f"{len(retention_questions)} < {minimum_retention_questions}"
+                )
             if args.research_run.config["retention_test"][
                 "evaluate_baseline"
             ]:
@@ -4944,6 +5016,9 @@ def _run_autobencher(args, agent_info, evaluator_info):
             return 1
 
     if study_runtime["policy_name"] == "base":
+        evaluation_provenance = thaw_config(
+            args.research_run.config["evaluation_provenance"]
+        )
         cycle_record["status"] = "completed"
         cycle_record["active_test_taker_model"] = args.test_taker_modelname
         cycle_record["evaluation_only"] = True
@@ -4974,6 +5049,13 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "accuracy_delta": 0.0 if baseline_accuracy is not None else None,
             "active_test_taker_model": args.test_taker_modelname,
             "fixed_test": cycle_record.get("fixed_test", {}),
+            "execution_policy": (
+                evaluation_provenance.get("execution_policy") or "base"
+            ),
+            "evaluated_method": (
+                evaluation_provenance.get("evaluated_method") or "base"
+            ),
+            "evaluation_provenance": evaluation_provenance,
         }
         atomic_json(
             experiment_summary,
@@ -4993,6 +5075,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 "iteration_count": 0,
                 "training_sample_count": 0,
                 "baseline_accuracy": baseline_accuracy,
+                "execution_policy": experiment_summary["execution_policy"],
+                "evaluated_method": experiment_summary["evaluated_method"],
             },
         )
         args.research_run.logger.event(
@@ -5087,6 +5171,61 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 current_test_taker_model,
                 args.use_helm,
             )
+            if cycle_number > 1:
+                hard_pool_path = Path(output_root) / "hard_pool.json"
+                hard_pool = HardSamplePool(hard_pool_path)
+                retest_questions = hard_pool.select_retest(
+                    current_cycle=cycle_number,
+                    max_samples=args.research_run.config["hard_pool"][
+                        "retest_samples_per_model_version"
+                    ],
+                    decay_lambda=args.research_run.config[
+                        "adaptive_sampling"
+                    ]["decay_lambda"],
+                )
+                if retest_questions:
+                    retest_dir = (
+                        args.research_run.run_dir
+                        / "hard_pool_retest"
+                        / f"cycle_{cycle_number}"
+                    )
+                    retest_dir.mkdir(parents=True, exist_ok=True)
+                    for item in retest_questions:
+                        item["answer"] = item.get("gold_answer", "")
+                    retest_records = test_and_eval(
+                        copy.deepcopy(retest_questions),
+                        str(retest_dir / "hard_pool"),
+                        test_taker_info,
+                        agent_info,
+                        evaluator_info,
+                        gold_ans_key="answer",
+                        iter_number=0,
+                        temp_log_dir=str(retest_dir / "temp_log"),
+                        research_config=args.research_run.config,
+                        progress_manager=args.research_run.progress,
+                        cycle_number=cycle_number,
+                        event_logger=args.research_run.logger,
+                    )
+                    lifecycle = update_hard_pool_lifecycle(
+                        hard_pool_path,
+                        retest_records,
+                        model_version=current_test_taker_model,
+                        current_cycle=cycle_number,
+                        mastered_correct_streak=args.research_run.config[
+                            "hard_pool"
+                        ]["mastered_correct_streak"],
+                        stale_after_cycles=args.research_run.config["hard_pool"][
+                            "stale_after_cycles"
+                        ],
+                        retire_after_cycles=args.research_run.config["hard_pool"][
+                            "retire_after_cycles"
+                        ],
+                    )
+                    cycle_entry["hard_pool_retest"] = {
+                        "question_count": len(retest_records),
+                        **lifecycle,
+                    }
+                    _save_cycle_record(cycle_record_path, cycle_record)
             history_dict = run_history
             stage = "evaluation"
             last_iteration = None
@@ -5190,11 +5329,25 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     or int(record.get("cycle_id", -1))
                     == int(cycle_number)
                 ]
+                leakage_holdouts, leakage_holdout_sources = (
+                    _evaluation_leakage_holdouts(
+                        args.research_run.config,
+                        args.research_run.project_root,
+                        fixed_questions,
+                        retention_questions,
+                    )
+                )
                 selected, dataset_manifest, rejected = build_training_dataset(
                     candidates,
                     args.research_run.config,
                     seed=int(args.research_run.config["experiment"]["seed"]),
-                    holdout_records=fixed_questions,
+                    holdout_records=leakage_holdouts,
+                )
+                dataset_manifest["leakage_holdout_sources"] = (
+                    leakage_holdout_sources
+                )
+                dataset_manifest["leakage_holdout_count"] = len(
+                    leakage_holdouts
                 )
                 if data_matched_protocol:
                     target_samples = int(
@@ -5340,6 +5493,22 @@ def _run_autobencher(args, agent_info, evaluator_info):
                             "incorrect": wrong_target,
                             "actual": len(splits["train"]),
                         }
+                    elif bool(
+                        args.research_run.config["training_mix"][
+                            "strict_correct_incorrect_ratio"
+                        ]
+                    ):
+                        splits, ratio_audit = (
+                            enforce_train_correct_incorrect_ratio(
+                                splits,
+                                correct_fraction=float(
+                                    args.research_run.config["training_mix"][
+                                        "correct_retention_samples"
+                                    ]
+                                ),
+                            )
+                        )
+                        split_manifest["strict_train_ratio_cap"] = ratio_audit
                     split_manifest = write_precomputed_training_splits(
                         splits,
                         training_dir,
@@ -5982,6 +6151,21 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "accuracy_delta": final_fixed_summary.get("accuracy_delta"),
             "active_test_taker_model": current_test_taker_model,
             "fixed_test": cycle_record.get("fixed_test", {}),
+            "execution_policy": (
+                args.research_run.config["evaluation_provenance"].get(
+                    "execution_policy"
+                )
+                or "train_and_evaluate"
+            ),
+            "evaluated_method": (
+                args.research_run.config["evaluation_provenance"].get(
+                    "evaluated_method"
+                )
+                or study_runtime["policy_name"]
+            ),
+            "evaluation_provenance": thaw_config(
+                args.research_run.config["evaluation_provenance"]
+            ),
             "retention_test": {
                 **cycle_record.get("retention_test", {}),
                 "final": final_retention_summary,
