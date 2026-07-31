@@ -218,6 +218,56 @@ python run_scripts.py math \
 方法定义、公平比较约束、更多命令和 manifest 检查见
 [`docs/baselines_and_ablations_zh-CN.md`](docs/baselines_and_ablations_zh-CN.md)。
 
+正式实验前先冻结已提交的基准版本。清单会计算 generator、test-taker 和
+semantic-judge 三个真实 Prompt 文件的内容哈希，而不是对版本字符串做哈希；同时
+记录 Git、Python/CUDA、Transformers/TRL/PEFT、基础模型、固定测试集和解析后配置
+指纹：
+
+```bash
+python freeze_baseline.py \
+  --baseline-id baseline-ablation-v1 \
+  --config configs/studies/full.yaml \
+  --environment configs/environments/volcengine.yaml
+
+git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
+```
+
+正式清单默认拒绝未提交的工作区；`--allow-dirty` 只能用于临时诊断，不能作为论文
+基准。清单默认写入
+`/vepfs-mlp2/queue010/20262202597/math_flywheel/baselines/`。
+
+一条命令展开七种方法并完成完整 smoke 矩阵：
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/smoke.yaml \
+  --dry-run
+
+python run_study.py \
+  --suite configs/study_suites/smoke.yaml
+```
+
+中断后加 `--resume`。已完成实验会跳过，只继续 pending、failed 或 partial 实验。
+`main.yaml` 会展开“七方法 × 三个 seed × 一个模型 × 一个总题目预算”。每个矩阵单元
+独占输出、缓存、Hard Pool/历史状态、训练集、checkpoint 与模型目录。Runner 会拒绝
+脏代码、已登记实验的指纹变化、不同基础模型/固定集/Prompt，以及六种训练方法之间
+任何非策略配置差异。`base` 是只评测参考点，因此只比较共同起点，不要求
+`finetune.enabled=true`。
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/main.yaml
+
+python aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
+```
+
+suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
+`experiment.num_iterations * experiment.max_cycles` 整除；Runner 不会用隐式取整
+改变实验成本。需求中的
+`full_no_observed_difficulty_sampling` 是入口别名，运行清单仍记录项目内部规范名
+`full_no_observed_difficulty`。
+
 ### 客观难度定义
 
 `difficulty` 是进入统计分桶和自适应采样的实际生效分数，不再从出题计划原样复制。

@@ -230,6 +230,57 @@ Definitions, fair-comparison controls, additional commands, and manifest
 inspection are documented in
 [docs/baselines_and_ablations_zh-CN.md](docs/baselines_and_ablations_zh-CN.md).
 
+Freeze the committed baseline before starting a study. The manifest hashes the
+actual generator, test-taker, and semantic-judge prompt files—not a version
+label—and records Git, Python/CUDA, package, model, fixed-test, and resolved
+configuration fingerprints:
+
+```bash
+python freeze_baseline.py \
+  --baseline-id baseline-ablation-v1 \
+  --config configs/studies/full.yaml \
+  --environment configs/environments/volcengine.yaml
+
+git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
+```
+
+The worktree must be clean unless `--allow-dirty` is explicitly used for a
+provisional, non-paper manifest. The production output defaults to
+`/vepfs-mlp2/queue010/20262202597/math_flywheel/baselines/`.
+
+Run the complete seven-method smoke matrix with one command:
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/smoke.yaml \
+  --dry-run
+
+python run_study.py \
+  --suite configs/study_suites/smoke.yaml
+```
+
+Use `--resume` after interruption. Completed experiments are skipped; only
+pending, failed, or partial experiments are restarted. `main.yaml` expands
+seven methods × three seeds × one model × one total question budget. Every
+matrix cell has its own outputs, cache, hard-pool/history state, datasets,
+checkpoints, and model directory. The runner rejects dirty code, changed
+fingerprints, non-identical base models/fixed tests/prompts, and any
+non-strategy configuration difference among the six training methods.
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/main.yaml
+
+python aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
+```
+
+`budgets` in a suite are total generated-question budgets. They must divide
+evenly by `experiment.num_iterations * experiment.max_cycles`; the runner
+refuses an inexact split instead of silently changing experimental cost. The requested alias
+`full_no_observed_difficulty_sampling` resolves to the project's canonical
+variant `full_no_observed_difficulty`.
+
 ### Observable difficulty definition
 
 `difficulty` is the effective score used for bucketing and adaptive sampling.

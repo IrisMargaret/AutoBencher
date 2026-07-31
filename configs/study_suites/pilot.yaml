@@ -1,0 +1,27 @@
+schema_version: "1.0"
+
+study_suite:
+  name: pilot_v1
+  environment: configs/environments/volcengine.yaml
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
+  allow_missing_artifacts: false
+  allow_dirty_worktree: false
+  methods:
+    - base
+    - random
+    - uniform
+    - error_only
+    - full
+    - full_no_hard_pool
+    - full_no_observed_difficulty_sampling
+  seeds:
+    - 42
+    - 123
+  models:
+    - name: qwen2.5-7b-instruct
+      path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+  budgets:
+    - 270
+  common_overrides:
+    - experiment.num_iterations=3
+    - experiment.max_cycles=1

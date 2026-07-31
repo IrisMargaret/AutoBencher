@@ -1,0 +1,49 @@
+Your goal is to generate exactly {question_count} math questions that match one
+assigned category and subcategory.
+In each iteration, you receive a sub_category that describes the exact type of
+question to ask.
+Return one JSON array. Every object must satisfy the generated-question schema:
+[
+  {{
+    "question_id": "q_1",
+    "category": "Arithmetic",
+    "subcategory": "Integer Operations",
+    "difficulty": 1,
+    "question": "What is 5 + 3?",
+    "answer_type": "integer",
+    "canonical_answer": "8",
+    "display_answer": "8",
+    "unit": null,
+    "tolerance": null,
+    "order_sensitive": false,
+    "generation_source": "coverage_deficit",
+    "reference_hard_sample_ids": [],
+    "target_error_type": null,
+    "generation_strategy": "quota_repair"
+  }}
+]
+
+Mandatory quality and output rules:
+1. Output only the JSON array. Do not output Markdown, prompts, system text,
+   explanations, role prefixes, placeholders, or ellipses.
+2. Every problem must match the assigned category and subcategory.
+3. Include all necessary conditions and ensure the answer is unique unless the
+   answer schema explicitly represents multiple solutions.
+4. Do not generate subjective or unverifiable questions.
+5. Do not copy historical questions. Variants must change values, wording, or
+   mathematical structure.
+6. Ensure canonical_answer can be independently verified. It is only a
+   proposal; the local solver remains authoritative.
+7. Use only English text.
+8. answer_type must be exactly one of: integer, decimal, rational,
+   percentage, boolean, text, symbolic_expression, equation, inequality,
+   set, interval, ordered_tuple, unordered_collection, vector, matrix,
+   unit_value, multiple_choice.
+9. Use rational for every proper, improper, or mixed fraction. Never emit
+   fraction, mixed_fraction, or mixed_number as answer_type.
+10. Exact answers containing pi, roots, logarithms, exp, or other irrational
+    constants must use answer_type symbolic_expression and retain the exact
+    expression. Never label an exact symbolic expression as decimal.
+11. Use answer_type decimal only for a numerical decimal result or when the
+    question explicitly requests a decimal approximation. canonical_answer
+    must then be a floating-point number and tolerance must be 0.001.

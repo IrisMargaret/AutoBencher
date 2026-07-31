@@ -470,6 +470,27 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
         manifest["question_budget"]
         == config["experiment"]["questions_per_iteration"]
     )
+    assert (
+        manifest["question_budget_per_iteration"]
+        == config["experiment"]["questions_per_iteration"]
+    )
+    assert (
+        manifest["total_question_budget"]
+        == config["experiment"]["questions_per_iteration"]
+        * config["experiment"]["num_iterations"]
+        * config["experiment"]["max_cycles"]
+    )
+    assert manifest["prompt_version"] == "content-addressed-v1"
+    assert (
+        manifest["prompt_hash"]
+        == manifest["prompt_bundle"]["combined_sha256"]
+    )
+    assert set(manifest["prompt_bundle"]) == {
+        "generator",
+        "test_taker",
+        "semantic_judge",
+        "combined_sha256",
+    }
 
 
 def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(

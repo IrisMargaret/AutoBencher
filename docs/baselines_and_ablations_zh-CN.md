@@ -109,22 +109,94 @@ python run_scripts.py math \
 `base` 在固定集基线评测完成后结束，不生成题、不导出训练集，也不调用微调入口。
 `random` 的运行方式与上述命令相同，只需改用 `configs/studies/random.yaml`。
 
-## 使用多个随机种子
+## 冻结基准版本
 
-单次研究至少应为所有非 `base` 方法使用相同的 seed 集合，例如 42、43、44：
+先提交待测代码，再生成 `baseline-ablation-v1` 基准清单：
 
 ```bash
-for seed in 42 43 44; do
-  python run_scripts.py math \
-    --config configs/studies/full.yaml \
-    --environment configs/environments/volcengine.yaml \
-    --override experiment.seed=${seed} \
-    --run-id full-seed-${seed}
-done
+python freeze_baseline.py \
+  --baseline-id baseline-ablation-v1 \
+  --config configs/studies/full.yaml \
+  --environment configs/environments/volcengine.yaml
+
+git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
 ```
 
-同一 method、seed 和 resolved config 会产生相同的调度与训练数据选择。不要复用
-同一个 `run-id` 表示不同配置。
+清单记录 Git commit 与脏状态、Python/CUDA、Transformers/TRL/PEFT 等包版本、模型
+目录内容哈希、固定测试集哈希、解析后配置与所有配置源文件哈希。`prompt_bundle`
+分别保存 generator、test-taker、semantic-judge 的真实文件路径和 SHA-256，再由
+三个角色、相对路径和内容哈希计算 `combined_sha256`。任意一个 Prompt 文件变化都会
+改变组合指纹。
+
+正式冻结和 Study Runner 都默认拒绝脏工作区。`--allow-dirty` 和 suite 的
+`allow_dirty_worktree: true` 只供开发测试，不能作为可发表实验。
+
+## 使用统一 Study Runner
+
+四个 suite 位于 `configs/study_suites/`：
+
+| suite | 用途 |
+| --- | --- |
+| `smoke.yaml` | 七方法、单 seed、单轮小预算链路检查 |
+| `pilot.yaml` | 七方法、两个 seed 的先导实验 |
+| `main.yaml` | 七方法 × 3 seeds × 1 model × 1350 总题目 |
+| `budget_curve.yaml` | 七方法在 135/270/675/1350 总题目下的预算曲线 |
+
+先只展开矩阵并检查公平性，不启动模型：
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/main.yaml \
+  --dry-run
+```
+
+正式执行和断点恢复：
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/main.yaml
+
+python run_study.py \
+  --suite configs/study_suites/main.yaml \
+  --resume
+```
+
+按方法或唯一实验 ID 恢复：
+
+```bash
+python run_study.py \
+  --suite configs/study_suites/main.yaml \
+  --resume \
+  --method full
+
+python run_study.py \
+  --suite configs/study_suites/main.yaml \
+  --resume \
+  --study-id '<experiment_index.json 中的 study_id>'
+```
+
+每个记录都有 `study_id/method/variant/seed/model/budget/config_hash/`
+`git_commit/status`。状态只允许 `pending/running/completed/failed/partial`；启动时发现
+遗留的 `running` 会改为 `partial`。已完成记录不会重复执行，失败恢复不会覆盖其他
+方法。
+
+suite 的 `budgets` 是实验总生成题目数，不是每轮题数。例如主实验默认 3 个 Cycle、
+每个 Cycle 5 个 Iteration，1350 总预算会解析成每轮 90 题。预算无法整除
+`Cycle × Iteration` 数时直接失败，避免静默改变实验成本。
+
+结果聚合：
+
+```bash
+python aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
+```
+
+命令生成 `aggregate.json` 和逐实验 CSV，并按 method/model/budget 汇总均值、标准差和
+95% 正态近似置信区间。
+
+同一 method、seed、model、budget、resolved config 和 Git commit 产生相同
+`study_id` 与调度计划。修改代码、配置、Prompt、模型或固定集后必须使用新的 suite
+名称，不能把变化后的实验写进原索引。
 
 ## 检查 allocation 和清单
 
@@ -205,14 +277,9 @@ jq '{
 如果某种方法因质量过滤得到更少的合格样本，应在论文结果中单独报告，不得静默补充
 其他来源数据。
 
-## 第一版范围
+## 当前范围
 
-本版提供单方法运行、确定性策略计划、统一清单和 CPU 单元测试接口，但尚未实现：
-
-- token-level 生成与训练成本匹配；
-- API token 或美元成本账本；
-- 多 seed 批量 Study Runner；
-- paired bootstrap、McNemar 等统计检验；
-- 自动论文表格和多模型矩阵调度。
-
-这些能力可在统一策略接口和 manifest 字段之上继续扩展，不需要改变七种方法的定义。
+当前版本已实现多 seed/多模型/多预算矩阵、实验目录隔离、状态恢复、公平性拒绝、
+内容指纹和基础跨 seed 聚合。尚未实现 token/API 美元成本账本、paired bootstrap、
+McNemar 显著性检验和自动论文表格；这些能力可在现有 experiment index 上扩展，
+不需要改变七种方法定义。

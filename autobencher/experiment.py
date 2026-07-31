@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import importlib.metadata
 import json
 import logging
@@ -20,6 +19,10 @@ from typing import Any, Iterable, Mapping
 import yaml
 
 from autobencher.config import ProjectConfig, thaw_config
+from autobencher.fingerprints import (
+    file_sha256,
+    prompt_bundle_snapshot,
+)
 
 
 def utc_now() -> str:
@@ -104,14 +107,6 @@ def allocate_test_run_dir(output_root: str | Path) -> Path:
             candidate_number += 1
 
 
-def file_sha256(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def environment_snapshot() -> dict[str, Any]:
     packages = {}
     for name in (
@@ -189,6 +184,16 @@ def study_manifest_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
     runtime.setdefault(
         "question_budget",
         int(config["experiment"]["questions_per_iteration"]),
+    )
+    runtime.setdefault(
+        "question_budget_per_iteration",
+        int(config["experiment"]["questions_per_iteration"]),
+    )
+    runtime.setdefault(
+        "total_question_budget",
+        int(config["experiment"]["questions_per_iteration"])
+        * int(config["experiment"]["num_iterations"])
+        * int(config["experiment"]["max_cycles"]),
     )
     return {
         "config_snapshot": config_snapshot,
@@ -382,6 +387,10 @@ class ResearchRun:
     def initialize(self, cli_args: Mapping[str, Any]) -> None:
         resolved_payload = thaw_config(self.config)
         study_snapshot = study_manifest_snapshot(self.config)
+        prompt_bundle = prompt_bundle_snapshot(
+            self.config,
+            self.project_root,
+        )
         atomic_json(resolved_payload, self.run_dir / "resolved_config.json")
         atomic_yaml(resolved_payload, self.run_dir / "resolved_config.yaml")
         atomic_json(
@@ -422,10 +431,15 @@ class ResearchRun:
                 "component_state": study_snapshot.get("component_state", {}),
                 "seed": study_snapshot["seed"],
                 "question_budget": study_snapshot["question_budget"],
-                "prompt_version": "math_structured_v1",
-                "prompt_hash": hashlib.sha256(
-                    b"math_structured_v1"
-                ).hexdigest(),
+                "question_budget_per_iteration": study_snapshot[
+                    "question_budget_per_iteration"
+                ],
+                "total_question_budget": study_snapshot[
+                    "total_question_budget"
+                ],
+                "prompt_version": "content-addressed-v1",
+                "prompt_hash": prompt_bundle["combined_sha256"],
+                "prompt_bundle": prompt_bundle,
             },
             self.run_dir / "run_manifest.json",
         )
