@@ -3010,6 +3010,140 @@ def _lowest_sub_categories(compare_summary, limit=10):
     )[:limit]
 
 
+def _semantic_judge_cache_record_matches(cached, gold, predicted):
+    return bool(
+        isinstance(cached, dict)
+        and str(cached.get("question", "")).strip()
+        == str(gold.get("question", "")).strip()
+        and str(cached.get("test_taker_answer", "")).strip()
+        == str(predicted.get("test_taker_response", "")).strip()
+        and str(cached.get("gold_answer", "")).strip()
+        == str(gold.get("answer", "")).strip()
+    )
+
+
+def _failed_semantic_judgment(
+    *,
+    gold,
+    predicted,
+    research_config,
+    error,
+):
+    """Convert a per-question judge outage into an auditable failed result."""
+    deterministic = answers_equivalent(
+        gold["answer"],
+        predicted["test_taker_response"],
+        predicted.get("answer_type", "text"),
+        research_config,
+    )
+    detail = _sanitize_error(error)
+    return {
+        "semantically_equivalent": False,
+        "confidence": 0.0,
+        "reason": f"semantic judge unavailable: {detail}",
+        "format_only_difference": False,
+        "status": "failed",
+        "failure_type": "provider_error",
+        "attempt": int(
+            research_config["evaluator_pipeline"]["semantic_judge_attempts"]
+        ),
+        "prompt_version": "semantic_answer_judge_unavailable",
+        "prompt_sha256": None,
+        "deterministic_equivalent": bool(deterministic["equivalent"]),
+    }
+
+
+def _evaluate_semantic_judgments(
+    gold_records,
+    test_taker_output,
+    *,
+    tool_info,
+    research_config,
+    judge_cache_path,
+    evaluator_progress=None,
+):
+    """Evaluate independently, checkpointing each item and retrying failures.
+
+    A provider failure is data about one judge call, not a reason to discard an
+    otherwise valid iteration. Successful cached items are reused on resume;
+    failed cached items are retried.
+    """
+    cached = read_json_records(judge_cache_path)
+    cache_compatible = (
+        len(cached) <= len(test_taker_output)
+        and all(
+            _semantic_judge_cache_record_matches(item, gold, predicted)
+            for item, gold, predicted in zip(
+                cached,
+                gold_records,
+                test_taker_output,
+            )
+        )
+    )
+    if not cache_compatible:
+        cached = []
+        for stale_path in (
+            judge_cache_path,
+            f"{os.path.splitext(judge_cache_path)[0]}.jsonl",
+        ):
+            if os.path.isfile(stale_path):
+                os.remove(stale_path)
+
+    judgments = list(cached)
+    total = len(test_taker_output)
+    for index, (gold, predicted) in enumerate(
+        zip(gold_records, test_taker_output)
+    ):
+        reusable = (
+            index < len(judgments)
+            and judgments[index].get("semantic_judge", {}).get("status")
+            == "success"
+        )
+        if not reusable:
+            try:
+                semantic = judge_answer_semantics(
+                    question=gold["question"],
+                    gold_answer=gold["answer"],
+                    predicted_answer=predicted["test_taker_response"],
+                    answer_type=predicted.get("answer_type", "text"),
+                    evaluator_info=tool_info,
+                    config=research_config,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                semantic = _failed_semantic_judgment(
+                    gold=gold,
+                    predicted=predicted,
+                    research_config=research_config,
+                    error=exc,
+                )
+            judgment = {
+                "question": gold["question"],
+                "gold_answer": gold["answer"],
+                "test_taker_answer": predicted["test_taker_response"],
+                "is_correct": semantic["semantically_equivalent"],
+                "confidence": semantic["confidence"],
+                "reasons": semantic["reason"],
+                "semantic_judge": semantic,
+            }
+            if index < len(judgments):
+                judgments[index] = judgment
+            else:
+                judgments.append(judgment)
+            # Persist every completed item so an interruption never discards
+            # earlier successful and expensive remote calls.
+            dump_standard_json(judgments, judge_cache_path)
+            if semantic.get("status") != "success":
+                print(
+                    "[Evaluate] semantic_judge_failed "
+                    f"index={index + 1}/{total} "
+                    f"error={semantic['reason']} action=continue",
+                    flush=True,
+                )
+        if evaluator_progress is not None:
+            evaluator_progress.update(1)
+    return judgments
+
+
 # [MODIFIED] Persist only canonical inference details and comparison statistics.
 def test_and_eval(
     question_json,
@@ -3112,30 +3246,6 @@ def test_and_eval(
     os.makedirs(temp_log_dir, exist_ok=True)
     judge_prefix = os.path.join(temp_log_dir, "judge")
     judge_cache_path = f"{judge_prefix}.compare_answers.json"
-    judge_cache = read_json_records(judge_cache_path)
-    judge_cache_matches = (
-        len(judge_cache) == len(test_taker_output)
-        and all(
-            str(cached.get("question", "")).strip()
-            == str(current.get("question", "")).strip()
-            and str(cached.get("test_taker_answer", "")).strip()
-            == str(current.get("test_taker_response", "")).strip()
-            and str(cached.get("gold_answer", "")).strip()
-            == str(gold.get("answer", "")).strip()
-            for cached, current, gold in zip(
-                judge_cache,
-                test_taker_output,
-                gold_records,
-            )
-        )
-    )
-    if judge_cache and not judge_cache_matches:
-        for stale_path in (
-            judge_cache_path,
-            f"{judge_prefix}.compare_answers.jsonl",
-        ):
-            if os.path.isfile(stale_path):
-                os.remove(stale_path)
     if event_logger:
         event_logger.event(
             "INFO",
@@ -3170,47 +3280,14 @@ def test_and_eval(
         try:
             evaluator_cache_exists = os.path.exists(judge_cache_path)
             if research_config:
-                if evaluator_cache_exists and judge_cache_matches:
-                    judgments = judge_cache
-                    if evaluator_progress is not None:
-                        evaluator_progress.update(len(test_taker_output))
-                else:
-                    judgments = []
-                    for gold, predicted in zip(
-                        gold_records,
-                        test_taker_output,
-                    ):
-                        semantic = judge_answer_semantics(
-                            question=gold["question"],
-                            gold_answer=gold["answer"],
-                            predicted_answer=predicted[
-                                "test_taker_response"
-                            ],
-                            answer_type=predicted.get(
-                                "answer_type",
-                                "text",
-                            ),
-                            evaluator_info=tool_info,
-                            config=research_config,
-                        )
-                        judgments.append(
-                            {
-                                "question": gold["question"],
-                                "gold_answer": gold["answer"],
-                                "test_taker_answer": predicted[
-                                    "test_taker_response"
-                                ],
-                                "is_correct": semantic[
-                                    "semantically_equivalent"
-                                ],
-                                "confidence": semantic["confidence"],
-                                "reasons": semantic["reason"],
-                                "semantic_judge": semantic,
-                            }
-                        )
-                        if evaluator_progress is not None:
-                            evaluator_progress.update(1)
-                    dump_standard_json(judgments, judge_cache_path)
+                judgments = _evaluate_semantic_judgments(
+                    gold_records,
+                    test_taker_output,
+                    tool_info=tool_info,
+                    research_config=research_config,
+                    judge_cache_path=judge_cache_path,
+                    evaluator_progress=evaluator_progress,
+                )
             else:
                 judgments = [
                     {

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import math_autobencher
 import tool_util
-from autobencher.config import load_project_config
+from autobencher.config import load_project_config, load_resolved_config
 from autobencher.truth_solver import FailureType
 from tool_util import (
     ERROR_TAGS,
@@ -20,6 +20,84 @@ from tool_util import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class SemanticJudgmentResilienceTests(unittest.TestCase):
+    @staticmethod
+    def _success(reason):
+        return {
+            "semantically_equivalent": True,
+            "confidence": 0.99,
+            "reason": reason,
+            "format_only_difference": False,
+            "status": "success",
+            "attempt": 1,
+            "prompt_version": "test",
+            "prompt_sha256": "abc",
+            "deterministic_equivalent": True,
+        }
+
+    def test_provider_failure_is_checkpointed_and_only_failure_retries(self):
+        config = load_resolved_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )[0]
+        gold = [
+            {"question": f"Compute {index} + 1.", "answer": str(index + 1)}
+            for index in range(3)
+        ]
+        predicted = [
+            {
+                "test_taker_response": str(index + 1),
+                "answer_type": "integer",
+            }
+            for index in range(3)
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "judge.compare_answers.json"
+            with patch(
+                "math_autobencher.judge_answer_semantics",
+                side_effect=[
+                    self._success("first"),
+                    RuntimeError("API returned an empty completion"),
+                    self._success("third"),
+                ],
+            ):
+                first = math_autobencher._evaluate_semantic_judgments(
+                    gold,
+                    predicted,
+                    tool_info=("model", None, object()),
+                    research_config=config,
+                    judge_cache_path=cache_path,
+                )
+
+            self.assertEqual(len(first), 3)
+            self.assertEqual(first[0]["semantic_judge"]["status"], "success")
+            self.assertEqual(first[1]["semantic_judge"]["status"], "failed")
+            self.assertEqual(first[2]["semantic_judge"]["status"], "success")
+            self.assertEqual(len(json.loads(cache_path.read_text("utf-8"))), 3)
+
+            with patch(
+                "math_autobencher.judge_answer_semantics",
+                return_value=self._success("recovered"),
+            ) as judge:
+                resumed = math_autobencher._evaluate_semantic_judgments(
+                    gold,
+                    predicted,
+                    tool_info=("model", None, object()),
+                    research_config=config,
+                    judge_cache_path=cache_path,
+                )
+
+            judge.assert_called_once()
+            self.assertTrue(
+                all(
+                    item["semantic_judge"]["status"] == "success"
+                    for item in resumed
+                )
+            )
+            self.assertEqual(resumed[0]["reasons"], "first")
+            self.assertEqual(resumed[1]["reasons"], "recovered")
+            self.assertEqual(resumed[2]["reasons"], "third")
 
 
 class ExtractJsonTests(unittest.TestCase):
