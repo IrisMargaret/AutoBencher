@@ -17,11 +17,17 @@ import yaml
 from autobencher.baseline import git_state
 from autobencher.budget import parse_budget
 from autobencher.config import load_resolved_config, thaw_config
-from autobencher.experiment import atomic_json, git_commit, utc_now
+from autobencher.experiment import (
+    atomic_json,
+    git_commit,
+    run_dir_for_id,
+    utc_now,
+)
 from autobencher.fingerprints import (
     artifact_fingerprint,
     canonical_sha256,
     prompt_bundle_snapshot,
+    file_sha256,
     resolve_project_path,
 )
 from autobencher.result_schema import (
@@ -96,6 +102,220 @@ RUNTIME_PATH_FIELDS = (
 
 class StudyConfigurationError(RuntimeError):
     pass
+
+
+def _json_mapping(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StudyConfigurationError(f"Invalid required artifact {path}: {error}")
+    if not isinstance(value, dict):
+        raise StudyConfigurationError(f"Required artifact is not an object: {path}")
+    return value
+
+
+def _question_ids(path: Path) -> set[str]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise StudyConfigurationError(f"Expected item list: {path}")
+    identifiers = {
+        str(item.get("question_id", item.get("id", "")))
+        for item in value
+        if isinstance(item, Mapping)
+    }
+    if "" in identifiers or len(identifiers) != len(value):
+        raise StudyConfigurationError(f"Missing or duplicate question IDs: {path}")
+    return identifiers
+
+
+def validate_experiment_completion(record: ExperimentRecord) -> dict[str, Any]:
+    """Fail closed unless one registry-bound run is complete and self-consistent."""
+    if not record.run_dir:
+        raise StudyConfigurationError(f"Registry has no run_dir for {record.study_id}")
+    run_dir = Path(record.run_dir).resolve()
+    expected_paths = {
+        "run_manifest": Path(record.run_manifest_path or run_dir / "run_manifest.json").resolve(),
+        "summary": Path(record.summary_path or run_dir / "experiment_summary.json").resolve(),
+        "artifact_manifest": Path(
+            record.artifact_manifest_path or run_dir / "artifact_manifest.json"
+        ).resolve(),
+        "ledger": (run_dir / "budget_ledger.json").resolve(),
+        "resolved_config": (run_dir / "resolved_config.json").resolve(),
+        "dataset_snapshot": (run_dir / "fixed_test" / "dataset_snapshot.json").resolve(),
+    }
+    if any(not path.is_relative_to(run_dir) for path in expected_paths.values()):
+        raise StudyConfigurationError("Registry artifact path escapes bound run_dir")
+    missing = [name for name, path in expected_paths.items() if not path.is_file()]
+    if missing:
+        raise StudyConfigurationError(
+            f"Incomplete experiment {record.study_id}; missing {missing}"
+        )
+    manifest = _json_mapping(expected_paths["run_manifest"])
+    summary = _json_mapping(expected_paths["summary"])
+    ledger = _json_mapping(expected_paths["ledger"])
+    resolved = _json_mapping(expected_paths["resolved_config"])
+    artifacts = _json_mapping(expected_paths["artifact_manifest"])
+    expected_identity = {
+        "run_id": record.study_id,
+        "config_hash": record.config_hash,
+        "git_commit": record.git_commit,
+    }
+    for name, payload in (("manifest", manifest), ("summary", summary), ("ledger", ledger)):
+        for key, expected in expected_identity.items():
+            if payload.get(key) != expected:
+                raise StudyConfigurationError(
+                    f"{name} identity mismatch for {key}: "
+                    f"{payload.get(key)!r} != {expected!r}"
+                )
+    for key, expected in expected_identity.items():
+        if artifacts.get(key) != expected:
+            raise StudyConfigurationError(
+                f"artifact manifest identity mismatch for {key}: "
+                f"{artifacts.get(key)!r} != {expected!r}"
+            )
+    if manifest.get("status") != "completed" or summary.get("status") != "completed":
+        raise StudyConfigurationError("Run manifest/summary is not completed")
+    if ledger.get("status") != "completed":
+        raise StudyConfigurationError("Budget ledger is not completed")
+    if ledger.get("protocol", {}).get("name") != record.budget_protocol:
+        raise StudyConfigurationError("Budget protocol differs from registry")
+    if manifest.get("prompt_hash") != record.fingerprints["prompt_bundle"]["combined_sha256"]:
+        raise StudyConfigurationError("Prompt fingerprint changed inside run")
+    if manifest.get("base_model_sha256") != record.fingerprints["base_model"]["sha256"]:
+        raise StudyConfigurationError("Base-model fingerprint changed inside run")
+    if canonical_sha256(resolved) != record.config_hash:
+        raise StudyConfigurationError("Resolved configuration hash mismatch")
+    artifact_entries = {
+        str(item.get("path")): item for item in artifacts.get("files", [])
+        if isinstance(item, Mapping)
+    }
+    required_manifest_entries = {
+        path.relative_to(run_dir).as_posix()
+        for name, path in expected_paths.items()
+        if name != "artifact_manifest"
+    }
+    omitted = sorted(required_manifest_entries - set(artifact_entries))
+    if omitted:
+        raise StudyConfigurationError(
+            f"Artifact manifest omits required files: {omitted}"
+        )
+    for item in artifact_entries.values():
+        path = (run_dir / str(item.get("path", ""))).resolve()
+        if not path.is_relative_to(run_dir) or not path.is_file():
+            raise StudyConfigurationError(f"Artifact manifest path is invalid: {path}")
+        if file_sha256(path) != item.get("sha256"):
+            raise StudyConfigurationError(f"Artifact hash mismatch: {path}")
+    snapshot = _json_mapping(expected_paths["dataset_snapshot"])
+    fixed_sha = record.fingerprints.get("fixed_test", {}).get("sha256")
+    if not fixed_sha or snapshot.get("sha256") != fixed_sha:
+        raise StudyConfigurationError(
+            "Fixed-test snapshot hash differs from the preregistered dataset"
+        )
+    questions = snapshot.get("questions", [])
+    expected_ids = {
+        str(item.get("question_id", item.get("id", "")))
+        for item in questions
+        if isinstance(item, Mapping)
+    }
+    if not expected_ids or "" in expected_ids or len(expected_ids) != len(questions):
+        raise StudyConfigurationError("Fixed-test snapshot is incomplete")
+    declared_count = snapshot.get("question_count")
+    if declared_count is not None and int(declared_count) != len(expected_ids):
+        raise StudyConfigurationError("Fixed-test snapshot count is inconsistent")
+    summary_count = summary.get("total_questions")
+    if summary_count is not None and int(summary_count) != len(expected_ids):
+        raise StudyConfigurationError("Experiment summary test count is incomplete")
+    comparisons = sorted(
+        (run_dir / "fixed_test").glob("*/fixed_math.compare_answers.json")
+    )
+    if not comparisons:
+        raise StudyConfigurationError("No fixed-test answer comparison exists")
+    for path in comparisons:
+        if _question_ids(path) != expected_ids:
+            raise StudyConfigurationError(
+                f"Fixed-test item set is incomplete or inconsistent: {path}"
+            )
+        relative = path.relative_to(run_dir).as_posix()
+        if relative not in artifact_entries:
+            raise StudyConfigurationError(
+                f"Artifact manifest omits fixed-test result: {relative}"
+            )
+    is_base = record.method == "base"
+    checkpoint_sha = record.fingerprints["base_model"]["sha256"]
+    if not is_base:
+        checkpoint_manifests = sorted(
+            run_dir.glob("cycle/cycle_*/training/checkpoint_manifest.json")
+        )
+        if not checkpoint_manifests:
+            raise StudyConfigurationError("Training run has no checkpoint manifest")
+        checkpoint = _json_mapping(checkpoint_manifests[-1])
+        for key, expected in expected_identity.items():
+            if checkpoint.get(key) != expected:
+                raise StudyConfigurationError(
+                    f"Checkpoint identity mismatch for {key}"
+                )
+        checkpoint_relative = checkpoint_manifests[-1].relative_to(
+            run_dir
+        ).as_posix()
+        if checkpoint_relative not in artifact_entries:
+            raise StudyConfigurationError(
+                "Artifact manifest omits the selected checkpoint manifest"
+            )
+        model_path = Path(str(checkpoint.get("merged_model_path", ""))).expanduser()
+        weight_files = (
+            list(model_path.glob("*.safetensors"))
+            + list(model_path.glob("*.bin"))
+        ) if model_path.is_dir() else []
+        if not (model_path / "config.json").is_file() or not weight_files:
+            raise StudyConfigurationError(f"Merged model does not exist: {model_path}")
+        checkpoint_sha = artifact_fingerprint(
+            str(model_path), allow_missing=False
+        )["sha256"]
+        if checkpoint.get("merged_model_sha256") != checkpoint_sha:
+            raise StudyConfigurationError(
+                "Checkpoint manifest model hash does not match the model"
+            )
+        if len(comparisons) < 2:
+            raise StudyConfigurationError("Training run has no post-training fixed evaluation")
+    dataset = snapshot
+    evaluation_sha = dataset.get("sha256")
+    evaluation_id = dataset.get("evaluation_set_id")
+    evaluation_version = dataset.get(
+        "evaluation_version",
+        dataset.get("version", dataset.get("dataset_version")),
+    )
+    if not evaluation_sha or not evaluation_id or not evaluation_version:
+        raise StudyConfigurationError(
+            "Fixed-test snapshot lacks evaluation-set identity"
+        )
+    completion = {
+        "run_dir": str(run_dir),
+        "run_manifest_path": str(expected_paths["run_manifest"]),
+        "summary_path": str(expected_paths["summary"]),
+        "artifact_manifest_path": str(expected_paths["artifact_manifest"]),
+        "artifact_manifest_sha256": file_sha256(expected_paths["artifact_manifest"]),
+        "checkpoint_sha256": checkpoint_sha,
+        "evaluation_set_id": evaluation_id,
+        "evaluation_set_version": evaluation_version,
+        "evaluation_set_sha256": evaluation_sha,
+        "question_count": len(expected_ids),
+    }
+    if record.status == "completed":
+        persisted_fields = (
+            "artifact_manifest_sha256",
+            "checkpoint_sha256",
+            "evaluation_set_id",
+            "evaluation_set_version",
+            "evaluation_set_sha256",
+        )
+        for field in persisted_fields:
+            stored = getattr(record, field)
+            if not stored or stored != completion[field]:
+                raise StudyConfigurationError(
+                    f"Completed registry binding mismatch for {field}: "
+                    f"{stored!r} != {completion[field]!r}"
+                )
+    return completion
 
 
 def _slug(value: str) -> str:
@@ -420,6 +640,21 @@ class StudyRunner:
                             experiment_dir=str(experiment_dir),
                             command=command,
                             fingerprints=fingerprints,
+                            run_dir=str(
+                                run_dir_for_id(
+                                    config["paths"]["output_root"],
+                                    study_id,
+                                )
+                            ),
+                            )
+                            record.run_manifest_path = str(
+                                Path(record.run_dir) / "run_manifest.json"
+                            )
+                            record.summary_path = str(
+                                Path(record.run_dir) / "experiment_summary.json"
+                            )
+                            record.artifact_manifest_path = str(
+                                Path(record.run_dir) / "artifact_manifest.json"
                             )
                             records.append(record)
                             resolved_by_id[study_id] = config
@@ -533,6 +768,9 @@ class StudyRunner:
             "suite_path": str(self.suite_path),
             "suite_sha256": canonical_sha256(self.suite),
             "git_commit": git_commit(self.project_root),
+            "comparison_pairs": list(
+                self.suite.get("comparison_pairs", [])
+            ),
             "updated_at": utc_now(),
             "experiments": [record.to_dict() for record in records],
         }
@@ -568,11 +806,25 @@ class StudyRunner:
         merged = []
         for planned in plan:
             old = existing[planned.study_id]
+            if not old.run_dir:
+                if old.status != "pending" or any(
+                    Path(old.experiment_dir).rglob("run_manifest.json")
+                ):
+                    raise StudyConfigurationError(
+                        "Legacy registry has no deterministic run_dir for "
+                        f"{old.study_id}; use a new suite name rather than "
+                        "guessing among test_N attempts."
+                    )
+                old.run_dir = planned.run_dir
+                old.run_manifest_path = planned.run_manifest_path
+                old.summary_path = planned.summary_path
+                old.artifact_manifest_path = planned.artifact_manifest_path
             if (
                 old.config_hash != planned.config_hash
                 or old.git_commit != planned.git_commit
                 or old.command != planned.command
                 or old.fingerprints != planned.fingerprints
+                or old.run_dir != planned.run_dir
             ):
                 raise StudyConfigurationError(
                     "Code/config/artifact fingerprints changed for existing "
@@ -624,7 +876,16 @@ class StudyRunner:
                 record.return_code = return_code
                 record.completed_at = utc_now()
                 if return_code == 0:
-                    record.status = "completed"
+                    try:
+                        completion = validate_experiment_completion(record)
+                    except StudyConfigurationError as error:
+                        record.status = "partial"
+                        record.error = f"Completion validation failed: {error}"
+                    else:
+                        for key, value in completion.items():
+                            if hasattr(record, key):
+                                setattr(record, key, value)
+                        record.status = "completed"
                 else:
                     has_artifacts = any(
                         Path(record.experiment_dir).rglob("*")

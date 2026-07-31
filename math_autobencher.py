@@ -71,7 +71,12 @@ from autobencher.structured import (
 )
 from autobencher.storage import configure_runtime_storage
 from autobencher.truth_solver import FailureType, TruthSolver
-from autobencher.training_protocol import write_training_splits
+from autobencher.training_protocol import (
+    split_by_template_cluster,
+    write_precomputed_training_splits,
+    write_training_splits,
+)
+from autobencher.fingerprints import artifact_fingerprint
 from util import gen_from_prompt, load_model, process_args_for_models, helm_process_args
 from tool_util import (
     DEFAULT_SYSTEM_MESSAGE,
@@ -3671,6 +3676,13 @@ def _output_root(outfile_prefix):
     return os.path.abspath(os.path.dirname(os.fspath(outfile_prefix)) or ".")
 
 
+def _bound_outfile_prefix(run_dir, configured_prefix):
+    """Keep all legacy cycle state inside the run-id-owned directory."""
+    configured = Path(str(configured_prefix).rstrip("."))
+    prefix_name = configured.name or "output"
+    return str(Path(run_dir) / f"{prefix_name}.")
+
+
 def _load_test_taker_info(model_name, use_helm):
     if use_helm == "yes":
         print("[Model] loaded HELM test taker")
@@ -3746,6 +3758,18 @@ def _release_model_info(model_info):
 def _safe_model_component(model_name):
     base_name = os.path.basename(os.path.normpath(str(model_name))) or "model"
     return re.sub(r"[^A-Za-z0-9._-]+", "_", base_name).strip("._") or "model"
+
+
+def _complete_merged_model(path):
+    model_path = Path(str(path)).expanduser()
+    return (
+        model_path.is_dir()
+        and (model_path / "config.json").is_file()
+        and bool(
+            list(model_path.glob("*.safetensors"))
+            or list(model_path.glob("*.bin"))
+        )
+    )
 
 
 def _cycle_record_file(args):
@@ -3832,12 +3856,8 @@ def _load_completed_cycle_history(output_root, cycles):
     history = []
     root = Path(output_root)
     for cycle in sorted(cycles, key=lambda item: int(item.get("cycle", 0))):
-        if cycle.get("status") not in {
-            "completed",
-            "completed_without_training",
-            "collecting_data_budget",
-        }:
-            continue
+        # Completed iterations in an interrupted/failed cycle are durable and
+        # must be restored before resuming that same model version.
         cycle_number = int(cycle.get("cycle", 0))
         for iteration_number in range(
             1,
@@ -4814,23 +4834,38 @@ def _run_autobencher(args, agent_info, evaluator_info):
             if args.research_run.config["fixed_test"][
                 "evaluate_baseline"
             ]:
-                baseline_info = _load_test_taker_info(
-                    args.test_taker_modelname,
-                    args.use_helm,
-                )
-                try:
-                    baseline_fixed_summary = _run_fixed_test_benchmark(
-                        args,
-                        model_name=args.test_taker_modelname,
-                        test_taker_info=baseline_info,
-                        agent_info=agent_info,
-                        evaluator_info=evaluator_info,
-                        fixed_questions=fixed_questions,
-                        fixed_metadata=fixed_metadata,
-                        stage_name="baseline",
+                prior_fixed = cycle_record.get("fixed_test", {})
+                prior_dataset = prior_fixed.get("dataset", {})
+                prior_baseline = prior_fixed.get("baseline", {})
+                if (
+                    args.research_run.resumed
+                    and prior_dataset.get("sha256") == fixed_metadata.get("sha256")
+                    and int(prior_baseline.get("total_questions", 0))
+                    == len(fixed_questions)
+                ):
+                    baseline_fixed_summary = prior_baseline
+                    args.research_run.logger.event(
+                        "INFO", "FixedTest", "baseline_resume_hit",
+                        f"questions={len(fixed_questions)}",
                     )
-                finally:
-                    _release_model_info(baseline_info)
+                else:
+                    baseline_info = _load_test_taker_info(
+                        args.test_taker_modelname,
+                        args.use_helm,
+                    )
+                    try:
+                        baseline_fixed_summary = _run_fixed_test_benchmark(
+                            args,
+                            model_name=args.test_taker_modelname,
+                            test_taker_info=baseline_info,
+                            agent_info=agent_info,
+                            evaluator_info=evaluator_info,
+                            fixed_questions=fixed_questions,
+                            fixed_metadata=fixed_metadata,
+                            stage_name="baseline",
+                        )
+                    finally:
+                        _release_model_info(baseline_info)
                 cycle_record["fixed_test"] = {
                     "dataset": fixed_metadata,
                     "baseline": baseline_fixed_summary,
@@ -5004,19 +5039,37 @@ def _run_autobencher(args, agent_info, evaluator_info):
             )
             print(f"[Cycle] resume_skip={cycle_number} status={prior_cycle['status']}")
             continue
+        if prior_cycle:
+            current_test_taker_model = prior_cycle.get(
+                "test_taker_model",
+                current_test_taker_model,
+            )
 
-        cycle_entry = {
-            "cycle": cycle_number,
-            "status": "running",
-            "started_at": _utc_timestamp(),
-            "test_taker_model": current_test_taker_model,
-            "iterations_completed": 0,
-            "training_export": None,
-            "finetune_output": None,
-            "finetune_status": "not_started",
-            "next_test_taker_model": current_test_taker_model,
-            **study_runtime,
-        }
+        if prior_cycle:
+            cycle_entry = {
+                **prior_cycle,
+                "status": "running",
+                "resumed_at": _utc_timestamp(),
+                "resume_count": int(prior_cycle.get("resume_count", 0)) + 1,
+                **study_runtime,
+            }
+            cycle_entry.pop("failed_stage", None)
+            cycle_entry.pop("failure_type", None)
+            cycle_entry.pop("error", None)
+            cycle_entry.pop("traceback", None)
+        else:
+            cycle_entry = {
+                "cycle": cycle_number,
+                "status": "running",
+                "started_at": _utc_timestamp(),
+                "test_taker_model": current_test_taker_model,
+                "iterations_completed": 0,
+                "training_export": None,
+                "finetune_output": None,
+                "finetune_status": "not_started",
+                "next_test_taker_model": current_test_taker_model,
+                **study_runtime,
+            }
         if getattr(args, "research_run", None):
             _save_research_cycle_manifest(args, cycle_entry)
         cycle_record["cycles"] = [
@@ -5038,7 +5091,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
             stage = "evaluation"
             last_iteration = None
             cycle_generation_results = []
-            for iter_number in range(1, args.num_iters + 1):
+            first_iteration = int(cycle_entry.get("iterations_completed", 0)) + 1
+            for iter_number in range(first_iteration, args.num_iters + 1):
                 try:
                     last_iteration = _run_math_iteration(
                         args,
@@ -5148,93 +5202,11 @@ def _run_autobencher(args, agent_info, evaluator_info):
                             "data_matched_target_samples"
                         ]
                     )
-                    if len(selected) < target_samples:
-                        dataset_manifest["budget_protocol"] = "data_matched"
-                        dataset_manifest["data_matched_target_samples"] = (
-                            target_samples
-                        )
-                        dataset_manifest["data_matched_shortfall"] = (
-                            target_samples - len(selected)
-                        )
-                        if hasattr(args.research_run, "budget_ledger"):
-                            args.research_run.budget_ledger.record_dataset(
-                                dataset_manifest,
-                                [],
-                            )
-                        if cycle_number < cycle_limit:
-                            cycle_entry["status"] = "collecting_data_budget"
-                            cycle_entry["finetune_status"] = (
-                                "waiting_for_data_matched_target"
-                            )
-                            cycle_entry["training_sample_count"] = 0
-                            cycle_entry["completed_at"] = _utc_timestamp()
-                            _save_cycle_record(cycle_record_path, cycle_record)
-                            _save_research_cycle_manifest(args, cycle_entry)
-                            args.research_run.logger.event(
-                                "INFO",
-                                "BuildDataset",
-                                "data_budget_shortfall",
-                                (
-                                    f"eligible={len(selected)} "
-                                    f"target={target_samples}; "
-                                    "continuing generation"
-                                ),
-                                cycle=cycle_number,
-                                metrics=dataset_manifest,
-                            )
-                            continue
-                        raise RuntimeError(
-                            "Data-matched target was not reached before the "
-                            f"generation safety limit: eligible={len(selected)} "
-                            f"target={target_samples}"
-                        )
-                    correct_target = target_samples // 4
-                    wrong_target = target_samples - correct_target
-                    correct_records = [
-                        item
-                        for item in selected
-                        if item.get("_metadata", {}).get("training_source")
-                        == "correct_retention_samples"
-                    ]
-                    wrong_records = [
-                        item
-                        for item in selected
-                        if item.get("_metadata", {}).get("training_source")
-                        != "correct_retention_samples"
-                    ]
-                    if (
-                        target_samples % 4
-                        or len(correct_records) < correct_target
-                        or len(wrong_records) < wrong_target
-                    ):
-                        raise RuntimeError(
-                            "Data-matched target cannot preserve the configured "
-                            "25/75 correct/incorrect training ratio"
-                        )
-                    selected = [
-                        *correct_records[:correct_target],
-                        *wrong_records[:wrong_target],
-                    ]
                     dataset_manifest.update(
                         {
                             "budget_protocol": "data_matched",
                             "data_matched_target_samples": target_samples,
-                            "selected_count_before_budget_cap": int(
-                                dataset_manifest["selected_count"]
-                            ),
-                            "selected_count": len(selected),
-                            "selected_correct_count": correct_target,
-                            "selected_incorrect_count": wrong_target,
-                            "strict_ratio_satisfied": True,
-                            "selected_mix_counts": dict(
-                                Counter(
-                                    item.get("_metadata", {}).get(
-                                        "training_source",
-                                        "unknown",
-                                    )
-                                    for item in selected
-                                )
-                            ),
+                            "matching_unit": "post_split_train_samples",
                         }
                     )
                 if (
@@ -5263,21 +5235,115 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 split_manifest = None
                 validation_export_path = None
                 internal_test_export_path = None
+                if data_matched_protocol and not selected:
+                    if cycle_number < cycle_limit:
+                        cycle_entry["status"] = "collecting_data_budget"
+                        cycle_entry["finetune_status"] = (
+                            "waiting_for_post_split_train_target"
+                        )
+                        cycle_entry["training_sample_count"] = 0
+                        cycle_entry["completed_at"] = _utc_timestamp()
+                        _save_cycle_record(cycle_record_path, cycle_record)
+                        _save_research_cycle_manifest(args, cycle_entry)
+                        continue
+                    raise RuntimeError(
+                        "Data-matched run has no eligible post-filter samples"
+                    )
                 if (
                     selected
                     and bool(
                         args.research_run.config["finetune"]["enabled"]
                     )
                 ):
-                    split_manifest = write_training_splits(
-                        selected,
+                    split_config = args.research_run.config["finetune"][
+                        "training_split"
+                    ]
+                    try:
+                        splits, split_manifest = split_by_template_cluster(
+                            selected,
+                            split_config,
+                            seed=int(
+                                args.research_run.config["experiment"]["seed"]
+                            ),
+                        )
+                    except ValueError as split_error:
+                        if data_matched_protocol and cycle_number < cycle_limit:
+                            cycle_entry["status"] = "collecting_data_budget"
+                            cycle_entry["finetune_status"] = (
+                                "waiting_for_template_clusters"
+                            )
+                            cycle_entry["training_sample_count"] = 0
+                            cycle_entry["completed_at"] = _utc_timestamp()
+                            cycle_entry["split_error"] = str(split_error)
+                            _save_cycle_record(cycle_record_path, cycle_record)
+                            _save_research_cycle_manifest(args, cycle_entry)
+                            continue
+                        raise
+                    if data_matched_protocol:
+                        target_samples = int(
+                            args.research_run.config["budget"][
+                                "data_matched_target_samples"
+                            ]
+                        )
+                        correct_target = target_samples // 4
+                        wrong_target = target_samples - correct_target
+                        train_correct = [
+                            item for item in splits["train"]
+                            if item.get("_metadata", {}).get("training_source")
+                            == "correct_retention_samples"
+                        ]
+                        train_wrong = [
+                            item for item in splits["train"]
+                            if item.get("_metadata", {}).get("training_source")
+                            != "correct_retention_samples"
+                        ]
+                        shortfall = max(0, correct_target - len(train_correct)) + max(
+                            0, wrong_target - len(train_wrong)
+                        )
+                        dataset_manifest["data_matched_train_shortfall"] = shortfall
+                        dataset_manifest["post_split_train_pool_count"] = len(
+                            splits["train"]
+                        )
+                        if target_samples % 4 or shortfall:
+                            if cycle_number < cycle_limit:
+                                cycle_entry["status"] = "collecting_data_budget"
+                                cycle_entry["finetune_status"] = (
+                                    "waiting_for_post_split_train_target"
+                                )
+                                cycle_entry["training_sample_count"] = 0
+                                cycle_entry["completed_at"] = _utc_timestamp()
+                                _save_cycle_record(cycle_record_path, cycle_record)
+                                _save_research_cycle_manifest(args, cycle_entry)
+                                args.research_run.logger.event(
+                                    "INFO", "BuildDataset", "data_budget_shortfall",
+                                    (
+                                        f"post_split_train={len(splits['train'])} "
+                                        f"target={target_samples} shortfall={shortfall}"
+                                    ),
+                                    cycle=cycle_number,
+                                    metrics=dataset_manifest,
+                                )
+                                continue
+                            raise RuntimeError(
+                                "Data-matched post-split train target was not "
+                                f"reached: train={len(splits['train'])}, "
+                                f"target={target_samples}, ratio_shortfall={shortfall}"
+                            )
+                        splits["train"] = [
+                            *train_correct[:correct_target],
+                            *train_wrong[:wrong_target],
+                        ]
+                        split_manifest["split_record_counts"]["train"] = target_samples
+                        split_manifest["data_matched_train_cap"] = {
+                            "target": target_samples,
+                            "correct": correct_target,
+                            "incorrect": wrong_target,
+                            "actual": len(splits["train"]),
+                        }
+                    split_manifest = write_precomputed_training_splits(
+                        splits,
                         training_dir,
-                        args.research_run.config["finetune"][
-                            "training_split"
-                        ],
-                        seed=int(
-                            args.research_run.config["experiment"]["seed"]
-                        ),
+                        split_manifest,
                     )
                     export_path = split_manifest["paths"]["train"]
                     validation_export_path = split_manifest["paths"][
@@ -5293,6 +5359,8 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     args.research_run.budget_ledger.record_dataset(
                         dataset_manifest,
                         selected,
+                        split_manifest=split_manifest,
+                        event_id=f"cycle_{cycle_number}",
                     )
                 atomic_json(
                     {
@@ -5453,7 +5521,47 @@ def _run_autobencher(args, agent_info, evaluator_info):
             _save_cycle_record(cycle_record_path, cycle_record)
             if hasattr(args.research_run, "budget_ledger"):
                 args.research_run.budget_ledger.assert_training_available()
-            result = call_local_finetune(
+            checkpoint_resume_path = (
+                training_dir / "checkpoint_manifest.json"
+                if getattr(args, "research_run", None)
+                else None
+            )
+            recovered_checkpoint = None
+            if checkpoint_resume_path and checkpoint_resume_path.is_file():
+                recovered_checkpoint = _load_cycle_record(
+                    str(checkpoint_resume_path)
+                )
+                if (
+                    recovered_checkpoint.get("run_id")
+                    != args.research_run.run_id
+                    or recovered_checkpoint.get("config_hash")
+                    != args.research_run.config_hash
+                    or recovered_checkpoint.get("base_model")
+                    != current_test_taker_model
+                    or not _complete_merged_model(
+                        recovered_checkpoint.get("merged_model_path", "")
+                    )
+                    or recovered_checkpoint.get("merged_model_sha256")
+                    != artifact_fingerprint(
+                        recovered_checkpoint.get("merged_model_path", ""),
+                        allow_missing=False,
+                    )["sha256"]
+                ):
+                    raise RuntimeError(
+                        "Existing checkpoint cannot be resumed because its "
+                        "identity or model directory is invalid"
+                    )
+            result = (
+                {
+                    "success": True,
+                    "returncode": 0,
+                    "training_summary": _load_cycle_record(
+                        str(training_dir / "training_cost_summary.json")
+                    ),
+                    "resumed_checkpoint": True,
+                }
+                if recovered_checkpoint
+                else call_local_finetune(
                 current_test_taker_model,
                 export_path,
                 args.finetune_gpu,
@@ -5600,21 +5708,48 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     if getattr(args, "research_run", None)
                     else None
                 ),
+                )
             )
             training_cost_summary = result.get("training_summary") or {}
-            if getattr(args, "research_run", None) and hasattr(
-                args.research_run,
-                "budget_ledger",
-            ):
-                args.research_run.budget_ledger.record_training(
-                    training_cost_summary
-                )
             if not result["success"]:
                 raise RuntimeError(
                     result.get("error")
                     or f"Fine-tuning exited with code {result['returncode']}"
                 )
-            current_test_taker_model = os.path.abspath(finetune_output)
+            if not recovered_checkpoint and getattr(args, "research_run", None):
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "status": "completed",
+                        "base_model": current_test_taker_model,
+                        "merged_model_path": os.path.abspath(finetune_output).replace(
+                            "\\", "/"
+                        ),
+                        "merged_model_sha256": artifact_fingerprint(
+                            finetune_output,
+                            allow_missing=False,
+                        )["sha256"],
+                        "training_cost": training_cost_summary,
+                    },
+                    training_dir / "checkpoint_manifest.json",
+                )
+            if (
+                getattr(args, "research_run", None)
+                and hasattr(args.research_run, "budget_ledger")
+            ):
+                # The checkpoint is published first. A crash after publication
+                # is recovered without retraining, and this idempotent event
+                # then fills any missing ledger entry exactly once.
+                args.research_run.budget_ledger.record_training(
+                    training_cost_summary,
+                    event_id=f"cycle_{cycle_number}",
+                )
+            current_test_taker_model = (
+                str(recovered_checkpoint["merged_model_path"])
+                if recovered_checkpoint
+                else os.path.abspath(finetune_output)
+            )
             if (
                 fixed_questions
                 and args.research_run.config["fixed_test"][
@@ -5725,6 +5860,7 @@ def _run_autobencher(args, agent_info, evaluator_info):
                         "seed": int(
                             args.research_run.config["experiment"]["seed"]
                         ),
+                        "base_model": cycle_entry["test_taker_model"],
                         "merged_model_path": current_test_taker_model.replace(
                             "\\",
                             "/",
@@ -6211,11 +6347,17 @@ def main():
         run_id,
         project_root=Path(__file__).resolve().parent,
         legacy_output_root=(None if config_explicit else output_root),
+        resume=resume_enabled,
     )
-    # [MODIFIED] Every invocation is self-contained in test_<N>. Legacy CLI
-    # output prefixes still choose the archive root and base filename.
-    prefix = str(resolved_config["paths"]["outfile_prefix"]).rstrip(".")
-    args.outfile_prefix1 = str(research_run.run_dir / f"{prefix}.")
+    # run_id deterministically owns one directory. A resumed invocation reuses
+    # its cycle record, hard pool, ledger, checkpoints, and cached iterations.
+    # Study Runner supplies an isolated absolute legacy prefix. Joining an
+    # absolute path would discard run_dir and split resumable state across two
+    # directories, so only its file name is used inside the bound run.
+    args.outfile_prefix1 = _bound_outfile_prefix(
+        research_run.run_dir,
+        resolved_config["paths"]["outfile_prefix"],
+    )
     output_root = _output_root(args.outfile_prefix1)
     args.research_run = research_run
     serializable_args = {

@@ -26,6 +26,7 @@ from autobencher.experiment import (
     ResearchRun,
     allocate_test_run_dir,
     atomic_json,
+    run_dir_for_id,
 )
 from tool_util import (
     HardSamplePool,
@@ -459,7 +460,7 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
     assert (run.run_dir / "config_sources.json").is_file()
     assert (run.run_dir / "config_validation.json").is_file()
     assert (run.run_dir / "config_hash.txt").is_file()
-    assert run.run_dir.name == "test_1"
+    assert run.run_dir == run_dir_for_id(tmp_path, "mock-run")
     assert (run.run_dir / "cycle").is_dir()
     assert (run.run_dir / "environment.json").is_file()
     assert (run.run_dir / "budget_ledger.json").is_file()
@@ -498,6 +499,83 @@ def test_research_run_writes_reproducibility_snapshot(tmp_path, config):
         "combined_sha256",
     }
     assert manifest["budget_protocol"] == "question_matched"
+
+
+def test_absolute_legacy_prefix_stays_inside_bound_run_dir(tmp_path):
+    run_dir = tmp_path / "bound"
+    outside = tmp_path / "other" / "legacy" / "output"
+    prefix = math_autobencher._bound_outfile_prefix(run_dir, outside)
+    assert Path(prefix).parent == run_dir
+    assert Path(prefix).name == "output."
+
+
+def test_research_run_resume_preserves_ledger_and_run_state(tmp_path, config):
+    config = {**config, "paths": {**config["paths"], "output_root": str(tmp_path)}}
+    provenance = {
+        "config_hash": "resume-hash",
+        "sources": {},
+        "schema_version": "1.0",
+    }
+    first = ResearchRun(config, provenance, "resume-run", ROOT)
+    first.initialize({"attempt": 1})
+    first.budget_ledger.record_generation_batch(
+        requested=4,
+        output=3,
+        accepted=2,
+        failed=1,
+    )
+    marker = first.run_dir / "cycle" / "cycle_1" / "hard_pool.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"preserved":true}\n', encoding="utf-8")
+
+    resumed = ResearchRun(
+        config,
+        provenance,
+        "resume-run",
+        ROOT,
+        resume=True,
+    )
+    resumed.initialize({"attempt": 2})
+    assert resumed.run_dir == first.run_dir
+    assert marker.is_file()
+    assert resumed.budget_ledger.data["generation"][
+        "requested_question_count"
+    ] == 4
+    assert resumed.budget_ledger.data["resume_count"] == 1
+    manifest = json.loads(
+        (resumed.run_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["resume_count"] == 1
+
+
+def test_resume_identity_failure_does_not_reinitialize_ledger(tmp_path, config):
+    config = {**config, "paths": {**config["paths"], "output_root": str(tmp_path)}}
+    provenance = {
+        "config_hash": "identity-hash",
+        "sources": {},
+        "schema_version": "1.0",
+    }
+    first = ResearchRun(config, provenance, "identity-run", ROOT)
+    first.initialize({"attempt": 1})
+    first.budget_ledger.record_generation_batch(
+        requested=2, output=2, accepted=1, failed=1
+    )
+    ledger_path = first.run_dir / "budget_ledger.json"
+    ledger_before = ledger_path.read_bytes()
+    manifest_path = first.run_dir / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["prompt_hash"] = "tampered"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="before opening mutable state"):
+        ResearchRun(
+            config,
+            provenance,
+            "identity-run",
+            ROOT,
+            resume=True,
+        )
+    assert ledger_path.read_bytes() == ledger_before
 
 
 def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(

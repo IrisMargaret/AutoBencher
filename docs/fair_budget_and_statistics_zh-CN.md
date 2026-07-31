@@ -5,13 +5,15 @@
 
 ## BudgetLedger
 
-每个 `test_<N>/` 启动时立即创建 `budget_ledger.json`，失败路径也会保留。主要字段：
+每个 `run_<run-id>_<sha12>/` 首次启动时创建 `budget_ledger.json`，失败路径也会保留；
+恢复时重新打开原账本并累计，不会覆盖为零。主要字段：
 
 - `generation`：请求题数、模型原始输出数、SymPy 后合格数、失败数、重试、输入/输出
   Token、API 调用和墙钟时间；
 - `validation`：SymPy 次数、Judge 调用、验证失败、难度拒绝、去重拒绝、语义过滤及
   Judge Token/时间；
-- `training`：最终训练样本、数据集 Token、按 Epoch 实际处理 Token、Optimizer
+- `training`：`selected_pool_count`、`train_count`、`validation_count`、
+  `internal_test_count`、`actual_trained_count`，以及数据集 Token、按 Epoch 实际处理 Token、Optimizer
   Step、GPU 小时、峰值显存和训练墙钟时间；
 - `totals`：总 Token、API 调用和 GPU 小时；
 - `efficiency`：每千生成 Token 的合格样本、每千训练 Token 的准确率增益、每 GPU
@@ -37,8 +39,9 @@ budget:
   data_matched_target_samples: 1000
 ```
 
-系统跨尚未训练的 Cycle 累积候选，持续经过同一 SymPy、泄漏过滤和去重流程。达到
-目标后，按现有 25% 正确保留样本、75% 错题协议确定性截取 1000 条，只执行一次训练
+系统跨尚未训练的 Cycle 累积候选，持续经过同一 SymPy、泄漏过滤和去重流程。候选先
+按模板簇完整切分，再在实际 train split 中检查目标。达到目标后，按现有 25% 正确
+保留样本、75% 错题协议确定性截取 1000 条，只执行一次训练
 并结束该运行。目标必须能被 4 整除。声明的问题预算是防止无限生成的安全上限；上限
 内仍未达到目标则实验失败并报告 shortfall，不能拿不足样本冒充 data-matched。
 
@@ -93,12 +96,15 @@ results/
 └── significance_tests.csv
 ```
 
-`results_long.csv` 直接从固定集原始 `fixed_math.compare_answers.json` 重建，包含
-study/method/seed/cycle、题号、类别、难度、金标、预测、正确性、错误类型、置信度、
+`results_long.csv` 直接从 Registry 绑定的固定集原始 `fixed_math.compare_answers.json`
+重建，不按 mtime 搜索目录；包含 budget、评测集 ID/版本/哈希、checkpoint 哈希、
+study/method/variant/seed/cycle、题号、类别、难度、金标、预测、正确性、错误类型、置信度、
 延迟和 Token。其余表从该长表、`experiment_summary.json` 和
 `budget_ledger.json` 自动生成，不接受手填准确率。
 
-主结果报告跨 Seed 均值、标准差、95% 区间与相对 Base 增量；运行表还报告 Macro
-Accuracy、最差子类别、学习曲线 AUC 和遗忘率。显著性表输出双侧精确 McNemar、
-配对 Item Bootstrap、Seed × Item 分层 Bootstrap、Holm 校正、风险差和 matched
-odds ratio。Bootstrap 使用固定种子，分组和 CSV 行稳定排序，因此重复聚合可复现。
+主结果报告跨 Seed 均值、标准差、95% 区间与相对 Base 增量；类别和难度指标先逐
+seed 计算再汇总。显著性检验只执行 suite 中的 `comparison_pairs`。论文主 p 值来自
+逐 seed 双侧精确 McNemar 的组合，主区间使用 Seed × Item 簇 Bootstrap；直接池化
+不同 seed 的 McNemar 和 Item Bootstrap 只标为描述性结果。所有预注册运行、seed 和
+题号集合必须完整一致，否则正式聚合失败。只有显式传入
+`--allow-partial-development-results` 才允许输出不完整的开发诊断表。

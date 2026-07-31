@@ -40,22 +40,41 @@ def aggregate_records(
     *,
     metric: str = "final_accuracy",
 ) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str, int], list[float]] = defaultdict(list)
+    groups: dict[tuple[Any, ...], list[float]] = defaultdict(list)
     for record in records:
         value = record.get(metric)
         if value is None:
             continue
         key = (
+            str(record.get("evaluation_set_id", "unknown")),
+            str(record.get("evaluation_set_version", "unknown")),
+            str(record.get("evaluation_set_sha256", "unknown")),
+            str(record.get("budget_protocol", "question_matched")),
             str(record["method"]),
+            str(record.get("variant", record["method"])),
             str(record["model"]),
             int(record["budget"]),
         )
         groups[key].append(float(value))
     output = []
-    for (method, model, budget), values in sorted(groups.items()):
+    for (
+        evaluation_set_id,
+        evaluation_set_version,
+        evaluation_set_sha256,
+        budget_protocol,
+        method,
+        variant,
+        model,
+        budget,
+    ), values in sorted(groups.items()):
         output.append(
             {
+                "evaluation_set_id": evaluation_set_id,
+                "evaluation_set_version": evaluation_set_version,
+                "evaluation_set_sha256": evaluation_set_sha256,
+                "budget_protocol": budget_protocol,
                 "method": method,
+                "variant": variant,
                 "model": model,
                 "budget": budget,
                 "metric": metric,

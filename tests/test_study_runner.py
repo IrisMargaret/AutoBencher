@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -20,6 +21,7 @@ from autobencher.study_runner import (
     StudyConfigurationError,
     StudyRunner,
 )
+from artifact_fixtures import write_completed_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,7 +163,7 @@ def test_first_round_plan_is_deterministic_and_isolated(tmp_path):
         assert record.budget == 5
 
 
-def test_registry_resume_skips_completed_and_continues_next(tmp_path):
+def test_return_code_zero_without_complete_artifacts_stays_partial(tmp_path):
     suite = _write_suite(tmp_path)
     calls = []
 
@@ -172,7 +174,8 @@ def test_registry_resume_skips_completed_and_continues_next(tmp_path):
     runner = StudyRunner(suite, project_root=ROOT, executor=executor)
     first = runner.run(max_experiments=1)
     assert len(calls) == 1
-    assert sum(item.status == "completed" for item in first) == 1
+    assert first[0].status == "partial"
+    assert "Completion validation failed" in first[0].error
 
     resumed = StudyRunner(
         suite,
@@ -180,7 +183,7 @@ def test_registry_resume_skips_completed_and_continues_next(tmp_path):
         executor=executor,
     ).run(resume=True, max_experiments=1)
     assert len(calls) == 2
-    assert sum(item.status == "completed" for item in resumed) == 2
+    assert resumed[0].status == "partial"
     with runner.index_path.open("r", encoding="utf-8") as handle:
         validate_registry(json.load(handle))
 
@@ -243,36 +246,8 @@ def test_experiment_record_requires_unique_valid_status():
         validate_registry(payload)
 
 
-def test_aggregate_collects_latest_experiment_summary(tmp_path):
+def test_aggregate_reads_registry_binding_not_latest_mtime(tmp_path):
     experiment_dir = tmp_path / "experiment"
-    first = experiment_dir / "output_root" / "test_1"
-    second = experiment_dir / "output_root" / "test_2"
-    first.mkdir(parents=True)
-    second.mkdir(parents=True)
-    first_summary = first / "experiment_summary.json"
-    first_summary.write_text(
-        json.dumps(
-            {
-                "baseline_accuracy": 0.2,
-                "final_accuracy": 0.3,
-                "accuracy_delta": 0.1,
-            }
-        ),
-        encoding="utf-8",
-    )
-    latest = second / "experiment_summary.json"
-    latest.write_text(
-        json.dumps(
-            {
-                "baseline_accuracy": 0.2,
-                "final_accuracy": 0.4,
-                "accuracy_delta": 0.2,
-            }
-        ),
-        encoding="utf-8",
-    )
-    os.utime(first_summary, (1, 1))
-    os.utime(latest, (2, 2))
     record = ExperimentRecord(
         study_id="study-aggregate",
         method="full",
@@ -280,22 +255,85 @@ def test_aggregate_collects_latest_experiment_summary(tmp_path):
         seed=42,
         model="model",
         budget=10,
-        config_hash="a",
+        config_hash="placeholder",
         git_commit="b",
         status="completed",
         experiment_dir=str(experiment_dir),
+        run_dir=str(experiment_dir / "bound_run"),
+    )
+    write_completed_run(record, [True, False], [True, False])
+    decoy = experiment_dir / "output_root" / "test_999"
+    decoy.mkdir(parents=True)
+    (decoy / "experiment_summary.json").write_text(
+        json.dumps({"final_accuracy": 1.0}), encoding="utf-8"
     )
     index = tmp_path / "experiment_index.json"
     index.write_text(
         json.dumps(
             {
                 "schema_version": "1.0",
+                "comparison_pairs": [],
                 "experiments": [record.to_dict()],
             }
         ),
         encoding="utf-8",
     )
     results = collect_results(index)
-    assert results[0]["final_accuracy"] == 0.4
-    assert results[0]["accuracy_delta"] == 0.2
-    assert results[0]["summary_path"] == str(latest)
+    assert results[0]["final_accuracy"] == 0.5
+    assert results[0]["accuracy_delta"] == 0.0
+    assert results[0]["summary_path"] == record.summary_path
+
+
+def test_study_runner_resume_reuses_same_directory_in_real_subprocess(tmp_path):
+    suite = _write_suite(tmp_path, methods=["base"])
+    runner = StudyRunner(suite, project_root=ROOT)
+    planned = runner.build_plan()[0]
+    command = planned.command
+    config_path = Path(command[command.index("--config") + 1])
+    environment = (
+        Path(command[command.index("--environment") + 1])
+        if "--environment" in command
+        else None
+    )
+    overrides = command[command.index("--override") + 1 :]
+    resolved, provenance = load_resolved_config(
+        config_path,
+        environment,
+        temporary_overrides=overrides,
+        validate_paths=False,
+    )
+    assert provenance["config_hash"] == planned.config_hash
+    attempts = 0
+
+    def executor(_command, _cwd):
+        nonlocal attempts
+        attempts += 1
+        script = (
+            "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
+            "p.mkdir(parents=True,exist_ok=True); m=p/'child.marker'; "
+            "existed=m.exists(); m.write_text('resumed' if existed else 'first'); "
+            "sys.exit(0 if existed else 17)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, planned.run_dir],
+            check=False,
+        )
+        if result.returncode == 0:
+            write_completed_run(
+                planned,
+                [True, False, True],
+                resolved_config=resolved,
+            )
+        return result.returncode
+
+    runner.executor = executor
+    first = runner.run(max_experiments=1)
+    assert first[0].status == "partial"
+    first_run_dir = first[0].run_dir
+    resumed = StudyRunner(
+        suite, project_root=ROOT, executor=executor
+    ).run(resume=True, max_experiments=1)
+    assert attempts == 2
+    assert resumed[0].status == "completed"
+    assert resumed[0].run_dir == first_run_dir
+    assert (Path(first_run_dir) / "child.marker").read_text() == "resumed"

@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping
 
 from .dataset import template_signature
 from .experiment import atomic_json
+from .budget_ledger import training_record_tokens
 
 
 SPLIT_NAMES = ("train", "validation", "internal_test")
@@ -82,21 +83,80 @@ def split_by_template_cluster(
             _stable_rank(seed, item[0]),
         ),
     )
-    # Seed every split first. Put smaller clusters into the two holdouts to
-    # avoid a large template family dominating a small validation set.
-    bootstrap = ("train", "validation", "internal_test")
-    for index, (key, members) in enumerate(clusters):
-        if index < len(bootstrap):
-            split = bootstrap[index]
-        else:
-            split = max(
-                SPLIT_NAMES,
-                key=lambda name: (
-                    target[name] - len(result[name]),
-                    -len(result[name]),
-                    name,
+    global_categories = Counter(
+        str((record.get("_metadata") or {}).get("category", "unknown"))
+        for record in normalized
+    )
+    global_sources = Counter(
+        str((record.get("_metadata") or {}).get("training_source", "unknown"))
+        for record in normalized
+    )
+    global_correctness = Counter(
+        "correct"
+        if str((record.get("_metadata") or {}).get("training_source"))
+        == "correct_retention_samples"
+        else "incorrect"
+        for record in normalized
+    )
+
+    def assignment_cost(split: str, members: list[dict[str, Any]]) -> float:
+        projected_counts = {
+            name: len(result[name]) + (len(members) if name == split else 0)
+            for name in SPLIT_NAMES
+        }
+        count_cost = sum(
+            ((projected_counts[name] - target[name]) / max(target[name], 1.0)) ** 2
+            for name in SPLIT_NAMES
+        )
+        balance_cost = 0.0
+        for feature_counts, getter in (
+            (
+                global_categories,
+                lambda record: str(
+                    (record.get("_metadata") or {}).get("category", "unknown")
                 ),
+            ),
+            (
+                global_sources,
+                lambda record: str(
+                    (record.get("_metadata") or {}).get(
+                        "training_source", "unknown"
+                    )
+                ),
+            ),
+            (
+                global_correctness,
+                lambda record: (
+                    "correct"
+                    if str((record.get("_metadata") or {}).get("training_source"))
+                    == "correct_retention_samples"
+                    else "incorrect"
+                ),
+            ),
+        ):
+            current = Counter(getter(record) for record in result[split])
+            current.update(getter(record) for record in members)
+            balance_cost += sum(
+                (
+                    (current[label] - fractions[split] * total)
+                    / max(fractions[split] * total, 1.0)
+                ) ** 2
+                for label, total in feature_counts.items()
             )
+        # Count fidelity is primary; stratification resolves near ties.
+        return count_cost + 0.04 * balance_cost
+
+    for index, (key, members) in enumerate(clusters):
+        remaining = len(clusters) - index
+        empty = [name for name in SPLIT_NAMES if not result[name]]
+        candidates = empty if remaining == len(empty) else list(SPLIT_NAMES)
+        split = min(
+            candidates,
+            key=lambda name: (
+                assignment_cost(name, members),
+                _stable_rank(seed, f"{key}|{name}"),
+            ),
+        )
         result[split].extend(members)
         cluster_assignments[key] = split
 
@@ -124,6 +184,13 @@ def split_by_template_cluster(
         "split_record_counts": {
             name: len(result[name]) for name in SPLIT_NAMES
         },
+        "split_fractions": {
+            name: len(result[name]) / len(normalized) for name in SPLIT_NAMES
+        },
+        "fraction_deviation": {
+            name: len(result[name]) / len(normalized) - fractions[name]
+            for name in SPLIT_NAMES
+        },
         "split_cluster_counts": {
             name: len(split_clusters[name]) for name in SPLIT_NAMES
         },
@@ -140,6 +207,41 @@ def split_by_template_cluster(
             )
             for name in SPLIT_NAMES
         },
+        "missing_categories": {
+            name: sorted(set(global_categories) - {
+                str((record.get("_metadata") or {}).get("category", "unknown"))
+                for record in result[name]
+            })
+            for name in SPLIT_NAMES
+        },
+        "training_source_counts": {
+            name: dict(sorted(Counter(
+                str((record.get("_metadata") or {}).get("training_source", "unknown"))
+                for record in result[name]
+            ).items()))
+            for name in SPLIT_NAMES
+        },
+        "correctness_counts": {
+            name: dict(sorted(Counter(
+                "correct"
+                if str((record.get("_metadata") or {}).get("training_source"))
+                == "correct_retention_samples"
+                else "incorrect"
+                for record in result[name]
+            ).items()))
+            for name in SPLIT_NAMES
+        },
+        "correct_fraction": {
+            name: (
+                sum(
+                    str((record.get("_metadata") or {}).get("training_source"))
+                    == "correct_retention_samples"
+                    for record in result[name]
+                ) / len(result[name])
+            )
+            for name in SPLIT_NAMES
+        },
+        "warnings": [],
         "cluster_assignments_sha256": hashlib.sha256(
             json.dumps(
                 cluster_assignments,
@@ -149,6 +251,23 @@ def split_by_template_cluster(
             ).encode("utf-8")
         ).hexdigest(),
     }
+    largest_cluster = max(len(members) for members in grouped.values())
+    if largest_cluster > max(target.values()):
+        manifest["warnings"].append(
+            {
+                "type": "oversized_template_cluster",
+                "cluster_size": largest_cluster,
+                "largest_split_target": max(target.values()),
+                "message": "Exact requested split fractions are infeasible.",
+            }
+        )
+    if any(abs(value) > largest_cluster / len(normalized) for value in manifest["fraction_deviation"].values()):
+        manifest["warnings"].append(
+            {
+                "type": "split_fraction_deviation",
+                "message": "Observed deviation exceeds one largest-cluster fraction.",
+            }
+        )
     return result, manifest
 
 
@@ -175,12 +294,82 @@ def write_training_splits(
     seed: int,
 ) -> dict[str, Any]:
     splits, manifest = split_by_template_cluster(records, config, seed=seed)
+    return write_precomputed_training_splits(splits, output_dir, manifest)
+
+
+def write_precomputed_training_splits(
+    splits: Mapping[str, Iterable[Mapping[str, Any]]],
+    output_dir: str | Path,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Write an already audited split without recomputing its assignment."""
+    manifest = dict(manifest)
+    materialized = {
+        name: [dict(record) for record in splits[name]] for name in SPLIT_NAMES
+    }
+    total = sum(len(materialized[name]) for name in SPLIT_NAMES)
+    configured_fractions = dict(manifest.get("fractions", {}))
+    all_categories = {
+        str((record.get("_metadata") or {}).get("category", "unknown"))
+        for records in materialized.values()
+        for record in records
+    }
+    manifest["record_count"] = total
+    manifest["split_record_counts"] = {
+        name: len(materialized[name]) for name in SPLIT_NAMES
+    }
+    manifest["split_fractions"] = {
+        name: len(materialized[name]) / total for name in SPLIT_NAMES
+    }
+    manifest["fraction_deviation"] = {
+        name: manifest["split_fractions"][name]
+        - float(configured_fractions.get(name, 0.0))
+        for name in SPLIT_NAMES
+    }
+    manifest["category_counts"] = {
+        name: dict(sorted(Counter(
+            str((record.get("_metadata") or {}).get("category", "unknown"))
+            for record in materialized[name]
+        ).items()))
+        for name in SPLIT_NAMES
+    }
+    manifest["missing_categories"] = {
+        name: sorted(all_categories - set(manifest["category_counts"][name]))
+        for name in SPLIT_NAMES
+    }
+    manifest["training_source_counts"] = {
+        name: dict(sorted(Counter(
+            str((record.get("_metadata") or {}).get("training_source", "unknown"))
+            for record in materialized[name]
+        ).items()))
+        for name in SPLIT_NAMES
+    }
+    manifest["correctness_counts"] = {
+        name: dict(sorted(Counter(
+            "correct"
+            if str((record.get("_metadata") or {}).get("training_source"))
+            == "correct_retention_samples"
+            else "incorrect"
+            for record in materialized[name]
+        ).items()))
+        for name in SPLIT_NAMES
+    }
+    manifest["correct_fraction"] = {
+        name: (
+            manifest["correctness_counts"][name].get("correct", 0)
+            / len(materialized[name])
+        )
+        for name in SPLIT_NAMES
+    }
     root = Path(output_dir).expanduser().resolve()
     paths = {}
     for name in SPLIT_NAMES:
         path = root / f"dataset_{name}.jsonl"
-        _write_alpaca(splits[name], path)
+        _write_alpaca(materialized[name], path)
         paths[name] = path.as_posix()
     manifest["paths"] = paths
+    manifest["split_token_counts"] = {
+        name: training_record_tokens(materialized[name]) for name in SPLIT_NAMES
+    }
     atomic_json(manifest, root / "split_manifest.json")
     return manifest

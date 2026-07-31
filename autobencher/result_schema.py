@@ -30,6 +30,15 @@ class ExperimentRecord:
     experiment_dir: str = ""
     command: list[str] = field(default_factory=list)
     fingerprints: dict[str, Any] = field(default_factory=dict)
+    run_dir: str | None = None
+    run_manifest_path: str | None = None
+    summary_path: str | None = None
+    artifact_manifest_path: str | None = None
+    artifact_manifest_sha256: str | None = None
+    checkpoint_sha256: str | None = None
+    evaluation_set_id: str | None = None
+    evaluation_set_version: str | None = None
+    evaluation_set_sha256: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
     return_code: int | None = None

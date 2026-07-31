@@ -51,6 +51,8 @@ class BudgetLedger:
         path: str | Path,
         config: Mapping[str, Any],
         metadata: Mapping[str, Any],
+        *,
+        resume: bool = False,
     ):
         self.path = Path(path)
         self.config = copy.deepcopy(dict(config))
@@ -59,10 +61,40 @@ class BudgetLedger:
             raise ValueError(f"Unsupported budget protocol: {protocol}")
         self._lock = threading.RLock()
         self._started = time.monotonic()
+        if resume and self.path.is_file():
+            with self.path.open("r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+            for field in ("run_id", "config_hash", "git_commit"):
+                expected = metadata.get(field)
+                if expected is not None and existing.get(field) != expected:
+                    raise RuntimeError(
+                        f"Budget ledger identity mismatch for {field}: "
+                        f"{existing.get(field)!r} != {expected!r}"
+                    )
+            if existing.get("protocol", {}).get("name") != protocol:
+                raise RuntimeError("Budget ledger protocol changed on resume")
+            self.data = existing
+            self.data.setdefault(
+                "recorded_events", {"dataset": [], "training": []}
+            )
+            self.data["status"] = "running"
+            self.data["resume_count"] = int(
+                self.data.get("resume_count", 0)
+            ) + 1
+            self._prior_wall_time = float(
+                self.data.get("totals", {}).get(
+                    "total_wall_time_seconds",
+                    0.0,
+                )
+            )
+            self.flush()
+            return
+        self._prior_wall_time = 0.0
         self.data: dict[str, Any] = {
             "schema_version": "1.0",
             **dict(metadata),
             "status": "running",
+            "resume_count": 0,
             "protocol": {
                 "name": protocol,
                 "data_matched_target_samples": self.config.get(
@@ -104,8 +136,18 @@ class BudgetLedger:
                 "wall_time_seconds": 0.0,
             },
             "training": {
+                "selected_pool_count": 0,
+                "train_count": 0,
+                "validation_count": 0,
+                "internal_test_count": 0,
+                "actual_trained_count": 0,
+                "train_correct_count": 0,
+                "train_incorrect_count": 0,
                 "final_training_sample_count": 0,
                 "dataset_token_count": 0,
+                "train_dataset_token_count": 0,
+                "validation_token_count": 0,
+                "internal_test_token_count": 0,
                 "final_training_token_count": 0,
                 "optimizer_steps": 0,
                 "gpu_hours": 0.0,
@@ -129,6 +171,7 @@ class BudgetLedger:
                 "complete": False,
                 "reason": "pricing_not_configured",
             },
+            "recorded_events": {"dataset": [], "training": []},
         }
         self.flush()
 
@@ -157,7 +200,7 @@ class BudgetLedger:
             "total_api_calls": total_api_calls,
             "total_gpu_hours": float(training["gpu_hours"]),
             "total_wall_time_seconds": round(
-                time.monotonic() - self._started,
+                self._prior_wall_time + time.monotonic() - self._started,
                 6,
             ),
         }
@@ -345,8 +388,15 @@ class BudgetLedger:
         self,
         manifest: Mapping[str, Any],
         records: list[Mapping[str, Any]],
-    ) -> None:
+        split_manifest: Mapping[str, Any] | None = None,
+        event_id: str | None = None,
+    ) -> bool:
         with self._lock:
+            events = self.data.setdefault(
+                "recorded_events", {"dataset": [], "training": []}
+            )
+            if event_id and event_id in events.setdefault("dataset", []):
+                return False
             reasons = manifest.get("rejection_reasons", {})
             dedup_names = {
                 "exact_duplicate",
@@ -366,12 +416,64 @@ class BudgetLedger:
             )
             training = self.data["training"]
             dataset_tokens = training_record_tokens(records)
-            training["final_training_sample_count"] += len(records)
+            counts = dict((split_manifest or {}).get("split_record_counts", {}))
+            training.setdefault("selected_pool_count", 0)
+            training.setdefault("train_count", 0)
+            training.setdefault("validation_count", 0)
+            training.setdefault("internal_test_count", 0)
+            training.setdefault("actual_trained_count", 0)
+            training["selected_pool_count"] += len(records)
+            training["train_count"] += int(counts.get("train", len(records)))
+            training["validation_count"] += int(counts.get("validation", 0))
+            training["internal_test_count"] += int(
+                counts.get("internal_test", 0)
+            )
+            correctness = dict(
+                (split_manifest or {}).get("correctness_counts", {}).get(
+                    "train", {}
+                )
+            )
+            cap = dict((split_manifest or {}).get("data_matched_train_cap", {}))
+            training["train_correct_count"] += int(
+                cap.get("correct", correctness.get("correct", 0))
+            )
+            training["train_incorrect_count"] += int(
+                cap.get("incorrect", correctness.get("incorrect", 0))
+            )
+            # Kept as a compatibility alias, now with the scientifically
+            # correct post-split meaning.
+            training["final_training_sample_count"] += int(
+                counts.get("train", len(records))
+            )
             training["dataset_token_count"] += dataset_tokens
+            token_counts = dict(
+                (split_manifest or {}).get("split_token_counts", {})
+            )
+            training["train_dataset_token_count"] += int(
+                token_counts.get("train", dataset_tokens)
+            )
+            training["validation_token_count"] += int(
+                token_counts.get("validation", 0)
+            )
+            training["internal_test_token_count"] += int(
+                token_counts.get("internal_test", 0)
+            )
+            if event_id:
+                events["dataset"].append(event_id)
             self.flush()
+            return True
 
-    def record_training(self, summary: Mapping[str, Any]) -> None:
+    def record_training(
+        self,
+        summary: Mapping[str, Any],
+        event_id: str | None = None,
+    ) -> bool:
         with self._lock:
+            events = self.data.setdefault(
+                "recorded_events", {"dataset": [], "training": []}
+            )
+            if event_id and event_id in events.setdefault("training", []):
+                return False
             section = self.data["training"]
             section["final_training_token_count"] += int(
                 summary.get("training_token_count", 0) or 0
@@ -392,9 +494,22 @@ class BudgetLedger:
                 summary.get("training_wall_time_seconds", 0.0) or 0.0
             )
             section["training_attempt_count"] += 1
+            section["actual_trained_count"] += int(
+                summary.get(
+                    "actual_trained_count",
+                    summary.get(
+                        "final_training_sample_count",
+                        summary.get("training_sample_count", 0),
+                    ),
+                )
+                or 0
+            )
             if summary.get("status") != "failed":
                 section["completed_training_cycles"] += 1
+            if event_id:
+                events["training"].append(event_id)
             self.flush()
+            return True
 
     def record_accuracy(
         self,

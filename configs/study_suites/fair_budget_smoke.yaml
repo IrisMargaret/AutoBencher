@@ -9,6 +9,8 @@ study_suite:
   methods:
     - base
     - full
+  comparison_pairs:
+    - {left: base, right: full}
   seeds:
     - 42
   models:
@@ -25,4 +27,3 @@ study_suite:
     - experiment.num_iterations=1
     - experiment.max_cycles=1
     - coverage.default_min_quota=1
-

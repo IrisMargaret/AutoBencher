@@ -263,8 +263,12 @@ python run_study.py \
   --suite configs/study_suites/smoke.yaml
 ```
 
-Use `--resume` after interruption. Completed experiments are skipped; only
-pending, failed, or partial experiments are restarted. `main.yaml` expands
+Use `--resume` after interruption. A `study_id` maps to one content-addressed
+`run_<study-id>_<sha12>/` directory, so a partial experiment reopens the same
+cycle records, history, Hard Pool, ledger, and checkpoints. Before mutable
+state is opened, resume verifies the configuration, Git commit, prompt bundle,
+and base-model hashes. Completed experiments are skipped; only pending,
+failed, or partial experiments are continued. `main.yaml` expands
 nine methods × three seeds × one model × one total question budget. Every
 matrix cell has its own outputs, cache, hard-pool/history state, datasets,
 checkpoints, and model directory. The runner rejects dirty code, changed
@@ -277,6 +281,20 @@ python run_study.py \
 
 python aggregate_study.py \
   --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
+```
+
+A zero process exit code is necessary but not sufficient. The runner marks a
+cell completed only when its bound run manifest, summary, finished ledger,
+fixed-test snapshot and complete item results, resolved config, trained model
+(for non-Base methods), and artifact hashes all agree with the registry. The
+registry stores exact artifact paths and hashes; aggregation never searches by
+modification time. Formal aggregation fails closed if any preregistered cell is
+incomplete. For exploratory diagnostics only, opt in explicitly:
+
+```bash
+python aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
+  --allow-partial-development-results
 ```
 
 `budgets` in a suite are total generated-question budgets. They must divide
@@ -296,8 +314,10 @@ the effective weights and runtime assertions for disabled components.
 ### Fair budgets and paper tables
 
 Every run writes `budget_ledger.json` from actual generator, SymPy, judge,
-deduplication, training, GPU, and timing events. `data_matched` accumulates
-filtered candidates until methods have the same training-sample count;
+deduplication, training, GPU, and timing events. It separately records selected
+pool, train, validation, internal-test, and actually trained counts.
+`data_matched` accumulates filtered candidates until methods have the same
+post-template-split train count and the same configured correct/error ratio;
 `cost_matched` stops new generation calls at a shared token/API cap.
 
 ```bash
@@ -310,7 +330,10 @@ python -B aggregate_study.py \
 
 Aggregation rebuilds `results_long.csv` from raw fixed-item comparisons and
 creates main, ablation, category, difficulty, efficiency, and significance
-tables with confidence intervals and effect sizes. See
+tables without mixing evaluation-set hashes, budget protocols, budgets,
+methods, variants, or seeds. Significance tests run only preregistered pairs;
+the primary test combines per-seed McNemar results and reports a seed/item
+cluster-bootstrap interval. Pooled McNemar is descriptive only. See
 [Fair budgets and statistics](docs/fair_budget_and_statistics_zh-CN.md).
 
 ### Observable difficulty definition
@@ -365,8 +388,11 @@ python calibrate_difficulty.py calibrate \
 
 The frozen artifact reports panel error rates, Pearson/Spearman/MAE, binned
 calibration, model-tier consistency, Rasch/1PL, exploratory 2PL, and calibrated
-five-dimension weights. A v2 runtime config must use the artifact's SHA-256 and
-exact weights.
+five-dimension weights. Rasch identification fixes only mean item difficulty
+to zero; panel ability is not separately recentered. The artifact includes
+optimization loss/convergence and model-cluster-bootstrap item standard errors.
+2PL remains explicitly exploratory when the panel is small. A v2 runtime config
+must use the artifact's SHA-256 and exact weights.
 
 ### Adaptive difficulty and question allocation
 

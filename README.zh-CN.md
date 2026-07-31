@@ -252,7 +252,11 @@ python run_study.py \
   --suite configs/study_suites/smoke.yaml
 ```
 
-中断后加 `--resume`。已完成实验会跳过，只继续 pending、failed 或 partial 实验。
+中断后加 `--resume`。每个 `study_id` 唯一映射到
+`run_<study-id>_<sha12>/`，partial 实验会重新打开原目录中的 Cycle 记录、历史、
+Hard Pool、预算账本和 checkpoint，不会创建 `test_2` 从头运行。打开可变状态之前会
+核对配置、Git commit、Prompt bundle 和基础模型哈希。已完成实验会跳过，只继续
+pending、failed 或 partial 实验。
 `main.yaml` 会展开“九方法 × 三个 seed × 一个模型 × 一个总题目预算”。每个矩阵单元
 独占输出、缓存、Hard Pool/历史状态、训练集、checkpoint 与模型目录。Runner 会拒绝
 脏代码、已登记实验的指纹变化、不同基础模型/固定集/Prompt，以及六种训练方法之间
@@ -265,6 +269,17 @@ python run_study.py \
 
 python aggregate_study.py \
   --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
+```
+
+子进程返回码为 0 只是必要条件。只有 Registry 绑定的运行清单、实验摘要、已完成账本、
+固定集快照与完整逐题结果、resolved config、训练模型（非 Base）和 artifact 哈希全部
+存在且身份一致，Runner 才标记 completed。Registry 显式保存产物路径与哈希，聚合器
+不再按修改时间猜目录。正式聚合默认要求所有预注册单元完成；仅开发诊断可显式放宽：
+
+```bash
+python aggregate_study.py \
+  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
+  --allow-partial-development-results
 ```
 
 suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
@@ -282,7 +297,8 @@ suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
 ### 公平预算与论文结果表
 
 每个运行都会从真实 generator、SymPy、Judge、去重、训练、GPU 和耗时事件生成
-`budget_ledger.json`。`data_matched` 累积过滤后的候选直到各方法训练样本数相同；
+`budget_ledger.json`，并分别记录候选池、train、validation、internal test 与真实参与
+训练的样本数。`data_matched` 在模板簇划分后匹配实际 train 数量及正确/错题比例；
 `cost_matched` 在统一 Token/API 上限耗尽后停止新的生成调用。
 
 ```bash
@@ -293,8 +309,10 @@ python -B aggregate_study.py \
   --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/fair_budget_v1/experiment_index.json
 ```
 
-聚合器从固定集原始逐题记录重建 `results_long.csv`，自动输出主结果、消融、类别、
-难度、效率和显著性表，并包含置信区间与效应量。完整定义见
+聚合器从固定集原始逐题记录重建 `results_long.csv`，按评测集 ID/版本/哈希、预算协议、
+模型、预算、方法、变体与 seed 隔离结果。显著性检验只运行 suite 预注册的比较；主检验
+按 seed 分别做 McNemar 后组合，并报告 seed/item 簇 Bootstrap 区间，跨 seed 池化
+McNemar 仅作描述。完整定义见
 [`docs/fair_budget_and_statistics_zh-CN.md`](docs/fair_budget_and_statistics_zh-CN.md)。
 
 ### 客观难度定义
@@ -342,7 +360,9 @@ python calibrate_difficulty.py calibrate \
 ```
 
 冻结产物包含模型面板错误率、Pearson/Spearman/MAE、分桶校准、不同能力层一致性、
-Rasch/1PL、探索性 2PL 和校准后的五维权重。启用 v2 时，配置中的产物 SHA-256 与
+Rasch/1PL、探索性 2PL 和校准后的五维权重。Rasch 只施加“题目难度均值为零”这一
+个位置约束，不再同时把模型能力强制中心化；产物会报告收敛损失和按模型聚类
+Bootstrap 的题目难度标准误。模型数量较少时，2PL 只能解释为探索分析。启用 v2 时，配置中的产物 SHA-256 与
 权重必须和冻结文件完全一致。
 
 ### 自适应难度与题目分配

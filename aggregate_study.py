@@ -11,27 +11,43 @@ from typing import Any
 
 sys.dont_write_bytecode = True
 
-from autobencher.experiment import atomic_json
-from autobencher.paper_results import build_paper_tables
-from autobencher.result_schema import ExperimentRecord, validate_registry
-from autobencher.statistics import aggregate_records
+from autobencher.experiment import atomic_json  # noqa: E402
+from autobencher.paper_results import build_paper_tables  # noqa: E402
+from autobencher.result_schema import (  # noqa: E402
+    ExperimentRecord,
+    validate_registry,
+)
+from autobencher.statistics import aggregate_records  # noqa: E402
+from autobencher.study_runner import (  # noqa: E402
+    StudyConfigurationError,
+    validate_experiment_completion,
+)
 
 
-def _latest_summary(experiment_dir: Path) -> Path | None:
-    candidates = list(experiment_dir.rglob("experiment_summary.json"))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime_ns)
-
-
-def collect_results(index_path: Path) -> list[dict[str, Any]]:
+def collect_results(
+    index_path: Path,
+    *,
+    allow_partial_development_results: bool = False,
+) -> list[dict[str, Any]]:
     with index_path.open("r", encoding="utf-8") as handle:
         registry = json.load(handle)
     validate_registry(registry)
     results = []
     for payload in registry["experiments"]:
         record = ExperimentRecord.from_dict(payload)
-        summary_path = _latest_summary(Path(record.experiment_dir))
+        if record.status != "completed":
+            if allow_partial_development_results:
+                continue
+            raise StudyConfigurationError(
+                f"Experiment is not completed: {record.study_id}"
+            )
+        try:
+            completion = validate_experiment_completion(record)
+        except StudyConfigurationError:
+            if allow_partial_development_results:
+                continue
+            raise
+        summary_path = Path(record.summary_path).resolve()
         summary = {}
         if summary_path:
             with summary_path.open("r", encoding="utf-8") as handle:
@@ -45,6 +61,14 @@ def collect_results(index_path: Path) -> list[dict[str, Any]]:
                 "seed": record.seed,
                 "model": record.model,
                 "budget": record.budget,
+                "evaluation_set_id": completion["evaluation_set_id"],
+                "evaluation_set_version": completion[
+                    "evaluation_set_version"
+                ],
+                "evaluation_set_sha256": completion[
+                    "evaluation_set_sha256"
+                ],
+                "checkpoint_sha256": completion["checkpoint_sha256"],
                 "status": record.status,
                 "baseline_accuracy": summary.get("baseline_accuracy"),
                 "final_accuracy": summary.get("final_accuracy"),
@@ -70,6 +94,11 @@ def main() -> int:
         choices=("baseline_accuracy", "final_accuracy", "accuracy_delta"),
         default="final_accuracy",
     )
+    parser.add_argument(
+        "--allow-partial-development-results",
+        action="store_true",
+        help="Development only: omit incomplete cells instead of failing closed.",
+    )
     args = parser.parse_args()
     index_path = Path(args.index).expanduser().resolve()
     output_path = (
@@ -77,7 +106,12 @@ def main() -> int:
         if args.output
         else index_path.parent / "aggregate.json"
     )
-    records = collect_results(index_path)
+    records = collect_results(
+        index_path,
+        allow_partial_development_results=(
+            args.allow_partial_development_results
+        ),
+    )
     payload = {
         "schema_version": "1.0",
         "experiment_index": str(index_path),
@@ -111,7 +145,13 @@ def main() -> int:
         if args.results_dir
         else index_path.parent / "results"
     )
-    paper = build_paper_tables(index_path, results_dir)
+    paper = build_paper_tables(
+        index_path,
+        results_dir,
+        allow_partial_development_results=(
+            args.allow_partial_development_results
+        ),
+    )
     print(f"Paper tables: {paper['output_dir']}")
     return 0
 

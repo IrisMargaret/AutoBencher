@@ -8,10 +8,8 @@ signal is accepted by this module.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -155,6 +153,7 @@ def fit_irt(
     model: str = "1pl",
     iterations: int = 1200,
     learning_rate: float = 0.03,
+    tolerance: float = 1.0e-7,
 ) -> dict[str, Any]:
     """Fit a deterministic Rasch/1PL or exploratory 2PL panel model.
 
@@ -172,6 +171,8 @@ def fit_irt(
     ability = np.zeros(users, dtype=float)
     difficulty = np.zeros(items, dtype=float)
     log_discrimination = np.zeros(items, dtype=float)
+    loss_history = []
+    converged = False
     for step in range(iterations):
         discrimination = (
             np.exp(np.clip(log_discrimination, -1.5, 1.5))
@@ -198,7 +199,9 @@ def fit_irt(
         ability -= rate * grad_ability
         difficulty -= rate * grad_difficulty
         difficulty -= difficulty.mean()
-        ability -= ability.mean()
+        # One location constraint is sufficient. Fixing item mean to zero
+        # preserves the panel's absolute average ability instead of forcing
+        # both sides of the Rasch scale to zero.
         if model == "2pl":
             grad_log_a = (
                 (
@@ -210,6 +213,34 @@ def fit_irt(
                 + 0.02 * log_discrimination
             )
             log_discrimination -= rate * grad_log_a
+        if step % 25 == 0 or step == iterations - 1:
+            updated_a = (
+                np.exp(np.clip(log_discrimination, -1.5, 1.5))
+                if model == "2pl"
+                else np.ones(items, dtype=float)
+            )
+            probability = _sigmoid(
+                updated_a[None, :] * (ability[:, None] - difficulty[None, :])
+            )
+            likelihood = -np.where(
+                observed,
+                matrix * np.log(np.clip(probability, 1.0e-12, 1.0))
+                + (1 - matrix)
+                * np.log(np.clip(1 - probability, 1.0e-12, 1.0)),
+                0.0,
+            ).sum() / observed.sum()
+            loss = float(
+                likelihood
+                + 0.005 * np.mean(ability ** 2)
+                + 0.005 * np.mean(difficulty ** 2)
+                + (0.01 * np.mean(log_discrimination ** 2) if model == "2pl" else 0.0)
+            )
+            loss_history.append({"iteration": step + 1, "loss": loss})
+            if len(loss_history) >= 3 and abs(
+                loss_history[-2]["loss"] - loss
+            ) < tolerance:
+                converged = True
+                break
     return {
         "model": model,
         "ability": ability.tolist(),
@@ -219,8 +250,38 @@ def fit_irt(
             if model == "2pl"
             else [1.0] * items
         ),
-        "iterations": iterations,
+        "iterations": step + 1,
         "learning_rate": learning_rate,
+        "converged": converged,
+        "final_loss": loss_history[-1]["loss"],
+        "loss_history": loss_history,
+        "identification_constraint": "mean_item_difficulty_zero",
+    }
+
+
+def bootstrap_irt_standard_errors(
+    matrix: np.ndarray,
+    *,
+    iterations: int = 100,
+    seed: int = 2026,
+) -> dict[str, Any]:
+    """Cluster-bootstrap panel models for Rasch item standard errors."""
+    rng = np.random.default_rng(seed)
+    estimates = []
+    for _ in range(iterations):
+        indices = rng.integers(0, matrix.shape[0], size=matrix.shape[0])
+        fitted = fit_irt(
+            matrix[indices, :],
+            model="1pl",
+            iterations=500,
+            learning_rate=0.04,
+        )
+        estimates.append(fitted["item_difficulty"])
+    values = np.asarray(estimates, dtype=float)
+    return {
+        "method": "model_cluster_bootstrap",
+        "iterations": iterations,
+        "item_standard_error": np.std(values, axis=0, ddof=1).tolist(),
     }
 
 
@@ -331,6 +392,7 @@ def calibrate_difficulty(
     calibrated = np.clip(features @ weights, 0.0, 1.0)
     irt_1pl = fit_irt(matrix, model="1pl")
     irt_2pl = fit_irt(matrix, model="2pl")
+    irt_bootstrap = bootstrap_irt_standard_errors(matrix)
     tier_consistency = {}
     for tier in sorted(set(tiers.values())):
         indices = [model_index[mid] for mid in model_ids if tiers[mid] == tier]
@@ -353,6 +415,16 @@ def calibrate_difficulty(
                 "structural_difficulty": float(structural[index]),
                 "calibrated_difficulty": float(calibrated[index]),
                 "rasch_1pl_difficulty": irt_1pl["item_difficulty"][index],
+                "rasch_1pl_standard_error": irt_bootstrap[
+                    "item_standard_error"
+                ][index],
+                "empirical_difficulty_standard_error": float(
+                    math.sqrt(
+                        accuracy[index]
+                        * (1 - accuracy[index])
+                        / max((~np.isnan(matrix[:, index])).sum(), 1)
+                    )
+                ),
                 "irt_2pl_difficulty": irt_2pl["item_difficulty"][index],
                 "irt_2pl_discrimination": irt_2pl["discrimination"][index],
             }
@@ -385,7 +457,17 @@ def calibrate_difficulty(
             "binned_calibration": _binned_metrics(structural, empirical),
             "model_tier_consistency": tier_consistency,
         },
-        "irt": {"rasch_1pl": irt_1pl, "exploratory_2pl": irt_2pl},
+        "irt": {
+            "rasch_1pl": irt_1pl,
+            "rasch_1pl_bootstrap": irt_bootstrap,
+            "exploratory_2pl": {
+                **irt_2pl,
+                "interpretation": (
+                    "exploratory_only; discrimination is weakly identified "
+                    "when the model panel is small"
+                ),
+            },
+        },
         "items": per_item,
         "scientific_constraints": {
             "blind_test_used": False,

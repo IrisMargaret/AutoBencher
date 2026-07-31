@@ -74,8 +74,10 @@ python run_scripts.py math \
 
 ## 4. 模板簇级训练划分
 
-每个合格训练样本先按 `template_signature` 聚类，再把整个簇分配到训练集 80%、
-内部验证集 10% 和内部训练测试集 10%。同一模板及参数变体不会跨集合。每轮新增：
+每个合格训练样本先按 `template_signature` 聚类，再用“目标样本比例偏差为主、类别/
+training source/正确错题平衡为辅”的确定性贪心算法，把整个簇分配到训练集 80%、
+内部验证集 10% 和内部训练测试集 10%。同一模板及参数变体不会跨集合。第二、第三
+大簇不会被机械指定给留出集。每轮新增：
 
 ```text
 dataset_train.jsonl
@@ -87,7 +89,9 @@ split_manifest.json
 检查零重叠：
 
 ```bash
-jq '{strategy, split_record_counts, split_cluster_counts,
+jq '{strategy, split_record_counts, split_fractions, fraction_deviation,
+     split_cluster_counts, category_counts, missing_categories,
+     training_source_counts, correctness_counts, warnings,
      template_overlap_count, cluster_assignments_sha256}' \
   "$RUN_DIR/cycle/cycle_1/training/split_manifest.json"
 ```

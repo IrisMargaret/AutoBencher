@@ -15,6 +15,7 @@ from autobencher.statistics import (
     mcnemar_test,
     paired_bootstrap,
 )
+from artifact_fixtures import write_completed_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +112,32 @@ def test_cost_matched_stops_after_recorded_token_cap(tmp_path):
     assert ledger.data["protocol"]["exhausted"] is True
 
 
+def test_resumed_ledger_cycle_events_are_idempotent(tmp_path):
+    path = tmp_path / "budget_ledger.json"
+    metadata = {
+        "run_id": "resume",
+        "config_hash": "config",
+        "git_commit": "commit",
+    }
+    first = BudgetLedger(path, _ledger_config(), metadata)
+    records = [{"instruction": "solve", "input": "1+1", "output": "2"}]
+    assert first.record_dataset({}, records, event_id="cycle_1") is True
+    assert first.record_training(
+        {"final_training_sample_count": 1, "training_token_count": 3},
+        event_id="cycle_1",
+    ) is True
+    resumed = BudgetLedger(
+        path, _ledger_config(), metadata, resume=True
+    )
+    assert resumed.record_dataset({}, records, event_id="cycle_1") is False
+    assert resumed.record_training(
+        {"final_training_sample_count": 1, "training_token_count": 3},
+        event_id="cycle_1",
+    ) is False
+    assert resumed.data["training"]["selected_pool_count"] == 1
+    assert resumed.data["training"]["actual_trained_count"] == 1
+
+
 def test_budget_protocol_validation_is_fail_closed():
     with pytest.raises(ConfigurationError, match="positive integer"):
         load_resolved_config(
@@ -140,64 +167,6 @@ def test_statistics_are_deterministic_and_report_effect_size():
     assert all(0 <= value <= 1 for value in adjusted)
 
 
-def _write_run(
-    root: Path,
-    record: ExperimentRecord,
-    baseline_answers: list[bool],
-    final_answers: list[bool],
-) -> None:
-    run_dir = root / "output_root" / "test_1"
-    for cycle, answers in ((0, baseline_answers), (1, final_answers)):
-        stage = "baseline" if cycle == 0 else "cycle_1"
-        stage_dir = run_dir / "fixed_test" / stage
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        rows = [
-            {
-                "question_id": f"q{index}",
-                "category": "Algebra",
-                "sub_category": "Linear Equations",
-                "difficulty": index,
-                "gold_answer": "1",
-                "test_taker_response": "1" if correct else "0",
-                "is_correct": correct,
-                "primary_error_tag": None if correct else "calculation_error",
-                "parsed_response": {"confidence": 0.8},
-                "latency": 0.1,
-                "input_tokens": 10,
-                "output_tokens": 2,
-            }
-            for index, correct in enumerate(answers, start=1)
-        ]
-        (stage_dir / "fixed_math.compare_answers.json").write_text(
-            json.dumps(rows),
-            encoding="utf-8",
-        )
-    (run_dir / "experiment_summary.json").write_text(
-        json.dumps(
-            {
-                "baseline_accuracy": sum(baseline_answers)
-                / len(baseline_answers),
-                "final_accuracy": sum(final_answers) / len(final_answers),
-                "accuracy_delta": (
-                    sum(final_answers) / len(final_answers)
-                    - sum(baseline_answers) / len(baseline_answers)
-                ),
-            }
-        ),
-        encoding="utf-8",
-    )
-    ledger = BudgetLedger(
-        run_dir / "budget_ledger.json",
-        _ledger_config(),
-        {"study_id": record.study_id},
-    )
-    ledger.record_accuracy(
-        sum(baseline_answers) / len(baseline_answers),
-        sum(final_answers) / len(final_answers),
-    )
-    ledger.finalize("completed")
-
-
 def test_paper_tables_rebuild_from_raw_item_artifacts(tmp_path):
     records = []
     for method, final in (
@@ -212,13 +181,12 @@ def test_paper_tables_rebuild_from_raw_item_artifacts(tmp_path):
             seed=42,
             model="model",
             budget=30,
-            config_hash=method,
+            config_hash="placeholder",
             git_commit="commit",
             status="completed",
             experiment_dir=str(experiment_dir),
         )
-        _write_run(
-            experiment_dir,
+        write_completed_run(
             record,
             [True, False, False],
             final,
@@ -229,6 +197,7 @@ def test_paper_tables_rebuild_from_raw_item_artifacts(tmp_path):
         json.dumps(
             {
                 "schema_version": "1.0",
+                "comparison_pairs": [{"left": "base", "right": "full"}],
                 "experiments": [record.to_dict() for record in records],
             }
         ),
@@ -236,7 +205,7 @@ def test_paper_tables_rebuild_from_raw_item_artifacts(tmp_path):
     )
     output = tmp_path / "results"
     report = build_paper_tables(index, output)
-    assert report["raw_item_rows"] == 12
+    assert report["raw_item_rows"] == 9
     expected = {
         "results_long.csv",
         "run_summary.csv",
@@ -252,7 +221,7 @@ def test_paper_tables_rebuild_from_raw_item_artifacts(tmp_path):
         "r", encoding="utf-8", newline=""
     ) as handle:
         long_rows = list(csv.DictReader(handle))
-    assert len(long_rows) == 12
+    assert len(long_rows) == 9
     with (output / "significance_tests.csv").open(
         "r", encoding="utf-8", newline=""
     ) as handle:

@@ -12,6 +12,11 @@ study_suite:
     - full_no_uncertainty_priority
     - full_no_global_difficulty
     - full_no_retention_priority
+  comparison_pairs:
+    - {left: full_no_coverage_priority, right: full}
+    - {left: full_no_uncertainty_priority, right: full}
+    - {left: full_no_global_difficulty, right: full}
+    - {left: full_no_retention_priority, right: full}
   seeds:
     - 42
     - 123

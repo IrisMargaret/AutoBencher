@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.metadata
 import json
-import logging
 import os
 import platform
 import re
@@ -14,13 +14,14 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 import yaml
 
 from autobencher.config import ProjectConfig, thaw_config
 from autobencher.budget_ledger import BudgetLedger, set_active_ledger
 from autobencher.fingerprints import (
+    artifact_fingerprint,
     file_sha256,
     prompt_bundle_snapshot,
 )
@@ -106,6 +107,16 @@ def allocate_test_run_dir(output_root: str | Path) -> Path:
             return candidate
         except FileExistsError:
             candidate_number += 1
+
+
+def run_dir_for_id(output_root: str | Path, run_id: str) -> Path:
+    """Map one run identity to exactly one stable directory."""
+    root = Path(output_root).expanduser().resolve()
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(run_id)).strip("-.")
+    if not normalized:
+        raise ValueError("run_id must contain at least one safe character")
+    digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:12]
+    return root / f"run_{normalized[:96]}_{digest}"
 
 
 def environment_snapshot() -> dict[str, Any]:
@@ -352,6 +363,7 @@ class ResearchRun:
         run_id: str,
         project_root: str | Path,
         legacy_output_root: str | Path | None = None,
+        resume: bool = False,
     ):
         self.config = (
             config
@@ -367,7 +379,14 @@ class ResearchRun:
             if legacy_output_root is not None
             else configured_root.resolve()
         )
-        self.run_dir = allocate_test_run_dir(self.output_root)
+        self.run_dir = run_dir_for_id(self.output_root, run_id)
+        self.resumed = self.run_dir.is_dir()
+        if self.resumed and not resume:
+            raise RuntimeError(
+                f"Run directory already exists for run_id={run_id!r}; "
+                "enable resume or choose a different run_id"
+            )
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         self.cycle_root = self.run_dir / "cycle"
         self.cycle_root.mkdir(parents=True, exist_ok=True)
         log_dir = self.run_dir / "logs"
@@ -375,10 +394,50 @@ class ResearchRun:
         self.progress = ProgressManager(config)
         self.git_commit = git_commit(self.project_root)
         self.config_hash = str(provenance["config_hash"])
+        self.prompt_bundle = prompt_bundle_snapshot(
+            self.config,
+            self.project_root,
+        )
+        self.base_model_fingerprint = artifact_fingerprint(
+            str(self.config["models"]["test_taker"]["model_path"]),
+            project_root=self.project_root,
+            allow_missing=False,
+        )
+        if self.resumed:
+            manifest_path = self.run_dir / "run_manifest.json"
+            if not manifest_path.is_file():
+                raise RuntimeError(
+                    "Cannot resume: deterministic run directory has no "
+                    "run_manifest.json"
+                )
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected = {
+                "run_id": self.run_id,
+                "config_hash": self.config_hash,
+                "git_commit": self.git_commit,
+                "prompt_hash": self.prompt_bundle["combined_sha256"],
+                "base_model_sha256": self.base_model_fingerprint["sha256"],
+            }
+            mismatches = {
+                key: {"stored": existing.get(key), "current": value}
+                for key, value in expected.items()
+                if existing.get(key) != value
+            }
+            if mismatches:
+                raise RuntimeError(
+                    "Resume identity validation failed before opening mutable "
+                    "state: " + json.dumps(mismatches, ensure_ascii=False)
+                )
+            if existing.get("status") == "completed":
+                raise RuntimeError(
+                    "Cannot resume an already completed run; use its bound "
+                    "artifacts or choose a new run_id"
+                )
         self.budget_ledger = BudgetLedger(
             self.run_dir / "budget_ledger.json",
             thaw_config(self.config["budget"]),
             self.metadata(),
+            resume=self.resumed,
         )
         set_active_ledger(self.budget_ledger)
 
@@ -400,10 +459,28 @@ class ResearchRun:
             difficulty_snapshot["calibration_artifact_actual_sha256"] = (
                 file_sha256(calibration_path)
             )
-        prompt_bundle = prompt_bundle_snapshot(
-            self.config,
-            self.project_root,
-        )
+        prompt_bundle = self.prompt_bundle
+        base_model = self.base_model_fingerprint
+        manifest_path = self.run_dir / "run_manifest.json"
+        if self.resumed:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            atomic_json(
+                {
+                    **existing,
+                    "status": "running",
+                    "resumed_at": utc_now(),
+                    "resume_count": int(existing.get("resume_count", 0)) + 1,
+                    "cli_args": dict(cli_args),
+                },
+                manifest_path,
+            )
+            self.logger.event(
+                "INFO",
+                "Startup",
+                "run_resumed",
+                f"run_dir={self.run_dir}",
+            )
+            return
         atomic_json(resolved_payload, self.run_dir / "resolved_config.json")
         atomic_yaml(resolved_payload, self.run_dir / "resolved_config.yaml")
         atomic_json(
@@ -435,6 +512,9 @@ class ResearchRun:
             {
                 **self.metadata(),
                 "status": "running",
+                "resume_count": 0,
+                "base_model": base_model,
+                "base_model_sha256": base_model["sha256"],
                 "cli_args": dict(cli_args),
                 "study": study_snapshot,
                 "study_config_snapshot": study_snapshot["config_snapshot"],
@@ -538,4 +618,45 @@ class ResearchRun:
             },
             manifest_path,
         )
+        if status == "completed":
+            required = [
+                self.run_dir / "run_manifest.json",
+                self.run_dir / "experiment_summary.json",
+                self.run_dir / "budget_ledger.json",
+                self.run_dir / "cycle_record.json",
+                self.run_dir / "resolved_config.json",
+                self.run_dir / "fixed_test" / "dataset_snapshot.json",
+            ]
+            files = []
+            for path in sorted(
+                {
+                    *required,
+                    *self.run_dir.glob(
+                        "fixed_test/*/fixed_math.compare_answers.json"
+                    ),
+                    *self.run_dir.glob(
+                        "cycle/cycle_*/training/checkpoint_manifest.json"
+                    ),
+                },
+                key=lambda value: value.as_posix(),
+            ):
+                if path.is_file():
+                    files.append(
+                        {
+                            "path": path.relative_to(self.run_dir).as_posix(),
+                            "sha256": file_sha256(path),
+                            "size": path.stat().st_size,
+                        }
+                    )
+            atomic_json(
+                {
+                    "schema_version": "1.0",
+                    "run_id": self.run_id,
+                    "config_hash": self.config_hash,
+                    "git_commit": self.git_commit,
+                    "created_at": utc_now(),
+                    "files": files,
+                },
+                self.run_dir / "artifact_manifest.json",
+            )
         set_active_ledger(None)

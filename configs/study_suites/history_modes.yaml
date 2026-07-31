@@ -14,6 +14,9 @@ study_suite:
     - full_history_cumulative
     - full_history_cycle_reset
     - full_history_time_decay
+  comparison_pairs:
+    - {left: full_history_cumulative, right: full_history_time_decay}
+    - {left: full_history_cycle_reset, right: full_history_time_decay}
   seeds:
     - 42
     - 123

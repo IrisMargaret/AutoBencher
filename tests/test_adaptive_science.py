@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
 from autobencher.config import load_resolved_config
@@ -9,9 +10,32 @@ from autobencher.coverage import beta_binomial_state, history_weight
 from autobencher.difficulty_calibration import (
     DifficultyCalibrationError,
     calibrate_difficulty,
+    fit_irt,
     freeze_calibration,
     prepare_panel_schedule,
 )
+
+
+def test_rasch_recovers_simulated_item_order_with_one_location_constraint():
+    rng = np.random.default_rng(20260731)
+    true_ability = np.linspace(-1.2, 2.6, 80)
+    true_difficulty = np.linspace(-1.8, 1.8, 24)
+    probability = 1.0 / (
+        1.0
+        + np.exp(
+            -(true_ability[:, None] - true_difficulty[None, :])
+        )
+    )
+    matrix = (rng.random(probability.shape) < probability).astype(float)
+    fitted = fit_irt(matrix, iterations=3000, learning_rate=0.05)
+    recovered = np.asarray(fitted["item_difficulty"])
+    assert np.corrcoef(recovered, true_difficulty)[0, 1] > 0.9
+    assert recovered.mean() == pytest.approx(0.0, abs=1.0e-10)
+    # The panel is deliberately stronger than the zero-difficulty item mean;
+    # its ability mean must not be artificially recentered to zero.
+    assert np.mean(fitted["ability"]) > 0.2
+    assert fitted["final_loss"] < fitted["loss_history"][0]["loss"]
+    assert fitted["identification_constraint"] == "mean_item_difficulty_zero"
 
 
 def _config(root, mode):
