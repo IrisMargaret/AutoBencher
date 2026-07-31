@@ -10,6 +10,7 @@ from pathlib import Path
 from autobencher.experiment import atomic_json
 from autobencher.fixed_benchmark import load_fixed_test_set
 from autobencher.structured import normalize_answer
+from autobencher.structured import normalize_generated_gold_contract
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -219,7 +220,15 @@ def build_payload(base_path: Path) -> dict:
     ]
     for item in originals:
         item["source_dataset"] = "project_native"
-        item["construction_method"] = "human_curated_original_v2"
+        item["construction_method"] = "human_curated_original_v3"
+        item.update(
+            normalize_generated_gold_contract(
+                item["question"],
+                item["canonical_answer"],
+                item["answer_type"],
+                item.get("tolerance"),
+            )
+        )
         parsed = normalize_answer(
             item["canonical_answer"],
             item["answer_type"],
@@ -240,6 +249,13 @@ def build_payload(base_path: Path) -> dict:
     questions = list(originals)
     for index, spec in enumerate(_extra_specs(), start=28):
         category, subcategory, difficulty, question, answer_type, answer = spec
+        contract = normalize_generated_gold_contract(
+            question,
+            answer,
+            answer_type,
+        )
+        answer_type = contract["answer_type"]
+        answer = contract["canonical_answer"]
         parsed = normalize_answer(answer, answer_type, {})
         if not parsed["success"]:
             raise ValueError(
@@ -255,8 +271,13 @@ def build_payload(base_path: Path) -> dict:
                 "question": question,
                 "answer_type": answer_type,
                 "canonical_answer": answer,
+                "display_answer": contract["display_answer"],
+                "tolerance": contract["tolerance"],
+                "exact_canonical_answer": contract[
+                    "exact_canonical_answer"
+                ],
                 "source_dataset": "project_native",
-                "construction_method": "human_curated_original_v2",
+                "construction_method": "human_curated_original_v3",
                 "verification": {
                     "backend": "human_curated_plus_typed_parser",
                     "canonical_parse_passed": True,
@@ -268,7 +289,7 @@ def build_payload(base_path: Path) -> dict:
         )
     return {
         "schema_version": "2.0",
-        "name": "autobencher_project_native_fixed_math_v2",
+        "name": "autobencher_project_native_fixed_math_v3",
         "description": (
             "Immutable 81-question project-native holdout with three questions "
             "for every configured mathematics subcategory."

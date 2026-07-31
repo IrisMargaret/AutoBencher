@@ -60,6 +60,7 @@ from autobencher.similarity import build_similarity_batch
 from autobencher.structured import (
     answers_equivalent,
     attribute_error,
+    normalize_generated_gold_contract,
     normalize_answer_type,
     validate_generated_question,
 )
@@ -1340,6 +1341,13 @@ Mandatory quality and output rules:
    unit_value, multiple_choice.
 9. Use rational for every proper, improper, or mixed fraction. Never emit
    fraction, mixed_fraction, or mixed_number as answer_type.
+10. Exact answers containing pi, roots, logarithms, exp, or other irrational
+    constants must use answer_type symbolic (accepted as symbolic_expression)
+    and retain the exact expression. Never label an exact symbolic expression
+    as decimal.
+11. Use answer_type decimal only when the question explicitly asks for a
+    decimal approximation. canonical_answer and gold_answer must then be a
+    floating-point number, and tolerance must be 0.001.
 """
 
     sub_category = description_json.get(
@@ -2014,13 +2022,41 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
             evaluator_truth["answer_type"],
             canonical_answer,
         )
+        answer_contract = normalize_generated_gold_contract(
+            question_text,
+            canonical_answer,
+            answer_type,
+            item.get("tolerance"),
+            decimal_tolerance=float(
+                research_config["answer_normalization"][
+                    "decimal_gold_tolerance"
+                ]
+            ),
+        )
+        canonical_answer = answer_contract["canonical_answer"]
+        answer_type = answer_contract["answer_type"]
+        answer_tolerance = answer_contract["tolerance"]
+        exact_canonical_answer = answer_contract[
+            "exact_canonical_answer"
+        ]
         deterministic_agreement = None
         if evaluator_enabled and deterministic_truth.success:
+            deterministic_contract = normalize_generated_gold_contract(
+                question_text,
+                deterministic_truth.canonical_answer,
+                deterministic_truth.answer_type,
+                decimal_tolerance=float(
+                    research_config["answer_normalization"][
+                        "decimal_gold_tolerance"
+                    ]
+                ),
+            )
             deterministic_agreement = answers_equivalent(
                 canonical_answer,
-                deterministic_truth.canonical_answer,
+                deterministic_contract["canonical_answer"],
                 answer_type,
                 research_config,
+                tolerance=answer_tolerance,
             )
             if not deterministic_agreement["equivalent"]:
                 failures.append(
@@ -2197,7 +2233,8 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "gold_answer": canonical_answer,
                 "gold_reasoning_summary": gold_reasoning_summary,
                 "unit": None,
-                "tolerance": None,
+                "tolerance": answer_tolerance,
+                "exact_canonical_answer": exact_canonical_answer,
                 "order_sensitive": answer_type == "ordered_tuple",
                 "generation_source": description_json.get(
                     "generation_source",
@@ -3144,6 +3181,7 @@ def test_and_eval(
                 standardized["test_taker_response"],
                 standardized.get("answer_type", "text"),
                 research_config,
+                tolerance=standardized.get("tolerance"),
             )
             candidate_truth_check = None
             if (
@@ -3183,6 +3221,10 @@ def test_and_eval(
                     evaluator_is_correct
                     and float(judgment.get("confidence", 0.0))
                     >= semantic_threshold
+                    and equivalence["deterministic_checks"].get(
+                        "format_valid",
+                        False,
+                    )
                 )
                 if (
                     research_config["evaluator_pipeline"][

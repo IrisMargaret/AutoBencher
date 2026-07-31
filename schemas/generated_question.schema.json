@@ -128,6 +128,12 @@
       ]
     },
     "canonical_answer": {},
+    "exact_canonical_answer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "display_answer": {
       "type": "string"
     },

@@ -54,6 +54,7 @@ ANSWER_TYPE_ALIASES = {
     "string": "text",
     "free_text": "text",
     "expression": "symbolic_expression",
+    "symbolic": "symbolic_expression",
     "algebraic_expression": "symbolic_expression",
     "algebraic": "symbolic_expression",
     "polynomial": "symbolic_expression",
@@ -77,6 +78,7 @@ ERROR_TAGS = (
     "reciprocal_error",
     "scale_or_percentage_error",
     "rounding_error",
+    "numeric_approximation_error",
     "off_by_one_error",
     "answer_transfer_error",
     "constraint_violation",
@@ -217,6 +219,82 @@ def normalize_answer_type(
     return _infer_answer_type(canonical_answer)
 
 
+_EXACT_IRRATIONAL_PATTERN = re.compile(
+    r"(?:\\sqrt|\\pi|\\ln|\\log|√|π|\bsqrt\s*\(|\bpi\b|"
+    r"\blog\s*\(|\bln\s*\(|\bexp\s*\(|\bE\b)",
+    flags=re.IGNORECASE,
+)
+_DECIMAL_REQUEST_PATTERN = re.compile(
+    r"\b(?:decimal|floating[- ]point|approximate(?:ly)?|"
+    r"nearest\s+(?:tenth|hundredth|thousandth)|"
+    r"round(?:ed)?\s+to)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def question_requests_decimal(question: Any) -> bool:
+    """Return whether the problem explicitly requests a decimal approximation."""
+    return bool(_DECIMAL_REQUEST_PATTERN.search(str(question or "")))
+
+
+def normalize_generated_gold_contract(
+    question: Any,
+    canonical_answer: Any,
+    answer_type: Any,
+    tolerance: Any = None,
+    *,
+    decimal_tolerance: float = 1.0e-3,
+) -> dict[str, Any]:
+    """Enforce disjoint symbolic and decimal gold-answer contracts.
+
+    Exact irrational constants stay symbolic unless the question explicitly
+    requests a decimal. Decimal gold answers are materialized as finite floats
+    and always carry the configured grading tolerance.
+    """
+    normalized_type = normalize_answer_type(answer_type, canonical_answer)
+    original = str(canonical_answer).strip()
+    explicit_decimal = question_requests_decimal(question)
+    exact_irrational = bool(_EXACT_IRRATIONAL_PATTERN.search(original))
+
+    if exact_irrational and not explicit_decimal:
+        normalized_type = "symbolic_expression"
+
+    exact_canonical_answer = None
+    if normalized_type == "decimal" or explicit_decimal:
+        try:
+            import sympy
+
+            expression = _symbolic_scalar(original)
+            if expression.free_symbols or expression.is_real is False:
+                raise ValueError("decimal gold must be a real constant")
+            numeric = float(sympy.N(expression, 30))
+        except Exception as exc:
+            raise ValueError(
+                "Decimal gold answer must be a finite numeric value or a "
+                "constant SymPy expression"
+            ) from exc
+        if not math.isfinite(numeric):
+            raise ValueError("Decimal gold answer must be finite")
+        if exact_irrational:
+            exact_canonical_answer = original
+        normalized_type = "decimal"
+        canonical_answer = format(numeric, ".15g")
+        tolerance = float(decimal_tolerance)
+    elif normalized_type == "symbolic_expression":
+        tolerance = None
+        canonical_answer = original
+    else:
+        canonical_answer = original
+
+    return {
+        "answer_type": normalized_type,
+        "canonical_answer": str(canonical_answer),
+        "display_answer": str(canonical_answer),
+        "tolerance": tolerance,
+        "exact_canonical_answer": exact_canonical_answer,
+    }
+
+
 def validate_json_schema(payload: Any, schema_name: str) -> None:
     """Validate an artifact against a checked-in Draft 2020-12 schema."""
     schema_path = SCHEMA_ROOT / schema_name
@@ -249,6 +327,41 @@ def validate_generated_question(payload: Mapping[str, Any]) -> None:
         raise ValueError(
             "Generated question validation failed: non-English or corrupted "
             "Unicode text detected"
+        )
+    answer_type = normalize_answer_type(
+        payload.get("answer_type"),
+        payload.get("canonical_answer"),
+    )
+    canonical_answer = payload.get("canonical_answer")
+    if answer_type == "decimal":
+        numeric = _number(canonical_answer)
+        if numeric is None or not math.isfinite(numeric):
+            raise ValueError(
+                "Generated question validation failed: decimal "
+                "canonical_answer must already be a finite floating-point "
+                "value, not a symbolic expression"
+            )
+        try:
+            tolerance = float(payload.get("tolerance"))
+        except (TypeError, ValueError):
+            tolerance = math.nan
+        if not math.isclose(
+            tolerance, 1.0e-3, rel_tol=0.0, abs_tol=1.0e-12
+        ):
+            raise ValueError(
+                "Generated question validation failed: decimal tolerance "
+                "must be 0.001"
+            )
+    elif answer_type == "symbolic_expression":
+        if payload.get("tolerance") is not None:
+            raise ValueError(
+                "Generated question validation failed: symbolic answers "
+                "must not define a decimal tolerance"
+            )
+    elif _EXACT_IRRATIONAL_PATTERN.search(str(canonical_answer or "")):
+        raise ValueError(
+            "Generated question validation failed: exact irrational gold "
+            "must use symbolic_expression"
         )
     profile = payload.get("difficulty_profile")
     if profile is not None:
@@ -312,6 +425,11 @@ Constraints:
 - Do not echo this prompt or the question.
 - Do not output Markdown, role prefixes, extra questions, or tool calls.
 - final_answer must be standalone and match answer_type.
+- If an exact answer contains pi, a square root, a logarithm, or another
+  irrational constant, return the exact symbolic form. Do not voluntarily
+  approximate it as a decimal.
+- Only when the question explicitly requests a decimal, return a
+  high-precision floating-point value. Never use a coarse approximation.
 - Use reduced fractions, conventional interval/set notation, row-major matrix
   notation, and explicit units when the requested answer type requires them.
 - Check the final answer against every condition before returning the JSON.
@@ -555,6 +673,18 @@ def parse_test_taker_output(
             continue
         if not str(parsed["final_answer"]).strip():
             continue
+        if (
+            expected_type == "decimal"
+            and not normalize_answer(
+                parsed["final_answer"],
+                "decimal",
+                config,
+                gold=False,
+            )["success"]
+        ):
+            # Decimal responses must already be numeric. Exact symbolic forms
+            # belong to the symbolic branch and cannot masquerade as decimal.
+            continue
         result["parsed_response"] = {
             "reasoning_summary": normalized_reasoning,
             "final_answer": str(parsed["final_answer"]).strip(),
@@ -685,6 +815,8 @@ def normalize_answer(
     value: Any,
     answer_type: str,
     config: Mapping[str, Any],
+    *,
+    gold: bool = False,
 ) -> dict[str, Any]:
     answer_type = normalize_answer_type(answer_type)
     if answer_type not in ANSWER_TYPES:
@@ -700,8 +832,24 @@ def normalize_answer(
         else value
     )
     normalized: Any
-    if answer_type in {"integer", "decimal", "rational"}:
+    if answer_type in {"integer", "rational"}:
         normalized = _number(comparison_value)
+    elif answer_type == "decimal":
+        normalized = _number(comparison_value)
+        if normalized is None and gold:
+            try:
+                import sympy
+
+                expression = _symbolic_scalar(comparison_value)
+                if expression.free_symbols or expression.is_real is False:
+                    normalized = None
+                else:
+                    candidate = float(sympy.N(expression, 30))
+                    normalized = (
+                        candidate if math.isfinite(candidate) else None
+                    )
+            except Exception:
+                normalized = None
     elif answer_type == "percentage":
         normalized = _number(comparison_value, percentage=True)
     elif answer_type == "boolean":
@@ -979,9 +1127,27 @@ def answers_equivalent(
     predicted_answer: Any,
     answer_type: str,
     config: Mapping[str, Any],
+    tolerance: float | None = None,
 ) -> dict[str, Any]:
-    gold = normalize_answer(gold_answer, answer_type, config)
-    predicted = normalize_answer(predicted_answer, answer_type, config)
+    comparison_config = config
+    if tolerance is not None:
+        comparison_config = dict(config)
+        comparison_config["answer_normalization"] = {
+            **dict(config["answer_normalization"]),
+            "absolute_tolerance": float(tolerance),
+        }
+    gold = normalize_answer(
+        gold_answer,
+        answer_type,
+        comparison_config,
+        gold=True,
+    )
+    predicted = normalize_answer(
+        predicted_answer,
+        answer_type,
+        comparison_config,
+        gold=False,
+    )
     checks = {
         "answer_parse_success": gold["success"] and predicted["success"],
         "numeric_equivalence": False,
@@ -993,10 +1159,22 @@ def answers_equivalent(
         "format_valid": predicted["success"],
     }
     if not checks["answer_parse_success"]:
+        if (
+            answer_type == "decimal"
+            and gold["success"]
+            and not predicted["success"]
+        ):
+            return {
+                "equivalent": False,
+                "status": "incorrect",
+                "gold_normalized": gold,
+                "predicted_normalized": predicted,
+                "deterministic_checks": checks,
+            }
         cross_format_equal = _scalar_mathematical_equal(
             gold_answer,
             predicted_answer,
-            config,
+            comparison_config,
         )
         checks["cross_format_mathematical_equivalence"] = cross_format_equal
         if cross_format_equal:
@@ -1007,7 +1185,10 @@ def answers_equivalent(
                 "predicted_normalized": predicted,
                 "deterministic_checks": checks,
             }
-        if config["answer_normalization"].get("math_verify_enabled", False):
+        if comparison_config["answer_normalization"].get(
+            "math_verify_enabled",
+            False,
+        ):
             available, verified = _math_verify_equal(
                 gold_answer,
                 predicted_answer,
@@ -1032,7 +1213,11 @@ def answers_equivalent(
     left, right = gold["value"], predicted["value"]
     equivalent = False
     if answer_type in {"integer", "decimal", "rational", "percentage"}:
-        equivalent = _numeric_equal(float(left), float(right), config)
+        equivalent = _numeric_equal(
+            float(left),
+            float(right),
+            comparison_config,
+        )
         checks["numeric_equivalence"] = equivalent
     elif answer_type == "matrix":
         equivalent = (
@@ -1431,6 +1616,48 @@ def attribute_error(
             predicted_value = numeric_value(
                 equivalence.get("predicted_normalized", {})
             )
+            exact_gold_text = str(
+                record.get("exact_canonical_answer")
+                or (
+                    gold_text
+                    if _EXACT_IRRATIONAL_PATTERN.search(str(gold_text))
+                    else ""
+                )
+            ).strip()
+            exact_gold_value = None
+            if exact_gold_text:
+                try:
+                    import sympy
+
+                    exact_expression = _symbolic_scalar(exact_gold_text)
+                    if (
+                        not exact_expression.free_symbols
+                        and exact_expression.is_real is not False
+                    ):
+                        candidate = float(sympy.N(exact_expression, 30))
+                        if math.isfinite(candidate):
+                            exact_gold_value = candidate
+                except Exception:
+                    exact_gold_value = None
+            reasoning_text = " ".join(
+                str(step or "") for step in reasoning_steps
+            ).lower()
+            normalized_exact_text = re.sub(
+                r"\s+",
+                "",
+                exact_gold_text.lower()
+                .replace("π", "pi")
+                .replace("√", "sqrt"),
+            )
+            normalized_reasoning_text = re.sub(
+                r"\s+",
+                "",
+                reasoning_text.replace("π", "pi").replace("√", "sqrt"),
+            )
+            exact_derivation_present = bool(
+                normalized_exact_text
+                and normalized_exact_text in normalized_reasoning_text
+            )
             if invalid is not None:
                 primary = "arithmetic_computation_error"
                 confidence = 0.98
@@ -1442,6 +1669,43 @@ def attribute_error(
                     expected=invalid["left"],
                     observed=invalid["right"],
                     step_index=first_error_step,
+                )
+            elif (
+                exact_gold_value is not None
+                and predicted_value is not None
+                and exact_derivation_present
+                and not _numeric_equal(
+                    predicted_value,
+                    exact_gold_value,
+                    config,
+                )
+                and math.isclose(
+                    predicted_value,
+                    exact_gold_value,
+                    rel_tol=float(
+                        config["error_attribution"].get(
+                            "rounding_relative_tolerance",
+                            0.01,
+                        )
+                    ),
+                    abs_tol=float(
+                        config["error_attribution"].get(
+                            "rounding_absolute_tolerance",
+                            0.01,
+                        )
+                    ),
+                )
+            ):
+                primary = "numeric_approximation_error"
+                confidence = 0.96
+                add_evidence(
+                    predicted_text,
+                    "The reasoning preserves the correct exact irrational "
+                    "result, but the final numerical approximation is outside "
+                    "the grading tolerance.",
+                    check_name="exact_to_numeric_approximation",
+                    expected=exact_gold_text,
+                    observed=predicted_value,
                 )
             elif (
                 gold_value is not None
@@ -1620,5 +1884,5 @@ def attribute_error(
         "attribution_method": method,
         "verification_tier": verification_tier,
         "first_error_step": first_error_step,
-        "taxonomy_version": "math_error_taxonomy_v2",
+        "taxonomy_version": "math_error_taxonomy_v3",
     }

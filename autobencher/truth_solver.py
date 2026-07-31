@@ -1266,7 +1266,7 @@ class TruthSolver:
             return "integer"
         if value.is_Rational:
             return "rational"
-        if value.is_real is True and not value.free_symbols:
+        if isinstance(value, sympy.Float):
             return "decimal"
         return "symbolic_expression"
 

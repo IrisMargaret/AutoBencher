@@ -328,6 +328,7 @@ test_taker_prompt:
 answer_normalization:
   absolute_tolerance: 1.0e-6
   relative_tolerance: 1.0e-5
+  decimal_gold_tolerance: 1.0e-3
   allow_fraction_decimal_equivalence: true
   normalize_units: true
   normalize_boolean_text: true

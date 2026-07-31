@@ -280,7 +280,7 @@ Beta-Binomial 后验会把这条观测计入难度 3，而不是错误地计入�
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -329,6 +329,17 @@ python run_scripts.py math \
 `math_autobencher.py` 仍兼容原数学工作流的长参数形式。显式 CLI 值会覆盖 YAML。
 
 ## SymPy 标准答案流程
+
+标准答案采用互斥的精确/近似协议：
+
+- 含 `pi`、根号、对数等无理常数的精确结果统一保存为
+  `symbolic_expression`；输入别名 `symbolic` 会自动规范化到该类型，不设置小数容差。
+- 只有题面明确要求小数近似时才使用 `decimal`。写入前由 SymPy 把 gold 表达式求值为
+  浮点字符串，并强制设置 `tolerance: 1.0e-3`。
+- decimal gold 归一化可以兼容旧的符号常量，但 test-taker 的 decimal 输出必须已经是
+  数值，符号表达式不能借助语义判定混入 decimal 分支。
+- 错误分类 v3 新增 `numeric_approximation_error`：只有推理中保留正确无理数精确形式、
+  且最终近似超出评分容差时才触发。
 
 默认 `generation.gold_solver_backend: sympy`。每一道生成题执行以下步骤：
 
@@ -396,7 +407,7 @@ Cohen's kappa、证据覆盖率、Brier Score 和分验证层级准确率。只�
 服务器环境使用 VEPFS 中不可变的项目原生
 `benchmarks/fixed_math_test_set.json`。它由仓库内置基准离线复制得到，不执行数据集
 下载；GSM8K、Hendrycks MATH、MMLU 以及其他 Hugging Face 托管题目均不进入当前
-评测链路。v2 固定集共 81 道原创题：27 个细分题型各 3 道，分别覆盖基础、中等和
+评测链路。v3 固定集共 81 道原创题：27 个细分题型各 3 道，分别覆盖基础、中等和
 较难层级。GSM8K、MATH、MMLU 与 DeepMind Mathematics 只用于参考能力分布，不复制
 任何外部题面。
 

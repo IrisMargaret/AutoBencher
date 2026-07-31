@@ -9,6 +9,7 @@ from autobencher.structured import (
     attribute_error,
     clean_answer_candidate,
     normalize_answer_type,
+    normalize_generated_gold_contract,
     parse_test_taker_output,
     test_taker_prompt as strict_test_taker_prompt,
     validate_generated_question,
@@ -45,6 +46,8 @@ def test_strict_prompt_explicitly_denies_tools(config):
     )
     assert "You have no tools" in prompt
     assert "Return exactly one JSON object" in prompt
+    assert "return the exact symbolic form" in prompt
+    assert "Never use a coarse approximation" in prompt
 
 
 def test_valid_structured_response_parses(config):
@@ -147,18 +150,28 @@ def test_first_structured_json_is_safely_extracted_from_model_overrun(config):
     raw = (
         "I will solve the problem briefly.\n"
         "```json\n"
-        + response("105*sqrt(3)", "decimal")
+        + response("181.8653347947", "decimal")
         + "\n```"
         "Human: Solve an unrelated equation.\n"
         "Assistant: This suffix must be discarded."
     )
     parsed = parse_test_taker_output(raw, None, "decimal", config)
     assert parsed["parse_status"] == "success"
-    assert parsed["parsed_response"]["final_answer"] == "105*sqrt(3)"
+    assert parsed["parsed_response"]["final_answer"] == "181.8653347947"
     assert parsed["extraneous_content_discarded"] is True
     assert parsed["discarded_prefix_chars"] > 0
     assert parsed["discarded_suffix_chars"] > 0
     assert parsed["contains_irrelevant_content"] is False
+
+
+def test_decimal_response_rejects_symbolic_expression(config):
+    parsed = parse_test_taker_output(
+        response("sqrt(2)", "decimal"),
+        None,
+        "decimal",
+        config,
+    )
+    assert parsed["parse_status"] == "parse_failed"
 
 
 def test_excess_reasoning_is_truncated_without_losing_final_answer(config):
@@ -237,6 +250,51 @@ def test_answer_equivalence_types(config, gold, predicted, answer_type):
     assert answers_equivalent(
         gold, predicted, answer_type, config
     )["equivalent"] is True
+
+
+def test_exact_irrational_gold_stays_symbolic():
+    contract = normalize_generated_gold_contract(
+        "Find the exact diagonal of a unit square.",
+        "sqrt(2)",
+        "decimal",
+        0.1,
+    )
+    assert contract["answer_type"] == "symbolic_expression"
+    assert contract["canonical_answer"] == "sqrt(2)"
+    assert contract["tolerance"] is None
+
+
+def test_explicit_decimal_gold_is_materialized_with_fixed_tolerance():
+    contract = normalize_generated_gold_contract(
+        "Give sqrt(2) as a decimal to six places.",
+        "sqrt(2)",
+        "symbolic",
+    )
+    assert contract["answer_type"] == "decimal"
+    assert float(contract["canonical_answer"]) == pytest.approx(2**0.5)
+    assert contract["tolerance"] == pytest.approx(1.0e-3)
+    assert contract["exact_canonical_answer"] == "sqrt(2)"
+
+
+def test_decimal_normalizer_evaluates_symbolic_gold_only(config):
+    accepted = answers_equivalent(
+        "sqrt(2)",
+        "1.4143",
+        "decimal",
+        config,
+        tolerance=1.0e-3,
+    )
+    rejected = answers_equivalent(
+        "1.4142135623731",
+        "sqrt(2)",
+        "decimal",
+        config,
+        tolerance=1.0e-3,
+    )
+    assert accepted["equivalent"] is True
+    assert accepted["gold_normalized"]["value"] == pytest.approx(2**0.5)
+    assert rejected["equivalent"] is False
+    assert rejected["predicted_normalized"]["success"] is False
 
 
 @pytest.mark.parametrize(
@@ -381,6 +439,43 @@ def test_attribution_detects_answer_transfer_after_valid_reasoning(config):
     )
 
 
+def test_attribution_detects_wrong_irrational_approximation(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": [
+                "The exact diagonal is sqrt(2).",
+                "Approximate it for the requested decimal output.",
+            ],
+            "final_answer": "1.41",
+        },
+    }
+    equivalence = answers_equivalent(
+        "1.4142135623731",
+        "1.41",
+        "decimal",
+        config,
+        tolerance=1.0e-3,
+    )
+    result = attribute_error(
+        {
+            "question": "Give the diagonal as a decimal.",
+            "canonical_answer": "1.4142135623731",
+            "exact_canonical_answer": "sqrt(2)",
+            "answer_type": "decimal",
+            "tolerance": 1.0e-3,
+        },
+        parsed,
+        equivalence,
+        config,
+    )
+    assert result["primary_error_tag"] == "numeric_approximation_error"
+    assert result["taxonomy_version"] == "math_error_taxonomy_v3"
+    assert result["evidence"][0]["check_name"] == (
+        "exact_to_numeric_approximation"
+    )
+
+
 def test_attribution_uses_truth_solver_constraint_evidence(config):
     parsed = {
         "parse_status": "success",
@@ -463,6 +558,60 @@ def test_generated_question_schema_accepts_complete_record():
             "generation_strategy": "quota_repair",
         }
     )
+
+
+def test_generated_question_decimal_contract_is_strict():
+    base = {
+        "question_id": "q-decimal",
+        "category": "Geometry & Trigonometry",
+        "subcategory": "Plane Geometry",
+        "difficulty": 3,
+        "question": "Give the diagonal as a decimal.",
+        "answer_type": "decimal",
+        "canonical_answer": "1.4142135623731",
+        "display_answer": "1.4142135623731",
+        "unit": None,
+        "tolerance": 1.0e-3,
+        "order_sensitive": False,
+        "generation_source": "coverage_deficit",
+        "reference_hard_sample_ids": [],
+        "target_error_type": None,
+        "generation_strategy": "quota_repair",
+    }
+    validate_generated_question(base)
+    with pytest.raises(ValueError, match="not a symbolic expression"):
+        validate_generated_question(
+            {
+                **base,
+                "canonical_answer": "sqrt(2)",
+                "display_answer": "sqrt(2)",
+            }
+        )
+    with pytest.raises(ValueError, match="tolerance must be 0.001"):
+        validate_generated_question({**base, "tolerance": None})
+
+
+def test_generated_question_symbolic_contract_has_no_tolerance():
+    base = {
+        "question_id": "q-symbolic",
+        "category": "Geometry & Trigonometry",
+        "subcategory": "Plane Geometry",
+        "difficulty": 3,
+        "question": "Give the exact diagonal.",
+        "answer_type": "symbolic_expression",
+        "canonical_answer": "sqrt(2)",
+        "display_answer": "sqrt(2)",
+        "unit": None,
+        "tolerance": None,
+        "order_sensitive": False,
+        "generation_source": "coverage_deficit",
+        "reference_hard_sample_ids": [],
+        "target_error_type": None,
+        "generation_strategy": "quota_repair",
+    }
+    validate_generated_question(base)
+    with pytest.raises(ValueError, match="must not define"):
+        validate_generated_question({**base, "tolerance": 1.0e-3})
 
 
 def test_generated_question_rejects_inconsistent_difficulty_profile():

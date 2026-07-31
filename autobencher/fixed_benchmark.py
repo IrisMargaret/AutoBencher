@@ -12,7 +12,11 @@ from typing import Any, Iterable, Mapping
 from .config import DEFAULT_TAXONOMY
 from .difficulty import analyze_difficulty
 from .experiment import atomic_json
-from .structured import ANSWER_TYPES, normalize_answer_type
+from .structured import (
+    ANSWER_TYPES,
+    normalize_answer_type,
+    normalize_generated_gold_contract,
+)
 
 
 PROJECT_FIXED_TEST_SET = (
@@ -196,6 +200,20 @@ def load_fixed_test_set(
             record["answer_type"],
             record["canonical_answer"],
         )
+        answer_contract = normalize_generated_gold_contract(
+            question_text,
+            record["canonical_answer"],
+            answer_type,
+            record.get("tolerance"),
+        )
+        answer_type = answer_contract["answer_type"]
+        record.update(
+            {
+                key: value
+                for key, value in answer_contract.items()
+                if value is not None or key != "exact_canonical_answer"
+            }
+        )
         if answer_type not in ANSWER_TYPES:
             raise ValueError(
                 f"Fixed test answer type is invalid: {answer_type}"
@@ -230,11 +248,18 @@ def load_fixed_test_set(
                 "sub_category": subcategory,
                 "answer_type": answer_type,
                 "canonical_answer": str(
-                    record["canonical_answer"]
+                    answer_contract["canonical_answer"]
                 ).strip(),
-                "gold_answer": str(record["canonical_answer"]).strip(),
-                "answer": str(record["canonical_answer"]).strip(),
-                "display_answer": str(record["canonical_answer"]).strip(),
+                "gold_answer": str(
+                    answer_contract["canonical_answer"]
+                ).strip(),
+                "answer": str(
+                    answer_contract["canonical_answer"]
+                ).strip(),
+                "display_answer": str(
+                    answer_contract["display_answer"]
+                ).strip(),
+                "tolerance": answer_contract["tolerance"],
                 "difficulty": difficulty,
                 "target_difficulty": int(
                     record.get("target_difficulty", difficulty)

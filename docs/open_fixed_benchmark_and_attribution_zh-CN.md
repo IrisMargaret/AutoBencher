@@ -39,7 +39,7 @@ export TMPDIR="$AUTOBENCHER_DATA_ROOT/temp"
 mkdir -p "$TMPDIR" "$AUTOBENCHER_DATA_ROOT/benchmarks"
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -49,11 +49,11 @@ python prepare_fixed_math_benchmark.py \
 jq '{
   name,
   question_count: (.questions | length)
-}' "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json"
+}' "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json"
 
 sha256sum \
-  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
-  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json.manifest.json"
+  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
+  "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json.manifest.json"
 ```
 
 首次安装后，应把题集与清单 SHA-256 写入实验记录。后续实验复用同一文件。若确实
@@ -125,6 +125,12 @@ python run_scripts.py math \
 固定测试集保留各开源来源的声明难度作为分层字段，同时计算同一客观画像用于跨来源诊断；它不会影响训练采样。评测摘要中的 `difficulty_statistics` 和 `difficulty_calibration` 用于检查模型提升究竟发生在哪些难度层，以及出题器是否长期偏离目标。
 
 ## 6. 错误归因的理论与执行顺序
+
+错误 taxonomy 当前版本为 `math_error_taxonomy_v3`。其中
+`numeric_approximation_error` 专门描述：模型推导保留了正确的 `pi`、根号、对数等
+精确无理数结果，但写入 final answer 时采用了超出题目容差的粗略小数。该标签必须
+同时具备“推理中出现正确精确式、没有更早的可验证算术错误、最终数值位于诊断近似
+区间但超出评分容差”三类证据；否则回退到 `rounding_error` 或 `unknown_error`。
 
 自动归因采用“可观测错误机制”，不猜测模型内部的心理原因。执行顺序是：
 

@@ -422,6 +422,7 @@ def canonicalize_math_record(record, index=0):
         # [ADDED] Preserve the evaluator's independent gold-answer audit
         # through inference, evaluation, hard-pool, and research exports.
         "gold_answer_validation",
+        "exact_canonical_answer",
         # SymPy-authored, answer-anchored solution steps are the supervised
         # training target. Dropping them during canonicalization makes every
         # otherwise valid record fail dataset export.

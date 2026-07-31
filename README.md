@@ -301,7 +301,7 @@ server run. This command is offline and does not access Hugging Face datasets:
 export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
 
 python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v2.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_test_set_v3.json" \
   --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
 ```
 
@@ -357,6 +357,22 @@ The legacy long-form arguments accepted by `math_autobencher.py` remain
 available for existing math workflows. Explicit CLI values override YAML.
 
 ## Gold answer pipeline
+
+Gold answers use disjoint exact and approximate contracts:
+
+- Exact irrational results containing `pi`, roots, logarithms, or similar
+  constants are stored as `symbolic_expression` (`symbolic` is accepted as an
+  input alias), with no decimal tolerance.
+- A question is classified as `decimal` only when it explicitly requests a
+  decimal approximation. Its gold expression is evaluated with SymPy before
+  persistence and stored as a floating-point string with
+  `tolerance: 1.0e-3`.
+- A symbolic test-taker response cannot pass through the decimal parser.
+  Decimal gold normalization may evaluate a legacy symbolic constant, but the
+  predicted decimal must already be numeric.
+- Taxonomy v3 adds `numeric_approximation_error` for the evidenced case where
+  reasoning retains the correct exact irrational result but the final
+  approximation falls outside the grading tolerance.
 
 The default `generation.gold_solver_backend: sympy` path never accepts an
 LLM-produced gold answer and does not ask an LLM to author solver code.
@@ -465,7 +481,7 @@ The server environment uses the immutable project-native
 `benchmarks/fixed_math_test_set.json` artifact under VEPFS. It is copied from
 the checked-in benchmark without any dataset download. GSM8K, Hendrycks MATH,
 MMLU, and other Hugging Face-hosted questions are excluded from the active
-evaluation chain. The v2 benchmark contains 81 original questions: three for
+evaluation chain. The v3 benchmark contains 81 original questions: three for
 each of the 27 subcategories, spanning basic, intermediate, and advanced
 difficulty intent. GSM8K, MATH, MMLU, and DeepMind Mathematics inform only the
 capability distribution; no external question text is copied.

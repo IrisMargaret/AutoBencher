@@ -82,6 +82,13 @@ def test_derivative_inequality_and_exact_function_routes():
     assert statistics.canonical_answer == "8/3"
 
 
+def test_exact_irrational_constant_is_symbolic_not_decimal():
+    result = solver().solve("Compute sqrt(2).")
+    assert result.success is True
+    assert result.canonical_answer == "sqrt(2)"
+    assert result.answer_type == "symbolic_expression"
+
+
 def test_sympy_result_produces_training_safe_answer_anchored_reasoning():
     result = solver().solve(
         "Solve the system for (x, y): 2*x + y = 11, x - y = 1."

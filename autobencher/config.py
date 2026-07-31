@@ -512,6 +512,7 @@ SAFE_DEFAULTS: dict[str, Any] = {
     "answer_normalization": {
         "absolute_tolerance": 1.0e-6,
         "relative_tolerance": 1.0e-5,
+        "decimal_gold_tolerance": 1.0e-3,
         "allow_fraction_decimal_equivalence": True,
         "normalize_units": True,
         "normalize_boolean_text": True,
@@ -1621,6 +1622,7 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
     for path in (
         "answer_normalization.absolute_tolerance",
         "answer_normalization.relative_tolerance",
+        "answer_normalization.decimal_gold_tolerance",
         "dataset.near_duplicate_threshold",
         "dataset.semantic_similarity_threshold",
         "dataset.evaluator_confidence_threshold",

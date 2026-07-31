@@ -13,7 +13,7 @@ paths:
   review_dir: /vepfs-mlp2/queue010/20262202597/math_flywheel/review
 
 fixed_test:
-  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_test_set_v2.json
+  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_test_set_v3.json
   require_all_subcategories: true
 
 logging:
