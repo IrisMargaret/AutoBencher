@@ -58,6 +58,43 @@ def _resolved_full_config_for_suite(name: str) -> dict:
     return config
 
 
+def test_three_strategy_single_cycle_suite_expands_to_nine_by_ninety():
+    suite = _load_study_suite("three_strategy_single_cycle_810.yaml")
+    assert suite["methods"] == ["full", "random", "uniform"]
+    assert suite["comparison_pairs"] == [
+        {"left": "random", "right": "full"},
+        {"left": "uniform", "right": "full"},
+    ]
+    assert suite["seeds"] == [42]
+    assert suite["budgets"] == [810]
+
+    budget = BudgetSpec(
+        total_questions=suite["budgets"][0],
+        num_iterations=9,
+        max_cycles=1,
+    )
+    assert budget.questions_per_iteration == 90
+    assert budget.overrides() == [
+        "experiment.num_iterations=9",
+        "experiment.max_cycles=1",
+        "experiment.questions_per_iteration=90",
+    ]
+
+    for method in suite["methods"]:
+        config, _ = load_resolved_config(
+            ROOT / "configs" / "studies" / f"{method}.yaml",
+            ROOT / suite["environment"],
+            temporary_overrides=suite["common_overrides"],
+            validate_paths=False,
+        )
+        assert config["study"]["policy"] == method
+        assert config["experiment"]["num_iterations"] == 9
+        assert config["experiment"]["max_cycles"] == 1
+        assert config["experiment"]["export_interval"] == 9
+        assert config["finetune"]["enabled"] is True
+        assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
+
+
 def test_observed_difficulty_ablation_is_preregistered_when_present():
     expected = {
         "left": "full_no_observed_difficulty_sampling",

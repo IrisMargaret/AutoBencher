@@ -1,0 +1,62 @@
+schema_version: "1.0"
+
+study_suite:
+  name: three_strategy_single_cycle_810_v1
+  environment: configs/environments/volcengine.yaml
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
+  allow_missing_artifacts: false
+  allow_dirty_worktree: false
+
+  # Each method starts from the same base-model snapshot and receives one
+  # isolated 1-cycle run: 9 iterations x 90 requested questions = 810.
+  methods:
+    - full
+    - random
+    - uniform
+  comparison_pairs:
+    - {left: random, right: full}
+    - {left: uniform, right: full}
+  seeds:
+    - 42
+  models:
+    - name: qwen2.5-7b-instruct
+      path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+  budgets:
+    - 810
+
+  common_overrides:
+    - experiment.num_iterations=9
+    - experiment.max_cycles=1
+    - experiment.export_interval=9
+    - experiment.clean_cycle_cache=false
+
+    # One QLoRA run is triggered after all nine iterations in the cycle.
+    - finetune.enabled=true
+    - finetune.gpu=0
+
+    # Four independent semantic checks may run concurrently. Results remain
+    # positionally checkpointed and are reused after interruption.
+    - evaluator_pipeline.max_parallel_questions=4
+
+    - fixed_test.enabled=true
+    - fixed_test.dataset_path=/vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_diagnostic_270_v1.json
+    - fixed_test.evaluate_baseline=true
+    - fixed_test.evaluate_after_each_training_cycle=true
+    - fixed_test.require_all_subcategories=true
+    - fixed_test.fail_on_training_leakage=true
+    - evaluation_sets.registry_path=configs/evaluation_sets_diagnostic_270.yaml
+    - evaluation_sets.active_set=diagnostic_fixed_270_v1
+    - evaluation_sets.phase=development
+    - evaluation_sets.allow_blind_evaluation=false
+
+    # Keep the comparison focused and avoid optional network/model-loading
+    # overhead that is unrelated to the three sampling policies.
+    - retention_test.enabled=false
+    - tracking.wandb.enabled=false
+    - dataset.allow_optional_backend_fallback=true
+    - dataset.datasketch_enabled=false
+    - dataset.datasketch_required=false
+    - dataset.datasketch_lsh_enabled=false
+    - dataset.sentence_transformers_enabled=false
+    - dataset.sentence_transformers_required=false
+    - dataset.sentence_transformers_local_files_only=true

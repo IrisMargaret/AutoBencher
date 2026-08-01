@@ -3119,56 +3119,127 @@ def _evaluate_semantic_judgments(
 
     judgments = list(cached)
     total = len(test_taker_output)
+    pending_indices = []
     for index, (gold, predicted) in enumerate(
         zip(gold_records, test_taker_output)
     ):
         reusable = (
             index < len(judgments)
-            and judgments[index].get("semantic_judge", {}).get("status")
+            and isinstance(judgments[index], dict)
+            and isinstance(
+                judgments[index].get("semantic_judge"),
+                dict,
+            )
+            and judgments[index]["semantic_judge"].get("status")
             == "success"
         )
-        if not reusable:
-            try:
-                semantic = judge_answer_semantics(
-                    question=gold["question"],
-                    gold_answer=gold["answer"],
-                    predicted_answer=predicted["test_taker_response"],
-                    answer_type=predicted.get("answer_type", "text"),
-                    evaluator_info=tool_info,
-                    config=research_config,
-                )
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                semantic = _failed_semantic_judgment(
-                    gold=gold,
-                    predicted=predicted,
-                    research_config=research_config,
-                    error=exc,
-                )
-            judgment = {
-                "question": gold["question"],
-                "gold_answer": gold["answer"],
-                "test_taker_answer": predicted["test_taker_response"],
-                "is_correct": semantic["semantically_equivalent"],
-                "confidence": semantic["confidence"],
-                "reasons": semantic["reason"],
-                "semantic_judge": semantic,
-            }
-            if index < len(judgments):
-                judgments[index] = judgment
-            else:
-                judgments.append(judgment)
-            # Persist every completed item so an interruption never discards
-            # earlier successful and expensive remote calls.
-            dump_standard_json(judgments, judge_cache_path)
-            if semantic.get("status") != "success":
-                print(
-                    "[Evaluate] semantic_judge_failed "
-                    f"index={index + 1}/{total} "
-                    f"error={semantic['reason']} action=continue",
-                    flush=True,
-                )
+        if reusable:
+            if evaluator_progress is not None:
+                evaluator_progress.update(1)
+            continue
+        pending_indices.append(index)
+        placeholder = {
+            "question": gold["question"],
+            "gold_answer": gold["answer"],
+            "test_taker_answer": predicted["test_taker_response"],
+            "is_correct": False,
+            "confidence": 0.0,
+            "reasons": "semantic judgment pending",
+            "semantic_judge": {"status": "pending"},
+        }
+        if index < len(judgments):
+            judgments[index] = placeholder
+        else:
+            judgments.append(placeholder)
+
+    if not pending_indices:
+        return judgments
+
+    # Persist positional placeholders before parallel calls. If the process is
+    # interrupted, completed indices remain reusable and unfinished indices
+    # are retried without invalidating the whole cache.
+    dump_standard_json(judgments, judge_cache_path)
+
+    def evaluate_index(index):
+        gold = gold_records[index]
+        predicted = test_taker_output[index]
+        try:
+            semantic = judge_answer_semantics(
+                question=gold["question"],
+                gold_answer=gold["answer"],
+                predicted_answer=predicted["test_taker_response"],
+                answer_type=predicted.get("answer_type", "text"),
+                evaluator_info=tool_info,
+                config=research_config,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            semantic = _failed_semantic_judgment(
+                gold=gold,
+                predicted=predicted,
+                research_config=research_config,
+                error=exc,
+            )
+        return {
+            "question": gold["question"],
+            "gold_answer": gold["answer"],
+            "test_taker_answer": predicted["test_taker_response"],
+            "is_correct": semantic["semantically_equivalent"],
+            "confidence": semantic["confidence"],
+            "reasons": semantic["reason"],
+            "semantic_judge": semantic,
+        }
+
+    client = tool_info[2] if tool_info and len(tool_info) > 2 else None
+    thread_safe_client = bool(
+        client is not None
+        and hasattr(client, "chat")
+        and hasattr(client.chat, "completions")
+    )
+    configured_workers = int(
+        research_config["evaluator_pipeline"]["max_parallel_questions"]
+    )
+    worker_count = (
+        min(configured_workers, len(pending_indices))
+        if thread_safe_client
+        else 1
+    )
+    print(
+        "[Evaluate] semantic_judge_start "
+        f"questions={len(pending_indices)} parallel_workers={worker_count}",
+        flush=True,
+    )
+
+    def store(index, judgment):
+        judgments[index] = judgment
+        # Only the parent thread writes the ordered cache, so concurrent API
+        # completion cannot corrupt or reorder the checkpoint file.
+        dump_standard_json(judgments, judge_cache_path)
+        semantic = judgment["semantic_judge"]
+        if semantic.get("status") != "success":
+            print(
+                "[Evaluate] semantic_judge_failed "
+                f"index={index + 1}/{total} "
+                f"error={semantic['reason']} action=continue",
+                flush=True,
+            )
         if evaluator_progress is not None:
             evaluator_progress.update(1)
+
+    if worker_count > 1:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="semantic-judge",
+        ) as executor:
+            futures = {
+                executor.submit(evaluate_index, index): index
+                for index in pending_indices
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                store(index, future.result())
+    else:
+        for index in pending_indices:
+            store(index, evaluate_index(index))
     return judgments
 
 
@@ -6140,22 +6211,10 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     },
                     training_dir / "finetune_summary.json",
                 )
-                atomic_json(
-                    {
-                        **args.research_run.metadata(),
-                        "cycle_id": cycle_number,
-                        "status": "completed",
-                        "seed": int(
-                            args.research_run.config["experiment"]["seed"]
-                        ),
-                        "base_model": cycle_entry["test_taker_model"],
-                        "merged_model_path": current_test_taker_model.replace(
-                            "\\",
-                            "/",
-                        ),
-                    },
-                    training_dir / "checkpoint_manifest.json",
-                )
+                # checkpoint_manifest.json was already published atomically
+                # immediately after model merge with the required model SHA
+                # and training-cost fields. Do not overwrite that recoverable
+                # manifest with a reduced summary after evaluation.
             cycle_entry["status"] = "completed"
             cycle_entry["finetune_status"] = "completed"
             cycle_entry["next_test_taker_model"] = current_test_taker_model.replace(

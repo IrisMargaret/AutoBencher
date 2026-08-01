@@ -1,3 +1,4 @@
+import ast
 import json
 import tempfile
 import threading
@@ -98,6 +99,76 @@ class SemanticJudgmentResilienceTests(unittest.TestCase):
             self.assertEqual(resumed[0]["reasons"], "first")
             self.assertEqual(resumed[1]["reasons"], "recovered")
             self.assertEqual(resumed[2]["reasons"], "third")
+
+    def test_thread_safe_client_uses_parallel_ordered_checkpointing(self):
+        config = load_resolved_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )[0]
+        gold = [
+            {"question": f"Compute {index} + 1.", "answer": str(index + 1)}
+            for index in range(6)
+        ]
+        predicted = [
+            {
+                "test_taker_response": str(index + 1),
+                "answer_type": "integer",
+            }
+            for index in range(6)
+        ]
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=object())
+        )
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def judge(**kwargs):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return self._success(kwargs["question"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "parallel.compare_answers.json"
+            with patch(
+                "math_autobencher.judge_answer_semantics",
+                side_effect=judge,
+            ) as semantic_judge:
+                first = math_autobencher._evaluate_semantic_judgments(
+                    gold,
+                    predicted,
+                    tool_info=("model", None, client),
+                    research_config=config,
+                    judge_cache_path=cache_path,
+                )
+
+            self.assertGreaterEqual(maximum_active, 2)
+            self.assertEqual(semantic_judge.call_count, 6)
+            self.assertEqual(
+                [item["reasons"] for item in first],
+                [item["question"] for item in gold],
+            )
+            self.assertEqual(
+                json.loads(cache_path.read_text(encoding="utf-8")),
+                first,
+            )
+
+            with patch(
+                "math_autobencher.judge_answer_semantics"
+            ) as resumed_judge:
+                resumed = math_autobencher._evaluate_semantic_judgments(
+                    gold,
+                    predicted,
+                    tool_info=("model", None, client),
+                    research_config=config,
+                    judge_cache_path=cache_path,
+                )
+            resumed_judge.assert_not_called()
+            self.assertEqual(resumed, first)
 
 
 def test_parse_failure_does_not_read_unassigned_judge_conflict(tmp_path):
@@ -203,6 +274,22 @@ def test_null_semantic_confidence_fails_closed_without_aborting(tmp_path):
 
     assert records[0]["is_correct"] is True
     assert records[0]["evaluator_confidence"] == 0.0
+
+
+def test_checkpoint_manifest_has_one_authoritative_writer():
+    tree = ast.parse(
+        (ROOT / "math_autobencher.py").read_text(encoding="utf-8")
+    )
+    writes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "atomic_json"
+        and len(node.args) >= 2
+        and "checkpoint_manifest.json" in ast.unparse(node.args[1])
+    ]
+    assert len(writes) == 1
 
 
 class ExtractJsonTests(unittest.TestCase):
