@@ -3972,6 +3972,31 @@ def _complete_merged_model(path):
     )
 
 
+def _load_resumable_cycle_checkpoint(path, research_run, base_model):
+    """Load a completed merged checkpoint only when its identity still matches."""
+    checkpoint_path = Path(path)
+    if not checkpoint_path.is_file():
+        return None
+    checkpoint = _load_cycle_record(str(checkpoint_path))
+    merged_model_path = checkpoint.get("merged_model_path", "")
+    if (
+        checkpoint.get("run_id") != research_run.run_id
+        or checkpoint.get("config_hash") != research_run.config_hash
+        or checkpoint.get("base_model") != base_model
+        or not _complete_merged_model(merged_model_path)
+        or checkpoint.get("merged_model_sha256")
+        != artifact_fingerprint(
+            merged_model_path,
+            allow_missing=False,
+        )["sha256"]
+    ):
+        raise RuntimeError(
+            "Existing checkpoint cannot be resumed because its identity or "
+            "model directory is invalid"
+        )
+    return checkpoint
+
+
 def _cycle_record_file(args):
     return os.path.join(_output_root(args.outfile_prefix1), "cycle_record.json")
 
@@ -4846,6 +4871,115 @@ def _aggregate_cycle_generation_statistics(iteration_results):
     }
 
 
+def _load_fixed_test_benchmark_cache(
+    research_run,
+    *,
+    model_name,
+    fixed_questions,
+    fixed_metadata,
+    stage_name,
+    cycle_number=None,
+    suite_name="fixed_test",
+):
+    stage_dir = research_run.run_dir / str(suite_name) / stage_name
+    inference_path = stage_dir / "fixed_math.test_taker_inference.json"
+    comparison_path = stage_dir / "fixed_math.compare_answers.json"
+    summary_path = stage_dir / "summary.json"
+    if not (
+        inference_path.is_file()
+        and comparison_path.is_file()
+    ):
+        return None
+    # Read the durable standardized records directly.  `load_math_inference`
+    # intentionally drops unanswered rows, which is useful during generation
+    # but would make a completed parse-failure row look like a missing cache.
+    inference_records = read_json_records(inference_path)
+    normalized_model_name = str(model_name).replace("\\", "/")
+    cached_comparison = read_json_records(comparison_path)
+    comparison_summary = (
+        cached_comparison[0]
+        if len(cached_comparison) == 1
+        and isinstance(cached_comparison[0], dict)
+        else {}
+    )
+    if not (
+        len(inference_records) == len(fixed_questions)
+        and comparison_summary.get("total_questions") == len(fixed_questions)
+        and "category_statistics" in comparison_summary
+    ):
+        return None
+    expected_ids = [
+        str(item.get("question_id", item.get("id", "")))
+        for item in fixed_questions
+    ]
+    observed_ids = [
+        str(item.get("question_id", item.get("id", "")))
+        for item in inference_records
+    ]
+    if all(expected_ids) and expected_ids != observed_ids:
+        return None
+
+    cached_summary = (
+        _load_cycle_record(str(summary_path))
+        if summary_path.is_file()
+        else {}
+    )
+    cached_outcomes = cached_summary.get("item_outcomes", [])
+    summary_complete = bool(
+        cached_summary.get("dataset_sha256") == fixed_metadata.get("sha256")
+        and cached_summary.get("model_name") == normalized_model_name
+        and int(cached_summary.get("total_questions", 0))
+        == len(fixed_questions)
+        and isinstance(cached_outcomes, list)
+        and len(cached_outcomes) == len(fixed_questions)
+        and _optional_accuracy_delta(
+            0.0,
+            cached_summary.get("accuracy"),
+        )
+        is not None
+    )
+    if not summary_complete:
+        cached_summary = fixed_benchmark_summary(
+            inference_records,
+            stage=stage_name,
+            model_name=model_name,
+            dataset_sha256=fixed_metadata["sha256"],
+        )
+        cached_summary["answer_artifacts"] = {
+            "test_taker_inference": _relative_json_path(
+                inference_path,
+                research_run.run_dir,
+            ),
+            "answer_comparison": _relative_json_path(
+                comparison_path,
+                research_run.run_dir,
+            ),
+            "contains_raw_response": True,
+            "contains_parsed_reasoning_summary": True,
+            "contains_normalized_answers": True,
+            "contains_semantic_judgment": True,
+        }
+        atomic_json(
+            {**research_run.metadata(), **cached_summary},
+            summary_path,
+        )
+        research_run.logger.event(
+            "INFO",
+            "FixedTest",
+            "stage_summary_rebuilt",
+            f"stage={stage_name} questions={len(fixed_questions)}",
+            cycle=cycle_number,
+        )
+    research_run.logger.event(
+        "INFO",
+        "FixedTest",
+        "stage_resume_hit",
+        f"stage={stage_name} questions={len(fixed_questions)}",
+        cycle=cycle_number,
+    )
+    return cached_summary
+
+
 def _run_fixed_test_benchmark(
     args,
     *,
@@ -4865,6 +4999,25 @@ def _run_fixed_test_benchmark(
         raise RuntimeError("Fixed benchmark requires a ResearchRun")
     stage_dir = research_run.run_dir / str(suite_name) / stage_name
     stage_dir.mkdir(parents=True, exist_ok=True)
+    inference_path = stage_dir / "fixed_math.test_taker_inference.json"
+    comparison_path = stage_dir / "fixed_math.compare_answers.json"
+    summary_path = stage_dir / "summary.json"
+
+    # A cycle can fail after inference/evaluation has completed but before the
+    # caller records the derived baseline delta.  On resume, treat the three
+    # complete fixed-test artifacts as an atomic cache: reusing them avoids a
+    # second model pass and, more importantly, a second semantic-judge pass.
+    cached_summary = _load_fixed_test_benchmark_cache(
+        research_run,
+        model_name=model_name,
+        fixed_questions=fixed_questions,
+        fixed_metadata=fixed_metadata,
+        stage_name=stage_name,
+        cycle_number=cycle_number,
+        suite_name=suite_name,
+    )
+    if cached_summary is not None:
+        return cached_summary
     records = test_and_eval(
         copy.deepcopy(fixed_questions),
         str(stage_dir / "fixed_math"),
@@ -4885,8 +5038,6 @@ def _run_fixed_test_benchmark(
         model_name=model_name,
         dataset_sha256=fixed_metadata["sha256"],
     )
-    inference_path = stage_dir / "fixed_math.test_taker_inference.json"
-    comparison_path = stage_dir / "fixed_math.compare_answers.json"
     summary["answer_artifacts"] = {
         "test_taker_inference": _relative_json_path(
             inference_path,
@@ -4903,18 +5054,32 @@ def _run_fixed_test_benchmark(
     }
     atomic_json(
         {**research_run.metadata(), **summary},
-        stage_dir / "summary.json",
+        summary_path,
     )
     clean_redundant_files(
         str(stage_dir),
         preserve_json_paths=(
             inference_path,
             comparison_path,
-            stage_dir / "summary.json",
+            summary_path,
         ),
         strict_json_allowlist=True,
     )
     return summary
+
+
+def _optional_accuracy_delta(baseline, current):
+    """Return an accuracy delta only when both endpoints are numeric."""
+    if baseline is None or current is None:
+        return None
+    try:
+        baseline_value = float(baseline)
+        current_value = float(current)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(baseline_value) or not math.isfinite(current_value):
+        return None
+    return current_value - baseline_value
 
 
 def _retention_delta(baseline, current):
@@ -4965,10 +5130,9 @@ def _retention_delta(baseline, current):
     return {
         "baseline_accuracy": (baseline or {}).get("accuracy"),
         "current_accuracy": (current or {}).get("accuracy"),
-        "accuracy_delta": (
-            float(current["accuracy"]) - float(baseline["accuracy"])
-            if baseline and current
-            else None
+        "accuracy_delta": _optional_accuracy_delta(
+            (baseline or {}).get("accuracy"),
+            (current or {}).get("accuracy"),
         ),
         "baseline_correct_count": len(baseline_correct),
         "forgotten_count": len(forgotten),
@@ -5359,6 +5523,159 @@ def _run_autobencher(args, agent_info, evaluator_info):
         cycle_record["cycles"].append(cycle_entry)
         cycle_record["cycles"].sort(key=lambda item: item["cycle"])
         _save_cycle_record(cycle_record_path, cycle_record)
+
+        # Fast-path a crash that happened after the merged checkpoint and
+        # fixed-test artifacts were fully published.  This path deliberately
+        # does not reload the base model, rebuild the training dataset, rerun
+        # QLoRA, regenerate answers, or call the semantic judge.
+        post_training_resume = bool(
+            prior_cycle
+            and prior_cycle.get("failed_stage")
+            in {"fixed_test_evaluation", "retention_test_evaluation"}
+            and int(cycle_entry.get("iterations_completed", 0))
+            >= int(args.num_iters)
+            and getattr(args, "research_run", None)
+        )
+        if post_training_resume:
+            training_dir = (
+                args.research_run.cycle_root
+                / f"cycle_{cycle_number}"
+                / "training"
+            )
+            recovered_checkpoint = _load_resumable_cycle_checkpoint(
+                training_dir / "checkpoint_manifest.json",
+                args.research_run,
+                cycle_entry["test_taker_model"],
+            )
+            recovered_model = (
+                recovered_checkpoint.get("merged_model_path")
+                if recovered_checkpoint
+                else None
+            )
+            cached_fixed = None
+            fixed_cache_required = bool(
+                fixed_questions
+                and args.research_run.config["fixed_test"][
+                    "evaluate_after_each_training_cycle"
+                ]
+            )
+            if recovered_model and fixed_cache_required:
+                cached_fixed = _load_fixed_test_benchmark_cache(
+                    args.research_run,
+                    model_name=recovered_model,
+                    fixed_questions=fixed_questions,
+                    fixed_metadata=fixed_metadata,
+                    stage_name=f"cycle_{cycle_number}",
+                    cycle_number=cycle_number,
+                )
+            cached_retention = None
+            retention_cache_required = bool(
+                retention_questions
+                and args.research_run.config["retention_test"][
+                    "evaluate_after_each_training_cycle"
+                ]
+            )
+            if recovered_model and retention_cache_required:
+                cached_retention = _load_fixed_test_benchmark_cache(
+                    args.research_run,
+                    model_name=recovered_model,
+                    fixed_questions=retention_questions,
+                    fixed_metadata=retention_metadata,
+                    stage_name=f"cycle_{cycle_number}",
+                    cycle_number=cycle_number,
+                    suite_name="retention_test",
+                )
+            complete_post_training_cache = bool(
+                recovered_checkpoint
+                and (not fixed_cache_required or cached_fixed is not None)
+                and (
+                    not retention_cache_required
+                    or cached_retention is not None
+                )
+            )
+            if complete_post_training_cache:
+                current_test_taker_model = str(recovered_model)
+                if cached_fixed is not None:
+                    baseline_accuracy = (baseline_fixed_summary or {}).get(
+                        "accuracy"
+                    )
+                    cached_fixed["baseline_accuracy"] = baseline_accuracy
+                    cached_fixed["accuracy_delta"] = _optional_accuracy_delta(
+                        baseline_accuracy,
+                        cached_fixed.get("accuracy"),
+                    )
+                    cycle_entry["fixed_test"] = cached_fixed
+                    atomic_json(
+                        {**args.research_run.metadata(), **cached_fixed},
+                        (
+                            args.research_run.run_dir
+                            / "fixed_test"
+                            / f"cycle_{cycle_number}"
+                            / "summary.json"
+                        ),
+                    )
+                if cached_retention is not None:
+                    cached_retention["forgetting"] = _retention_delta(
+                        baseline_retention_summary,
+                        cached_retention,
+                    )
+                    cycle_entry["retention_test"] = cached_retention
+                training_cost = recovered_checkpoint.get("training_cost", {})
+                if hasattr(args.research_run, "budget_ledger"):
+                    args.research_run.budget_ledger.record_training(
+                        training_cost,
+                        event_id=f"cycle_{cycle_number}",
+                    )
+                export_path = Path(output_root) / str(
+                    cycle_entry.get("training_export", "")
+                )
+                atomic_json(
+                    {
+                        **args.research_run.metadata(),
+                        "cycle_id": cycle_number,
+                        "status": "completed",
+                        "returncode": 0,
+                        "base_model": cycle_entry["test_taker_model"],
+                        "dataset_path": str(export_path).replace("\\", "/"),
+                        "output_path": current_test_taker_model.replace(
+                            "\\", "/"
+                        ),
+                        "seed": int(
+                            args.research_run.config["experiment"]["seed"]
+                        ),
+                        "training_cost": training_cost,
+                        "resumed_checkpoint": True,
+                    },
+                    training_dir / "finetune_summary.json",
+                )
+                cycle_entry["status"] = "completed"
+                cycle_entry["finetune_status"] = "completed"
+                cycle_entry["next_test_taker_model"] = (
+                    current_test_taker_model.replace("\\", "/")
+                )
+                cycle_entry["completed_at"] = _utc_timestamp()
+                cycle_entry["post_training_resume"] = {
+                    "checkpoint_reused": True,
+                    "fixed_test_reused": cached_fixed is not None,
+                    "retention_test_reused": cached_retention is not None,
+                }
+                cycle_record["active_test_taker_model"] = (
+                    current_test_taker_model
+                )
+                _save_cycle_record(cycle_record_path, cycle_record)
+                _save_research_cycle_manifest(args, cycle_entry)
+                args.research_run.logger.event(
+                    "INFO",
+                    "Cycle",
+                    "post_training_resume_hit",
+                    (
+                        f"cycle={cycle_number} checkpoint=true "
+                        f"fixed_test={cached_fixed is not None} "
+                        f"retention_test={cached_retention is not None}"
+                    ),
+                    cycle=cycle_number,
+                )
+                continue
         test_taker_info = None
         stage = "test_taker_model_loading"
         try:
@@ -5891,30 +6208,23 @@ def _run_autobencher(args, agent_info, evaluator_info):
                 else None
             )
             recovered_checkpoint = None
-            if checkpoint_resume_path and checkpoint_resume_path.is_file():
-                recovered_checkpoint = _load_cycle_record(
-                    str(checkpoint_resume_path)
+            if checkpoint_resume_path:
+                recovered_checkpoint = _load_resumable_cycle_checkpoint(
+                    checkpoint_resume_path,
+                    args.research_run,
+                    current_test_taker_model,
                 )
-                if (
-                    recovered_checkpoint.get("run_id")
-                    != args.research_run.run_id
-                    or recovered_checkpoint.get("config_hash")
-                    != args.research_run.config_hash
-                    or recovered_checkpoint.get("base_model")
-                    != current_test_taker_model
-                    or not _complete_merged_model(
-                        recovered_checkpoint.get("merged_model_path", "")
-                    )
-                    or recovered_checkpoint.get("merged_model_sha256")
-                    != artifact_fingerprint(
-                        recovered_checkpoint.get("merged_model_path", ""),
-                        allow_missing=False,
-                    )["sha256"]
-                ):
-                    raise RuntimeError(
-                        "Existing checkpoint cannot be resumed because its "
-                        "identity or model directory is invalid"
-                    )
+            if recovered_checkpoint:
+                args.research_run.logger.event(
+                    "INFO",
+                    "FineTune",
+                    "checkpoint_resume_hit",
+                    (
+                        f"cycle={cycle_number} model="
+                        f"{recovered_checkpoint['merged_model_path']}"
+                    ),
+                    cycle=cycle_number,
+                )
             result = (
                 {
                     "success": True,
@@ -6139,16 +6449,13 @@ def _run_autobencher(args, agent_info, evaluator_info):
                     )
                 finally:
                     _release_model_info(trained_test_taker_info)
-                fixed_cycle_summary["baseline_accuracy"] = (
-                    baseline_fixed_summary["accuracy"]
-                    if baseline_fixed_summary
-                    else None
+                baseline_accuracy = (baseline_fixed_summary or {}).get(
+                    "accuracy"
                 )
-                fixed_cycle_summary["accuracy_delta"] = (
-                    fixed_cycle_summary["accuracy"]
-                    - baseline_fixed_summary["accuracy"]
-                    if baseline_fixed_summary
-                    else None
+                fixed_cycle_summary["baseline_accuracy"] = baseline_accuracy
+                fixed_cycle_summary["accuracy_delta"] = _optional_accuracy_delta(
+                    baseline_accuracy,
+                    fixed_cycle_summary.get("accuracy"),
                 )
                 cycle_entry["fixed_test"] = fixed_cycle_summary
                 atomic_json(
