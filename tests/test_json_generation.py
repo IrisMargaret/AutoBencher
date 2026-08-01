@@ -276,6 +276,63 @@ def test_null_semantic_confidence_fails_closed_without_aborting(tmp_path):
     assert records[0]["evaluator_confidence"] == 0.0
 
 
+def test_null_confidence_resume_reuses_inference_and_judge_caches(tmp_path):
+    config = load_resolved_config(
+        ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+    )[0]
+    inference = {
+        "id": 1,
+        "question_id": "resumed-null-confidence-1",
+        "category": "Arithmetic",
+        "sub_category": "Integer Operations",
+        "difficulty": 2,
+        "question": "Compute 2 + 2.",
+        "gold_answer": "4",
+        "canonical_answer": "4",
+        "display_answer": "4",
+        "answer_type": "integer",
+        "test_taker_response": "4",
+        "parse_status": "success",
+        "parsed_response": {"final_answer": "4", "confidence": None},
+        "parser_version": "structured_v2",
+    }
+    judgment = {
+        "question": inference["question"],
+        "gold_answer": "4",
+        "test_taker_answer": "4",
+        "is_correct": True,
+        "confidence": None,
+        "reasons": "provider omitted confidence",
+        "semantic_judge": {"status": "success"},
+    }
+    prefix = tmp_path / "resumed_null_confidence"
+    inference_path = Path(f"{prefix}.test_taker_inference.json")
+    judge_path = tmp_path / "temp_log" / "judge.compare_answers.json"
+    judge_path.parent.mkdir(parents=True)
+    dump_standard_json([inference], inference_path)
+    dump_standard_json([judgment], judge_path)
+
+    with patch("tool_util.gen_from_prompt") as inference_api, patch.object(
+        math_autobencher,
+        "judge_answer_semantics",
+    ) as judge_api:
+        records = math_autobencher.test_and_eval(
+            [inference],
+            str(prefix),
+            test_taker_info=("cached-model", None, None),
+            agent_info=None,
+            tool_info=("cached-judge", None, None),
+            research_config=config,
+            temp_log_dir=str(judge_path.parent),
+        )
+
+    inference_api.assert_not_called()
+    judge_api.assert_not_called()
+    assert records[0]["is_correct"] is True
+    assert records[0]["evaluator_confidence"] == 0.0
+    assert Path(f"{prefix}.compare_answers.json").is_file()
+
+
 def test_checkpoint_manifest_has_one_authoritative_writer():
     tree = ast.parse(
         (ROOT / "math_autobencher.py").read_text(encoding="utf-8")

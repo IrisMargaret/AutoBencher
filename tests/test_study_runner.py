@@ -13,7 +13,7 @@ from run_formal_evaluation import main as run_formal_evaluation
 from autobencher.baseline import build_baseline_manifest
 from autobencher.budget import BudgetSpec
 from autobencher.config import load_resolved_config
-from autobencher.fingerprints import prompt_bundle_snapshot
+from autobencher.fingerprints import canonical_sha256, prompt_bundle_snapshot
 from autobencher.result_schema import (
     ExperimentRecord,
     validate_registry,
@@ -21,6 +21,7 @@ from autobencher.result_schema import (
 from autobencher.study_runner import (
     StudyConfigurationError,
     StudyRunner,
+    validate_experiment_completion,
 )
 from artifact_fixtures import write_completed_run
 
@@ -60,6 +61,7 @@ def _resolved_full_config_for_suite(name: str) -> dict:
 
 def test_three_strategy_single_cycle_suite_expands_to_nine_by_ninety():
     suite = _load_study_suite("three_strategy_single_cycle_810.yaml")
+    assert suite["name"] == "three_strategy_single_cycle_810_dev81_postcycle_v1"
     assert suite["methods"] == ["full", "random", "uniform"]
     assert suite["comparison_pairs"] == [
         {"left": "random", "right": "full"},
@@ -80,6 +82,7 @@ def test_three_strategy_single_cycle_suite_expands_to_nine_by_ninety():
         "experiment.questions_per_iteration=90",
     ]
 
+    controlled_configs = []
     for method in suite["methods"]:
         config, _ = load_resolved_config(
             ROOT / "configs" / "studies" / f"{method}.yaml",
@@ -93,6 +96,24 @@ def test_three_strategy_single_cycle_suite_expands_to_nine_by_ninety():
         assert config["experiment"]["export_interval"] == 9
         assert config["finetune"]["enabled"] is True
         assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
+        assert config["generation_guidance"]["enabled"] is False
+        assert config["fixed_test"]["dataset_path"] == (
+            "benchmarks/fixed_math_test_set.json"
+        )
+        assert config["fixed_test"]["evaluate_baseline"] is False
+        assert (
+            config["fixed_test"]["evaluate_after_each_training_cycle"]
+            is True
+        )
+        assert config["evaluation_sets"]["active_set"] == (
+            "development_regression_v3"
+        )
+        controlled_config = dict(config)
+        controlled_config.pop("study")
+        controlled_configs.append(controlled_config)
+
+    # Sampling policy is the sole runtime difference between the three cells.
+    assert controlled_configs[1:] == controlled_configs[:1] * 2
 
 
 def test_adaptive_three_cycle_suite_uses_81_item_benchmark_after_training():
@@ -458,6 +479,43 @@ def test_return_code_zero_without_complete_artifacts_stays_partial(tmp_path):
     assert resumed[0].status == "partial"
     with runner.index_path.open("r", encoding="utf-8") as handle:
         validate_registry(json.load(handle))
+
+
+def test_completion_accepts_post_training_only_fixed_evaluation(tmp_path):
+    resolved = {
+        "fixed_test": {
+            "evaluate_baseline": False,
+            "evaluate_after_each_training_cycle": True,
+        }
+    }
+    record = ExperimentRecord(
+        study_id="post-training-only",
+        method="full",
+        variant="full",
+        seed=42,
+        model="fixture",
+        budget=810,
+        config_hash=canonical_sha256(resolved),
+        git_commit="commit",
+        status="running",
+        experiment_dir=str(tmp_path / "experiment"),
+    )
+    write_completed_run(
+        record,
+        [False, True],
+        [True, True],
+        resolved_config=resolved,
+    )
+
+    completion = validate_experiment_completion(record)
+    assert completion["question_count"] == 2
+    comparisons = list(
+        Path(record.run_dir).glob(
+            "fixed_test/*/fixed_math.compare_answers.json"
+        )
+    )
+    assert len(comparisons) == 1
+    assert comparisons[0].parent.name == "cycle_1"
 
 
 def test_formal_runner_binds_registry_method_seed_and_checkpoint(tmp_path, capsys):

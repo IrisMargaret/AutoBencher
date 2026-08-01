@@ -89,8 +89,15 @@ def write_completed_run(
         },
     )
 
-    stages = [("baseline", baseline_answers)]
-    if record.method != "base":
+    fixed_config = resolved.get("fixed_test", {})
+    evaluate_baseline = bool(fixed_config.get("evaluate_baseline", True))
+    evaluate_after_training = bool(
+        fixed_config.get("evaluate_after_each_training_cycle", True)
+    )
+    stages = []
+    if evaluate_baseline:
+        stages.append(("baseline", baseline_answers))
+    if record.method != "base" and evaluate_after_training:
         stages.append(("cycle_1", final_answers or baseline_answers))
     for stage, answers in stages:
         rows = [
@@ -121,7 +128,11 @@ def write_completed_run(
         )
 
     final = list(final_answers or baseline_answers)
-    baseline_accuracy = sum(baseline_answers) / len(baseline_answers)
+    baseline_accuracy = (
+        sum(baseline_answers) / len(baseline_answers)
+        if evaluate_baseline
+        else None
+    )
     final_accuracy = sum(final) / len(final)
     identity = {
         "run_id": record.study_id,
@@ -150,8 +161,13 @@ def write_completed_run(
             "status": "completed",
             "baseline_accuracy": baseline_accuracy,
             "final_accuracy": final_accuracy,
-            "accuracy_delta": final_accuracy - baseline_accuracy,
+            "accuracy_delta": (
+                final_accuracy - baseline_accuracy
+                if baseline_accuracy is not None
+                else None
+            ),
             "total_questions": len(baseline_answers),
+            "fixed_test_question_count": len(baseline_answers),
         },
     )
     ledger = BudgetLedger(

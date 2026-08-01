@@ -231,7 +231,10 @@ def validate_experiment_completion(record: ExperimentRecord) -> dict[str, Any]:
     declared_count = snapshot.get("question_count")
     if declared_count is not None and int(declared_count) != len(expected_ids):
         raise StudyConfigurationError("Fixed-test snapshot count is inconsistent")
-    summary_count = summary.get("total_questions")
+    # ``total_questions`` is the generation count for training runs. Fixed-set
+    # completeness is tracked separately and ultimately enforced item-by-item
+    # against every answer-comparison artifact below.
+    summary_count = summary.get("fixed_test_question_count")
     if summary_count is not None and int(summary_count) != len(expected_ids):
         raise StudyConfigurationError("Experiment summary test count is incomplete")
     comparisons = sorted(
@@ -284,8 +287,24 @@ def validate_experiment_completion(record: ExperimentRecord) -> dict[str, Any]:
             raise StudyConfigurationError(
                 "Checkpoint manifest model hash does not match the model"
             )
-        if len(comparisons) < 2:
-            raise StudyConfigurationError("Training run has no post-training fixed evaluation")
+        fixed_config = resolved.get("fixed_test", {})
+        expected_comparison_count = int(
+            bool(fixed_config.get("evaluate_baseline", True))
+        )
+        if bool(
+            fixed_config.get("evaluate_after_each_training_cycle", True)
+        ):
+            expected_comparison_count += len(checkpoint_manifests)
+        if expected_comparison_count < 1:
+            raise StudyConfigurationError(
+                "Training run is configured without a fixed evaluation"
+            )
+        if len(comparisons) != expected_comparison_count:
+            raise StudyConfigurationError(
+                "Fixed-test evaluation count is incomplete: "
+                f"actual={len(comparisons)}, "
+                f"expected={expected_comparison_count}"
+            )
     dataset = snapshot
     evaluation_sha = dataset.get("sha256")
     evaluation_id = dataset.get("evaluation_set_id")

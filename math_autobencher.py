@@ -3153,6 +3153,11 @@ def _evaluate_semantic_judgments(
             judgments.append(placeholder)
 
     if not pending_indices:
+        print(
+            "[Evaluate] reused semantic judge cache "
+            f"questions={total}",
+            flush=True,
+        )
         return judgments
 
     # Persist positional placeholders before parallel calls. If the process is
@@ -3247,7 +3252,7 @@ def _finite_confidence(value, default=0.0):
     """Coerce optional evaluator confidence without aborting an experiment."""
     try:
         confidence = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return float(default)
     return confidence if math.isfinite(confidence) else float(default)
 
@@ -6327,6 +6332,9 @@ def _run_autobencher(args, agent_info, evaluator_info):
             "baseline_accuracy": baseline_summary.get("accuracy"),
             "final_accuracy": final_fixed_summary.get("accuracy"),
             "accuracy_delta": final_fixed_summary.get("accuracy_delta"),
+            "fixed_test_question_count": final_fixed_summary.get(
+                "total_questions"
+            ),
             "active_test_taker_model": current_test_taker_model,
             "fixed_test": cycle_record.get("fixed_test", {}),
             "execution_policy": (
