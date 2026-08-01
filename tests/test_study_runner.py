@@ -150,6 +150,97 @@ def test_adaptive_three_cycle_suite_uses_81_item_benchmark_after_training():
     assert set(counts.values()) == {3}
 
 
+def test_no_error_targeting_three_cycle_suite_keeps_the_same_protocol():
+    suite = _load_study_suite(
+        "adaptive_multicycle_810_no_error_targeting.yaml"
+    )
+    full_suite = _load_study_suite("adaptive_multicycle_810.yaml")
+    assert suite["name"] == (
+        "adaptive_multicycle_810_no_error_targeting_dev81_v1"
+    )
+    assert suite["methods"] == ["full_no_error_targeting"]
+    assert suite["seeds"] == [42]
+    assert suite["budgets"] == [810]
+    # Lock every experimental control at the suite level. Only the identity
+    # and selected method may differ from the complete adaptive run.
+    controlled_suite = {
+        key: value
+        for key, value in suite.items()
+        if key not in {"name", "methods"}
+    }
+    controlled_full_suite = {
+        key: value
+        for key, value in full_suite.items()
+        if key not in {"name", "methods"}
+    }
+    assert controlled_suite == controlled_full_suite
+
+    budget = BudgetSpec(
+        total_questions=suite["budgets"][0],
+        num_iterations=3,
+        max_cycles=3,
+    )
+    assert budget.questions_per_iteration == 90
+    config, _ = load_resolved_config(
+        ROOT
+        / "configs"
+        / "studies"
+        / "ablations"
+        / "full_no_error_targeting.yaml",
+        ROOT / suite["environment"],
+        temporary_overrides=[
+            *suite["common_overrides"],
+            *budget.overrides(),
+        ],
+        validate_paths=False,
+    )
+    full_config, _ = load_resolved_config(
+        ROOT / "configs" / "studies" / "full.yaml",
+        ROOT / full_suite["environment"],
+        temporary_overrides=[
+            *full_suite["common_overrides"],
+            *budget.overrides(),
+        ],
+        validate_paths=False,
+    )
+    assert config["study"]["policy"] == "full"
+    assert config["study"]["variant"] == "full_no_error_targeting"
+    assert config["study"]["components"]["error_type_targeting"] is False
+    assert config["study"]["components"]["hard_pool_variants"] is True
+    # The resolved runtime configs must also remain identical outside the
+    # declared study ablation. Within it, exactly one component changes.
+    controlled_config = dict(config)
+    controlled_full_config = dict(full_config)
+    ablated_study = controlled_config.pop("study")
+    full_study = controlled_full_config.pop("study")
+    assert controlled_config == controlled_full_config
+    expected_components = dict(full_study["components"])
+    expected_components["error_type_targeting"] = False
+    assert ablated_study["components"] == expected_components
+    assert ablated_study["policy"] == full_study["policy"] == "full"
+    assert {
+        key: value
+        for key, value in ablated_study.items()
+        if key not in {"variant", "components"}
+    } == {
+        key: value
+        for key, value in full_study.items()
+        if key not in {"variant", "components"}
+    }
+    assert config["experiment"]["num_iterations"] == 3
+    assert config["experiment"]["max_cycles"] == 3
+    assert config["experiment"]["questions_per_iteration"] == 90
+    assert config["experiment"]["export_interval"] == 1
+    assert config["finetune"]["enabled"] is True
+    assert config["fixed_test"]["dataset_path"] == (
+        "benchmarks/fixed_math_test_set.json"
+    )
+    assert config["fixed_test"]["evaluate_baseline"] is True
+    assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
+    assert config["generation_guidance"]["enabled"] is False
+    assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
+
+
 def test_observed_difficulty_ablation_is_preregistered_when_present():
     expected = {
         "left": "full_no_observed_difficulty_sampling",

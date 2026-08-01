@@ -1,0 +1,56 @@
+schema_version: "1.0"
+
+study_suite:
+  name: adaptive_multicycle_810_no_error_targeting_dev81_v1
+  environment: configs/environments/volcengine.yaml
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
+  allow_missing_artifacts: false
+  allow_dirty_worktree: false
+
+  # Error-type targeting is the only disabled adaptive component. The run
+  # performs 3 cycles x 3 iterations x 90 questions and fine-tunes each cycle.
+  methods:
+    - full_no_error_targeting
+  comparison_pairs: []
+  seeds:
+    - 42
+  models:
+    - name: qwen2.5-7b-instruct
+      path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+  budgets:
+    - 810
+
+  common_overrides:
+    - experiment.num_iterations=3
+    - experiment.max_cycles=3
+    - experiment.export_interval=1
+    - experiment.clean_cycle_cache=false
+    - finetune.enabled=true
+    - finetune.gpu=0
+
+    - evaluator_pipeline.max_parallel_questions=4
+
+    # The same immutable 81-item benchmark evaluates the base model and every
+    # cycle checkpoint; it is never generation guidance or training data.
+    - generation_guidance.enabled=false
+    - fixed_test.enabled=true
+    - fixed_test.dataset_path=benchmarks/fixed_math_test_set.json
+    - fixed_test.evaluate_baseline=true
+    - fixed_test.evaluate_after_each_training_cycle=true
+    - fixed_test.require_all_subcategories=true
+    - fixed_test.fail_on_training_leakage=true
+    - evaluation_sets.registry_path=configs/evaluation_sets.yaml
+    - evaluation_sets.active_set=development_regression_v3
+    - evaluation_sets.phase=development
+    - evaluation_sets.allow_blind_evaluation=false
+
+    - retention_test.enabled=false
+    - tracking.wandb.enabled=false
+
+    - dataset.allow_optional_backend_fallback=true
+    - dataset.datasketch_enabled=false
+    - dataset.datasketch_required=false
+    - dataset.datasketch_lsh_enabled=false
+    - dataset.sentence_transformers_enabled=false
+    - dataset.sentence_transformers_required=false
+    - dataset.sentence_transformers_local_files_only=true
