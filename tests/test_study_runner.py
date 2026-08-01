@@ -95,6 +95,61 @@ def test_three_strategy_single_cycle_suite_expands_to_nine_by_ninety():
         assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
 
 
+def test_adaptive_three_cycle_suite_uses_81_item_benchmark_after_training():
+    suite = _load_study_suite("adaptive_multicycle_810.yaml")
+    assert suite["name"] == "adaptive_multicycle_810_dev81_v1"
+    assert suite["methods"] == ["full"]
+    assert suite["seeds"] == [42]
+    assert suite["budgets"] == [810]
+
+    budget = BudgetSpec(
+        total_questions=810,
+        num_iterations=3,
+        max_cycles=3,
+    )
+    assert budget.questions_per_iteration == 90
+    config, _ = load_resolved_config(
+        ROOT / "configs" / "studies" / "full.yaml",
+        ROOT / suite["environment"],
+        temporary_overrides=[
+            *suite["common_overrides"],
+            *budget.overrides(),
+        ],
+        validate_paths=False,
+    )
+    assert config["experiment"]["num_iterations"] == 3
+    assert config["experiment"]["max_cycles"] == 3
+    assert config["experiment"]["questions_per_iteration"] == 90
+    assert config["experiment"]["export_interval"] == 1
+    assert config["experiment"]["clean_cycle_cache"] is False
+    assert config["finetune"]["enabled"] is True
+    assert config["fixed_test"]["dataset_path"] == (
+        "benchmarks/fixed_math_test_set.json"
+    )
+    assert config["fixed_test"]["evaluate_baseline"] is True
+    assert config["fixed_test"]["evaluate_after_each_training_cycle"] is True
+    assert config["evaluation_sets"]["active_set"] == (
+        "development_regression_v3"
+    )
+    assert config["generation_guidance"]["enabled"] is False
+    assert config["retention_test"]["enabled"] is False
+    assert config["evaluator_pipeline"]["max_parallel_questions"] == 4
+
+    benchmark = json.loads(
+        (ROOT / "benchmarks" / "fixed_math_test_set.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    questions = benchmark["questions"]
+    assert len(questions) == 81
+    counts = {}
+    for item in questions:
+        key = (item["category"], item["sub_category"])
+        counts[key] = counts.get(key, 0) + 1
+    assert len(counts) == 27
+    assert set(counts.values()) == {3}
+
+
 def test_observed_difficulty_ablation_is_preregistered_when_present():
     expected = {
         "left": "full_no_observed_difficulty_sampling",
