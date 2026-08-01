@@ -1,0 +1,23 @@
+schema_version: "1.0"
+
+# Fixed development-only diagnostic set used to measure the model before
+# training and after every flywheel cycle. The questions may inform aggregate
+# capability-gap diagnostics, but must never enter prompts, hard pools, or
+# training data.
+sets:
+  - id: diagnostic_fixed_270_v1
+    role: development_regression
+    version: "1.0"
+    dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_diagnostic_270_v1.json
+    allow_fixed_test_path_override: true
+    expected_question_count: 270
+    minimum_questions_per_subcategory: 10
+    require_all_subcategories: true
+    require_explicit_validation: false
+    permissions:
+      development_comparison: true
+      method_selection: true
+      hard_pool: false
+      generator_prompt: false
+      training: false
+      threshold_tuning: true

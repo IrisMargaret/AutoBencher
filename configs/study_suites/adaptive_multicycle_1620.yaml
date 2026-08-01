@@ -1,0 +1,56 @@
+schema_version: "1.0"
+
+study_suite:
+  name: adaptive_multicycle_1620_v1
+  environment: /root/code/AutoBencher/configs/environments/volcengine.yaml
+  output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
+  allow_missing_artifacts: false
+  allow_dirty_worktree: false
+
+  # One complete adaptive run: three cycles, three generation iterations per
+  # cycle, 180 requested questions per iteration, and one fine-tune per cycle.
+  methods:
+    - full
+  comparison_pairs: []
+  seeds:
+    - 42
+  models:
+    - name: qwen2.5-7b-instruct
+      path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
+  budgets:
+    - 1620
+
+  common_overrides:
+    # 1620 / (3 iterations * 3 cycles) = 180 questions per iteration.
+    - experiment.num_iterations=3
+    - experiment.max_cycles=3
+    - experiment.export_interval=1
+    - experiment.clean_cycle_cache=false
+
+    # Immutable 270-question development diagnostic evaluated before training
+    # and after each completed fine-tuning cycle.
+    - fixed_test.enabled=true
+    - fixed_test.dataset_path=/vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_diagnostic_270_v1.json
+    - fixed_test.evaluate_baseline=true
+    - fixed_test.evaluate_after_each_training_cycle=true
+    - fixed_test.require_all_subcategories=true
+    - fixed_test.fail_on_training_leakage=true
+    - evaluation_sets.registry_path=/root/code/AutoBencher/configs/evaluation_sets_diagnostic_270.yaml
+    - evaluation_sets.active_set=diagnostic_fixed_270_v1
+    - evaluation_sets.phase=development
+    - evaluation_sets.allow_blind_evaluation=false
+
+    # Keep this first study focused and avoid unnecessary evaluation/tracking
+    # overhead. The final 540-question evaluation is a separate locked stage.
+    - retention_test.enabled=false
+    - tracking.wandb.enabled=false
+
+    # Use only backends already available in the offline server environment;
+    # no SentenceTransformer download is attempted.
+    - dataset.allow_optional_backend_fallback=true
+    - dataset.datasketch_enabled=false
+    - dataset.datasketch_required=false
+    - dataset.datasketch_lsh_enabled=false
+    - dataset.sentence_transformers_enabled=false
+    - dataset.sentence_transformers_required=false
+    - dataset.sentence_transformers_local_files_only=true
