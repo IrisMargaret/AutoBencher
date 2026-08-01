@@ -100,6 +100,111 @@ class SemanticJudgmentResilienceTests(unittest.TestCase):
             self.assertEqual(resumed[2]["reasons"], "third")
 
 
+def test_parse_failure_does_not_read_unassigned_judge_conflict(tmp_path):
+    config = load_resolved_config(
+        ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+    )[0]
+    inference = {
+        "id": 1,
+        "question_id": "parse-failure-1",
+        "category": "Arithmetic",
+        "sub_category": "Integer Operations",
+        "difficulty": 2,
+        "question": "Compute 2 + 2.",
+        "gold_answer": "4",
+        "canonical_answer": "4",
+        "display_answer": "4",
+        "answer_type": "integer",
+        "test_taker_response": "",
+        "parse_status": "parse_failed",
+        "parsed_response": {},
+        "parser_version": "structured_v2",
+    }
+    judgment = {
+        "question": inference["question"],
+        "gold_answer": "4",
+        "test_taker_answer": "",
+        "is_correct": False,
+        "confidence": 0.0,
+        "reasons": "invalid structured response",
+        "semantic_judge": {"status": "failed"},
+    }
+    prefix = str(tmp_path / "parse_failure")
+    with patch.object(
+        math_autobencher,
+        "generate_math_inference",
+        return_value=[inference],
+    ), patch.object(
+        math_autobencher,
+        "_evaluate_semantic_judgments",
+        return_value=[judgment],
+    ):
+        records = math_autobencher.test_and_eval(
+            [inference],
+            prefix,
+            test_taker_info=None,
+            agent_info=None,
+            tool_info=None,
+            research_config=config,
+        )
+
+    assert records[0]["is_correct"] is False
+    assert records[0]["evaluation_status"] == "parse_failed"
+    assert isinstance(records[0]["equivalence_needs_review"], bool)
+
+
+def test_null_semantic_confidence_fails_closed_without_aborting(tmp_path):
+    config = load_resolved_config(
+        ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+    )[0]
+    inference = {
+        "id": 1,
+        "question_id": "null-confidence-1",
+        "category": "Arithmetic",
+        "sub_category": "Integer Operations",
+        "difficulty": 2,
+        "question": "Compute 2 + 2.",
+        "gold_answer": "4",
+        "canonical_answer": "4",
+        "display_answer": "4",
+        "answer_type": "integer",
+        "test_taker_response": "4",
+        "parse_status": "success",
+        "parsed_response": {"final_answer": "4"},
+        "parser_version": "structured_v2",
+    }
+    judgment = {
+        "question": inference["question"],
+        "gold_answer": "4",
+        "test_taker_answer": "4",
+        "is_correct": True,
+        "confidence": None,
+        "reasons": "provider omitted confidence",
+        "semantic_judge": {"status": "success"},
+    }
+    prefix = str(tmp_path / "null_confidence")
+    with patch.object(
+        math_autobencher,
+        "generate_math_inference",
+        return_value=[inference],
+    ), patch.object(
+        math_autobencher,
+        "_evaluate_semantic_judgments",
+        return_value=[judgment],
+    ):
+        records = math_autobencher.test_and_eval(
+            [inference],
+            prefix,
+            test_taker_info=None,
+            agent_info=None,
+            tool_info=None,
+            research_config=config,
+        )
+
+    assert records[0]["is_correct"] is True
+    assert records[0]["evaluator_confidence"] == 0.0
+
+
 class ExtractJsonTests(unittest.TestCase):
     def test_extracts_json_from_supported_model_formats(self):
         expected = [[{"id": "1", "question": "1 + 1", "answer": "2"}]]

@@ -1,14 +1,14 @@
 schema_version: "1.0"
 
 study_suite:
-  name: adaptive_multicycle_1620_v1
+  name: adaptive_multicycle_810_v1
   environment: configs/environments/volcengine.yaml
   output_root: /vepfs-mlp2/queue010/20262202597/math_flywheel/runs
   allow_missing_artifacts: false
   allow_dirty_worktree: false
 
-  # One complete adaptive run: three cycles, three generation iterations per
-  # cycle, 180 requested questions per iteration, and one fine-tune per cycle.
+  # One adaptive run: 3 cycles x 3 iterations x 90 questions. A fine-tune is
+  # performed after every cycle because export_interval=1.
   methods:
     - full
   comparison_pairs: []
@@ -18,17 +18,14 @@ study_suite:
     - name: qwen2.5-7b-instruct
       path: /vepfs-mlp2/queue010/20262202597/Qwen2.5-7B-Instruct
   budgets:
-    - 1620
+    - 810
 
   common_overrides:
-    # 1620 / (3 iterations * 3 cycles) = 180 questions per iteration.
     - experiment.num_iterations=3
     - experiment.max_cycles=3
     - experiment.export_interval=1
     - experiment.clean_cycle_cache=false
 
-    # Immutable 270-question development diagnostic evaluated before training
-    # and after each completed fine-tuning cycle.
     - fixed_test.enabled=true
     - fixed_test.dataset_path=/vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/fixed_math_diagnostic_270_v1.json
     - fixed_test.evaluate_baseline=true
@@ -40,13 +37,9 @@ study_suite:
     - evaluation_sets.phase=development
     - evaluation_sets.allow_blind_evaluation=false
 
-    # Keep this first study focused and avoid unnecessary evaluation/tracking
-    # overhead. The final 540-question evaluation is a separate locked stage.
     - retention_test.enabled=false
     - tracking.wandb.enabled=false
 
-    # Use only backends already available in the offline server environment;
-    # no SentenceTransformer download is attempted.
     - dataset.allow_optional_backend_fallback=true
     - dataset.datasketch_enabled=false
     - dataset.datasketch_required=false

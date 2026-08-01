@@ -3172,6 +3172,15 @@ def _evaluate_semantic_judgments(
     return judgments
 
 
+def _finite_confidence(value, default=0.0):
+    """Coerce optional evaluator confidence without aborting an experiment."""
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return confidence if math.isfinite(confidence) else float(default)
+
+
 # [MODIFIED] Persist only canonical inference details and comparison statistics.
 def test_and_eval(
     question_json,
@@ -3365,6 +3374,14 @@ def test_and_eval(
         zip(test_taker_output, judgments)
     ):
         standardized = canonicalize_math_record(record, index)
+        # Parse failures do not enter semantic-judge fusion, so they cannot
+        # have a deterministic-vs-judge conflict. Keep the per-record default
+        # explicit to avoid carrying or reading an unassigned branch value.
+        judge_conflict = False
+        evaluator_confidence = _finite_confidence(
+            judgment.get("confidence"),
+            default=0.0,
+        )
         evaluator_is_correct = str(
             judgment.get("is_correct", "")
         ).strip().lower() == "true"
@@ -3430,7 +3447,7 @@ def test_and_eval(
                     equivalence,
                     judge_is_correct=evaluator_is_correct,
                     judge_valid=semantic_judge_valid,
-                    judge_confidence=float(judgment.get("confidence", 0.0)),
+                    judge_confidence=evaluator_confidence,
                     confidence_threshold=semantic_threshold,
                     require_semantic_judge=bool(
                         research_config["evaluator_pipeline"][
@@ -3485,9 +3502,7 @@ def test_and_eval(
                         "deterministic_checks"
                     ],
                     "evaluator_tool_calls": evaluator_tool_calls,
-                    "evaluator_confidence": float(
-                        judgment.get("confidence", 1.0)
-                    ),
+                    "evaluator_confidence": evaluator_confidence,
                     "semantic_judge": judgment.get(
                         "semantic_judge",
                         {},
