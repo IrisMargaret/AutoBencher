@@ -99,6 +99,19 @@ def build_baseline_manifest(
         ),
         allow_missing=allow_missing_artifacts,
     )
+    guidance_config = config["generation_guidance"]
+    generation_guidance = (
+        artifact_fingerprint(
+            str(guidance_config["dataset_path"]),
+            project_root=root,
+            allow_missing=allow_missing_artifacts,
+        )
+        if bool(guidance_config["enabled"])
+        else {
+            "kind": "disabled",
+            "sha256": canonical_sha256({"enabled": False}),
+        }
+    )
     prompts = prompt_bundle_snapshot(config, root)
     config_sources = _config_source_fingerprints(provenance, root)
     difficulty = thaw_config(config["difficulty"])
@@ -124,6 +137,7 @@ def build_baseline_manifest(
         },
         "fixed_test": fixed_test,
         "evaluation_registry": evaluation_registry,
+        "generation_guidance": generation_guidance,
         "config": {
             "resolved_sha256": str(provenance["config_hash"]),
             "source_files": config_sources,
@@ -148,6 +162,7 @@ def build_baseline_manifest(
             "model_sha256": model["sha256"],
             "fixed_test_sha256": fixed_test["sha256"],
             "evaluation_registry_sha256": evaluation_registry["sha256"],
+            "generation_guidance_sha256": generation_guidance["sha256"],
             "config_sha256": manifest["config"]["resolved_sha256"],
             "prompt_sha256": prompts["combined_sha256"],
             "difficulty_sha256": manifest["difficulty"]["sha256"],

@@ -684,6 +684,25 @@ python -B prepare_open_source_math_benchmark.py \
 后才能进入 `assemble-official`。公共题库只能支持跨基准泛化分析，不能证明题目未出现在
 模型预训练中；后者仍需独立保管的最终盲测集。
 
+同一批开源候选还可离线蒸馏为 27 个子类别各 10 条、共 270 条的生成指导集：
+
+```bash
+python -B prepare_generation_guidance.py \
+  --source-candidates "$AUTOBENCHER_DATA_ROOT/benchmarks/official_candidates_v1.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/guidance/open_source_generation_guidance_v1.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+该产物不是评测集，也不直接作为微调样本。构造器仅保留题型、难度带、答案类型、
+推理结构和来源哈希，明确删除公开题目的题面、答案与解答；选择时拒绝规范化重复、
+参数模板重复及超过阈值的 unigram/bigram 近重复，并为每个子类别配置 10 种变式轴。
+写入时同时生成不可变清单。`main.yaml`、`fair_budget.yaml` 与
+`ablation_round2.yaml` 会在出题提示中最多注入 3 条抽象指导，并把实际 guide ID
+记录到生成题；`smoke.yaml` 默认关闭，避免功能测试增加依赖。Study Runner、基线清单
+和断点恢复均绑定指导集内容 SHA-256，防止不同方法或恢复前后静默换集。公共测试源只
+能支持公开基准覆盖指导，不能据此声称对预训练未见分布的泛化；确认性结论仍须使用与
+指导来源隔离、冻结后才启用的正式集和盲测集。
+
 旧运行可在完全离线、保持原文件不变的前提下重新评分：
 
 ```bash

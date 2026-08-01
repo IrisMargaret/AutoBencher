@@ -303,6 +303,19 @@ hard_pool:
   stale_after_cycles: 2
   retire_after_cycles: 4
 
+# Static guidance is distilled from open-source test records without retaining
+# source question text or answers. Formal suites enable it only after the
+# immutable 27 x 10 VEPFS artifact and manifest have been prepared.
+generation_guidance:
+  enabled: false
+  dataset_path: /vepfs-mlp2/queue010/20262202597/math_flywheel/guidance/open_source_generation_guidance_v1.json
+  expected_record_count: 270
+  records_per_subcategory: 10
+  max_prompt_records: 3
+  similarity_threshold: 0.72
+  require_manifest: true
+  hide_source_text: true
+
 adaptive_sampling:
   enabled: true
   # Posterior observations are weighted by model-version age:

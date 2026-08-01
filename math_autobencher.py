@@ -64,6 +64,9 @@ from autobencher.fixed_benchmark import (
     fixed_benchmark_summary,
     load_fixed_test_set,
 )
+from autobencher.generation_guidance import (
+    load_generation_guidance_context,
+)
 from autobencher.policies import policy_runtime_descriptor
 from autobencher.similarity import build_similarity_batch
 from autobencher.structured import (
@@ -1339,6 +1342,29 @@ def _generate_question_from_description(
         + f"\nTarget difficulty: {description_json.get('difficulty', 5)}"
         + "\nUse English text only."
     )
+    guidance_ids = []
+    if research_config:
+        guidance_context, guidance_ids = load_generation_guidance_context(
+            research_config,
+            category=str(description_json["category"]),
+            subcategory=str(sub_category),
+            target_difficulty=int(description_json.get("difficulty", 5)),
+            selection_key=(
+                f"{description_json.get('generation_source', '')}:"
+                f"{description_json.get('generation_strategy', '')}:"
+                f"{description_json.get('difficulty', 5)}"
+            ),
+        )
+        if guidance_context:
+            context += f"""
+
+{guidance_context}
+
+Use these records only as abstract structural guidance. Create a genuinely new
+problem: change wording, constants, entities, representation, and at least one
+reasoning dependency. Do not infer or reproduce a withheld source question or
+answer.
+"""
     if hard_sample_context:
         context += f"""
 
@@ -1455,6 +1481,7 @@ Train-eligible examples:
         line["reference_hard_sample_ids"] = list(
             description_json.get("reference_hard_sample_ids", [])
         )
+        line["generation_guidance_ids"] = list(guidance_ids)
         line["target_error_type"] = description_json.get("target_error_type")
         line["generation_strategy"] = description_json.get(
             "generation_strategy",

@@ -35,3 +35,4 @@ study_suite:
     - 1350
   common_overrides:
     - retention_test.enabled=true
+    - generation_guidance.enabled=true

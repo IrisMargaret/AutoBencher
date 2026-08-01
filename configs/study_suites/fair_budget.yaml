@@ -44,3 +44,4 @@ study_suite:
     - experiment.num_iterations=5
     - experiment.max_cycles=3
     - retention_test.enabled=true
+    - generation_guidance.enabled=true

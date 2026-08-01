@@ -111,6 +111,10 @@ def test_new_preregistered_pair_preserves_study_fairness(tmp_path):
     plan = StudyRunner(path, project_root=ROOT).build_plan()
     assert {item.method for item in plan} == set(FIRST_ROUND_METHODS)
     assert len(plan) == len(FIRST_ROUND_METHODS)
+    guidance_hashes = {
+        item.fingerprints["generation_guidance"]["sha256"] for item in plan
+    }
+    assert len(guidance_hashes) == 1
 
 
 def _write_suite(
@@ -214,6 +218,7 @@ def test_baseline_manifest_records_required_fingerprints():
     assert "transformers" in manifest["environment"]["packages"]
     assert manifest["model"]["sha256"]
     assert manifest["fixed_test"]["sha256"]
+    assert manifest["generation_guidance"]["sha256"]
     assert manifest["config"]["resolved_sha256"] == provenance["config_hash"]
     assert manifest["prompt_bundle"]["combined_sha256"]
     assert manifest["baseline_sha256"]
@@ -244,6 +249,7 @@ def test_first_round_plan_is_deterministic_and_isolated(tmp_path):
         assert f"paths.cache_dir={record.experiment_dir}" in override_text
         assert f"paths.checkpoint_dir={record.experiment_dir}" in override_text
         assert record.budget == 5
+        assert record.fingerprints["generation_guidance"]["kind"] == "disabled"
 
 
 def test_return_code_zero_without_complete_artifacts_stays_partial(tmp_path):

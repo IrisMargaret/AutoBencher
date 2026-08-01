@@ -167,6 +167,14 @@
       },
       "uniqueItems": true
     },
+    "generation_guidance_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^guide-[0-9]{3}$"
+      },
+      "uniqueItems": true
+    },
     "target_error_type": {
       "type": [
         "string",

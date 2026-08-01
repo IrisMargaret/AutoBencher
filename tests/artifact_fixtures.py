@@ -63,11 +63,15 @@ def write_completed_run(
     prompt_sha = record.fingerprints.get("prompt_bundle", {}).get(
         "combined_sha256", "fixture-prompt-sha"
     )
+    guidance_sha = record.fingerprints.get("generation_guidance", {}).get(
+        "sha256", canonical_sha256({"enabled": False})
+    )
     record.fingerprints = {
         **record.fingerprints,
         "base_model": {"sha256": base_sha},
         "fixed_test": {"sha256": fixed_sha},
         "prompt_bundle": {"combined_sha256": prompt_sha},
+        "generation_guidance": {"sha256": guidance_sha},
     }
 
     questions = [
@@ -136,6 +140,7 @@ def write_completed_run(
             "status": "completed",
             "prompt_hash": prompt_sha,
             "base_model_sha256": base_sha,
+            "generation_guidance_sha256": guidance_sha,
         },
     )
     _write_json(

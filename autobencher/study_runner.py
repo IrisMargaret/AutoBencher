@@ -183,6 +183,15 @@ def validate_experiment_completion(record: ExperimentRecord) -> dict[str, Any]:
         raise StudyConfigurationError("Prompt fingerprint changed inside run")
     if manifest.get("base_model_sha256") != record.fingerprints["base_model"]["sha256"]:
         raise StudyConfigurationError("Base-model fingerprint changed inside run")
+    guidance_sha256 = record.fingerprints.get("generation_guidance", {}).get(
+        "sha256"
+    )
+    if not guidance_sha256 or manifest.get(
+        "generation_guidance_sha256"
+    ) != guidance_sha256:
+        raise StudyConfigurationError(
+            "Generation-guidance fingerprint changed inside run"
+        )
     if canonical_sha256(resolved) != record.config_hash:
         raise StudyConfigurationError("Resolved configuration hash mismatch")
     artifact_entries = {
@@ -619,6 +628,25 @@ class StudyRunner:
                                 ),
                                 allow_missing,
                             ),
+                            "generation_guidance": (
+                                self._artifact(
+                                    str(
+                                        config["generation_guidance"][
+                                            "dataset_path"
+                                        ]
+                                    ),
+                                    allow_missing,
+                                )
+                                if bool(
+                                    config["generation_guidance"]["enabled"]
+                                )
+                                else {
+                                    "kind": "disabled",
+                                    "sha256": canonical_sha256(
+                                        {"enabled": False}
+                                    ),
+                                }
+                            ),
                             "prompt_bundle": prompt_bundle_snapshot(
                                 config,
                                 self.project_root,
@@ -717,6 +745,10 @@ class StudyRunner:
                 item.fingerprints["prompt_bundle"]["combined_sha256"]
                 for item in group
             }
+            guidance_hashes = {
+                item.fingerprints["generation_guidance"]["sha256"]
+                for item in group
+            }
             if len(model_hashes) != 1:
                 raise StudyConfigurationError(
                     f"Unfair base model fingerprints in matrix cell {key}."
@@ -733,6 +765,11 @@ class StudyRunner:
             if len(prompt_hashes) != 1:
                 raise StudyConfigurationError(
                     f"Unfair prompt fingerprints in matrix cell {key}."
+                )
+            if len(guidance_hashes) != 1:
+                raise StudyConfigurationError(
+                    "Unfair generation-guidance fingerprints in matrix "
+                    f"cell {key}."
                 )
 
             training_methods = [item for item in group if item.method != "base"]

@@ -1007,6 +1007,30 @@ Using public benchmarks supports cross-benchmark evaluation, but does not prove
 pretraining-unseen generalization; that stronger claim remains reserved for the
 independently held blind set.
 
+The same open-source candidate format can be distilled offline into a
+270-record generation-guidance set (10 records for each of 27 subcategories):
+
+```bash
+python -B prepare_generation_guidance.py \
+  --source-candidates "$AUTOBENCHER_DATA_ROOT/benchmarks/official_candidates_v1.json" \
+  --output "$AUTOBENCHER_DATA_ROOT/guidance/open_source_generation_guidance_v1.json" \
+  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
+```
+
+This artifact is neither an evaluation set nor direct fine-tuning data. The
+builder retains only taxonomy, difficulty band, answer contract, reasoning
+structure, provenance hashes, and abstract variation instructions; public
+question text, answers, and solutions are excluded. Selection rejects exact
+normalized matches, shared parameterized templates, and unigram/bigram
+near-duplicates above the configured threshold. Each subcategory receives ten
+distinct variation axes. `main.yaml`, `fair_budget.yaml`, and
+`ablation_round2.yaml` inject at most three abstract records per generation
+prompt and preserve their guide IDs on generated questions; `smoke.yaml`
+remains disabled. Baseline manifests, Study Runner fairness checks, and resume
+identity checks bind the guidance file SHA-256. Public test-derived guidance
+does not establish pretraining-unseen generalization; confirmatory claims still
+require a source-isolated frozen official set and independently held blind set.
+
 Regrade an old run entirely offline without changing original artifacts:
 
 ```bash

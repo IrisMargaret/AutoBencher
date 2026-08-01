@@ -67,6 +67,24 @@ python -B prepare_open_source_math_benchmark.py \
 队列，不能代替题型审定；上游答案也不能代替第二个独立验证来源。公共测试集可能已进入
 模型预训练数据，因此它衡量的是跨公开基准迁移，不等价于未见题泛化。
 
+### 3.1 生成 270 条抽象指导
+
+完成候选集后，可生成仅供出题器使用的静态指导集：
+
+```bash
+python -B prepare_generation_guidance.py \
+  --source-candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \
+  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/guidance/open_source_generation_guidance_v1.json \
+  --allowed-data-root /vepfs-mlp2/queue010/20262202597/math_flywheel
+```
+
+产物固定为 27×10 条，不含来源题面、金标或解答，并禁止进入评测、Hard Pool 和直接
+训练数据。构造器同时执行规范化文本、参数模板及 unigram/bigram Jaccard 去重；不足
+10 个足够不同的来源时直接失败，不以重复题补数。正式 suite 启用后，每次出题只读取
+当前子类别且难度带最接近的至多 3 条抽象指令。运行清单记录产物内容哈希与 guide ID。
+用于确认性评测的正式集和最终盲测集仍应与这些来源记录隔离；公开指导集不能支持
+“预训练未见”结论。
+
 ```bash
 python prepare_evaluation_sets.py assemble-official \
   --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \

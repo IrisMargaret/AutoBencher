@@ -681,6 +681,49 @@ def test_resume_identity_failure_does_not_reinitialize_ledger(tmp_path, config):
     assert ledger_path.read_bytes() == ledger_before
 
 
+def test_resume_rejects_changed_generation_guidance_before_mutating_ledger(
+    tmp_path,
+    config,
+):
+    guidance_path = tmp_path / "guidance.json"
+    guidance_path.write_text('{"version":1}\n', encoding="utf-8")
+    config = {
+        **config,
+        "paths": {**config["paths"], "output_root": str(tmp_path)},
+        "generation_guidance": {
+            **config["generation_guidance"],
+            "enabled": True,
+            "dataset_path": str(guidance_path),
+        },
+    }
+    provenance = {
+        "config_hash": "guidance-identity-hash",
+        "sources": {},
+        "schema_version": "1.0",
+    }
+    first = ResearchRun(config, provenance, "guidance-identity-run", ROOT)
+    first.initialize({"attempt": 1})
+    first.budget_ledger.record_generation_batch(
+        requested=2,
+        output=2,
+        accepted=1,
+        failed=1,
+    )
+    ledger_path = first.run_dir / "budget_ledger.json"
+    ledger_before = ledger_path.read_bytes()
+    guidance_path.write_text('{"version":2}\n', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="before opening mutable state"):
+        ResearchRun(
+            config,
+            provenance,
+            "guidance-identity-run",
+            ROOT,
+            resume=True,
+        )
+    assert ledger_path.read_bytes() == ledger_before
+
+
 def test_zero_sample_cycle_finalizes_without_undefined_iteration_state(
     tmp_path,
     config,

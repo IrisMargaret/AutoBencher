@@ -22,6 +22,7 @@ from autobencher.config import ProjectConfig, thaw_config
 from autobencher.budget_ledger import BudgetLedger, set_active_ledger
 from autobencher.fingerprints import (
     artifact_fingerprint,
+    canonical_sha256,
     file_sha256,
     prompt_bundle_snapshot,
 )
@@ -460,6 +461,18 @@ class ResearchRun:
             project_root=self.project_root,
             allow_missing=False,
         )
+        guidance_config = self.config["generation_guidance"]
+        if bool(guidance_config["enabled"]):
+            self.generation_guidance_fingerprint = artifact_fingerprint(
+                str(guidance_config["dataset_path"]),
+                project_root=self.project_root,
+                allow_missing=False,
+            )
+        else:
+            self.generation_guidance_fingerprint = {
+                "kind": "disabled",
+                "sha256": canonical_sha256({"enabled": False}),
+            }
         if self.resumed:
             manifest_path = self.run_dir / "run_manifest.json"
             if not manifest_path.is_file():
@@ -474,6 +487,9 @@ class ResearchRun:
                 "git_commit": self.git_commit,
                 "prompt_hash": self.prompt_bundle["combined_sha256"],
                 "base_model_sha256": self.base_model_fingerprint["sha256"],
+                "generation_guidance_sha256": (
+                    self.generation_guidance_fingerprint["sha256"]
+                ),
             }
             mismatches = {
                 key: {"stored": existing.get(key), "current": value}
@@ -518,6 +534,7 @@ class ResearchRun:
             )
         prompt_bundle = self.prompt_bundle
         base_model = self.base_model_fingerprint
+        generation_guidance = self.generation_guidance_fingerprint
         manifest_path = self.run_dir / "run_manifest.json"
         if self.resumed:
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -572,6 +589,8 @@ class ResearchRun:
                 "resume_count": 0,
                 "base_model": base_model,
                 "base_model_sha256": base_model["sha256"],
+                "generation_guidance": generation_guidance,
+                "generation_guidance_sha256": generation_guidance["sha256"],
                 "cli_args": dict(cli_args),
                 "study": study_snapshot,
                 "study_config_snapshot": study_snapshot["config_snapshot"],

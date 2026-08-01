@@ -537,6 +537,19 @@ SAFE_DEFAULTS: dict[str, Any] = {
         "stale_after_cycles": 2,
         "retire_after_cycles": 4,
     },
+    "generation_guidance": {
+        "enabled": False,
+        "dataset_path": (
+            "/vepfs-mlp2/queue010/20262202597/math_flywheel/"
+            "guidance/open_source_generation_guidance_v1.json"
+        ),
+        "expected_record_count": 270,
+        "records_per_subcategory": 10,
+        "max_prompt_records": 3,
+        "similarity_threshold": 0.72,
+        "require_manifest": True,
+        "hide_source_text": True,
+    },
     "adaptive_sampling": {
         "enabled": True,
         "history_mode": "time_decay",
@@ -1266,6 +1279,50 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
             raise ConfigurationError(
                 f"hard_pool.{field}", "must be a positive integer", value
             )
+    for field in (
+        "expected_record_count",
+        "records_per_subcategory",
+        "max_prompt_records",
+    ):
+        value = _get(config, f"generation_guidance.{field}")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ConfigurationError(
+                f"generation_guidance.{field}",
+                "must be a positive integer",
+                value,
+            )
+    expected_guidance_count = _get(
+        config,
+        "generation_guidance.expected_record_count",
+    )
+    guidance_per_subcategory = _get(
+        config,
+        "generation_guidance.records_per_subcategory",
+    )
+    if expected_guidance_count != 27 * guidance_per_subcategory:
+        raise ConfigurationError(
+            "generation_guidance.expected_record_count",
+            "must equal 27 * records_per_subcategory",
+            expected_guidance_count,
+        )
+    if (
+        _get(config, "generation_guidance.max_prompt_records")
+        > guidance_per_subcategory
+    ):
+        raise ConfigurationError(
+            "generation_guidance.max_prompt_records",
+            "must not exceed records_per_subcategory",
+            _get(config, "generation_guidance.max_prompt_records"),
+        )
+    if _get(config, "generation_guidance.enabled") and not _get(
+        config,
+        "generation_guidance.hide_source_text",
+    ):
+        raise ConfigurationError(
+            "generation_guidance.hide_source_text",
+            "must remain true when generation guidance is enabled",
+            False,
+        )
     prompt_batch = _get(config, "generation.max_questions_per_prompt")
     if (
         not isinstance(prompt_batch, int)
@@ -1508,6 +1565,9 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "difficulty.reject_outside_generation_bounds",
         "difficulty.use_observed_score_for_adaptive_sampling",
         "hard_pool.enabled",
+        "generation_guidance.enabled",
+        "generation_guidance.require_manifest",
+        "generation_guidance.hide_source_text",
         "error_attribution.enabled",
         "finetune.enabled",
         "finetune.load_best_model_at_end",
@@ -1952,12 +2012,18 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
         "error_attribution.minimum_completion_rate",
         "error_attribution.maximum_unresolved_rate",
         "evaluator_pipeline.semantic_judge_confidence_threshold",
+        "generation_guidance.similarity_threshold",
     ):
         value = _get(config, path)
         if not isinstance(value, (int, float)) or float(value) < 0:
             raise ConfigurationError(path, "threshold must be non-negative", value)
         if path.startswith(
-            ("dataset.", "error_attribution.", "evaluator_pipeline.")
+            (
+                "dataset.",
+                "error_attribution.",
+                "evaluator_pipeline.",
+                "generation_guidance.",
+            )
         ) and float(value) > 1:
             raise ConfigurationError(path, "threshold must not exceed 1", value)
     for path in (
@@ -2286,6 +2352,24 @@ def validate_config(config: Mapping[str, Any], validate_paths: bool = False) -> 
                     path,
                     "configured file does not exist",
                     str(configured),
+                )
+        if _get(config, "generation_guidance.enabled"):
+            guidance_path = Path(
+                str(_get(config, "generation_guidance.dataset_path"))
+            ).expanduser()
+            guidance_candidates = (
+                [guidance_path]
+                if guidance_path.is_absolute()
+                else [
+                    Path.cwd() / guidance_path,
+                    project_root / guidance_path,
+                ]
+            )
+            if not any(candidate.is_file() for candidate in guidance_candidates):
+                raise ConfigurationError(
+                    "generation_guidance.dataset_path",
+                    "configured file does not exist",
+                    str(guidance_path),
                 )
 
 
