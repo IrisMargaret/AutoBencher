@@ -707,6 +707,41 @@ def test_generated_question_schema_accepts_complete_record():
     )
 
 
+@pytest.mark.parametrize(
+    "generation_source",
+    [
+        "hard_pool_variant",
+        "coverage_deficit",
+        "retention_known",
+        "random",
+        "uniform",
+        "error_only",
+    ],
+)
+def test_generated_question_schema_accepts_all_policy_sources(
+    generation_source,
+):
+    validate_generated_question(
+        {
+            "question_id": "q-source",
+            "category": "Arithmetic",
+            "subcategory": "Integer Operations",
+            "difficulty": 2,
+            "question": "Compute 7 + 5.",
+            "answer_type": "integer",
+            "canonical_answer": "12",
+            "display_answer": "12",
+            "unit": None,
+            "tolerance": None,
+            "order_sensitive": False,
+            "generation_source": generation_source,
+            "reference_hard_sample_ids": [],
+            "target_error_type": None,
+            "generation_strategy": "contract_test",
+        }
+    )
+
+
 def test_generated_question_decimal_contract_is_strict():
     base = {
         "question_id": "q-decimal",

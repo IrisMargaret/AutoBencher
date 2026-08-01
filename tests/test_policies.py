@@ -93,6 +93,22 @@ def test_random_different_seeds_change_the_plan():
     )
 
 
+def test_random_batches_by_the_27_configured_subcategories():
+    config = _config("random", budget=90, maximum_chunk=50)
+    plan = _schedule(config, seed=42)
+    allocation_keys = [
+        (item["category"], item["sub_category"])
+        for item in plan["allocations"]
+    ]
+    assert len(allocation_keys) <= 27
+    assert len(allocation_keys) == len(set(allocation_keys))
+    assert sum(item["question_count"] for item in plan["allocations"]) == 90
+    assert plan["diagnostics"]["batching_unit"] == "subcategory"
+    assert plan["diagnostics"]["difficulty_sampling_unit"] == (
+        "subcategory_batch"
+    )
+
+
 def test_uniform_subcategory_counts_differ_by_at_most_one():
     config = _config("uniform")
     plan = _schedule(config)

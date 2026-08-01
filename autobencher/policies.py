@@ -486,10 +486,18 @@ class RandomPolicy(_PolicyBase):
         rng = random.Random(_policy_seed(context, self.policy_name))
         lower = int(context.config["generation"]["minimum_difficulty"])
         upper = int(context.config["generation"]["maximum_difficulty"])
-        counts: Counter[tuple[str, str, int]] = Counter()
+        # Draw subcategories independently per question, then batch questions
+        # from the same subcategory into one prompt. Sampling difficulty once
+        # per batch preserves a seeded random baseline while avoiding dozens
+        # of one-question API calls caused by subcategory x difficulty cells.
+        subcategory_counts: Counter[tuple[str, str]] = Counter()
         for _ in range(int(context.question_budget)):
             category, subcategory, _ = rng.choice(items)
-            counts[(category, subcategory, rng.randint(lower, upper))] += 1
+            subcategory_counts[(category, subcategory)] += 1
+        counts = {
+            (category, subcategory, rng.randint(lower, upper)): count
+            for (category, subcategory), count in subcategory_counts.items()
+        }
         allocations = _chunked_allocations(
             counts,
             context.config,
@@ -509,6 +517,8 @@ class RandomPolicy(_PolicyBase):
             diagnostics={
                 "rng": "python_random_mt19937",
                 "derived_seed": _policy_seed(context, self.policy_name),
+                "batching_unit": "subcategory",
+                "difficulty_sampling_unit": "subcategory_batch",
             },
         )
 

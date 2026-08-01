@@ -157,7 +157,10 @@
       "enum": [
         "hard_pool_variant",
         "coverage_deficit",
-        "retention_known"
+        "retention_known",
+        "random",
+        "uniform",
+        "error_only"
       ]
     },
     "reference_hard_sample_ids": {
