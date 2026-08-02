@@ -2042,17 +2042,34 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
             evaluator_truth["answer_type"],
             canonical_answer,
         )
-        answer_contract = normalize_generated_gold_contract(
-            question_text,
-            canonical_answer,
-            answer_type,
-            item.get("tolerance"),
-            decimal_tolerance=float(
-                research_config["answer_normalization"][
-                    "decimal_gold_tolerance"
-                ]
-            ),
-        )
+        try:
+            answer_contract = normalize_generated_gold_contract(
+                question_text,
+                canonical_answer,
+                answer_type,
+                item.get("tolerance"),
+                decimal_tolerance=float(
+                    research_config["answer_normalization"][
+                        "decimal_gold_tolerance"
+                    ]
+                ),
+            )
+        except (ValueError, TypeError, OverflowError) as exc:
+            # A malformed solver/evaluator answer is a rejected candidate, not
+            # a fatal iteration error. The outer quota loop can request a
+            # replacement while retaining valid siblings from the same batch.
+            failures.append(
+                {
+                    "stage": "gold_contract",
+                    "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": f"{type(exc).__name__}: {exc}",
+                    "solver_answer": canonical_answer,
+                    "solver_answer_type": answer_type,
+                }
+            )
+            continue
         canonical_answer = answer_contract["canonical_answer"]
         answer_type = answer_contract["answer_type"]
         answer_tolerance = answer_contract["tolerance"]
@@ -2061,16 +2078,34 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
         ]
         deterministic_agreement = None
         if evaluator_enabled and deterministic_truth.success:
-            deterministic_contract = normalize_generated_gold_contract(
-                question_text,
-                deterministic_truth.canonical_answer,
-                deterministic_truth.answer_type,
-                decimal_tolerance=float(
-                    research_config["answer_normalization"][
-                        "decimal_gold_tolerance"
-                    ]
-                ),
-            )
+            try:
+                deterministic_contract = normalize_generated_gold_contract(
+                    question_text,
+                    deterministic_truth.canonical_answer,
+                    deterministic_truth.answer_type,
+                    decimal_tolerance=float(
+                        research_config["answer_normalization"][
+                            "decimal_gold_tolerance"
+                        ]
+                    ),
+                )
+            except (ValueError, TypeError, OverflowError) as exc:
+                failures.append(
+                    {
+                        "stage": "truth_agreement",
+                        "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                        "item_index": index,
+                        "question": question_text,
+                        "failure_summary": f"{type(exc).__name__}: {exc}",
+                        "truth_solver_answer": (
+                            deterministic_truth.canonical_answer
+                        ),
+                        "truth_solver_answer_type": (
+                            deterministic_truth.answer_type
+                        ),
+                    }
+                )
+                continue
             deterministic_agreement = answers_equivalent(
                 canonical_answer,
                 deterministic_contract["canonical_answer"],

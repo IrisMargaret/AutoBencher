@@ -1277,6 +1277,58 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
                 1,
             )
 
+    def test_invalid_decimal_gold_contract_rejects_only_candidate(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
+        )
+        invalid_truth = SimpleNamespace(
+            success=True,
+            canonical_answer="x + 1",
+            answer_type="decimal",
+            truth_validation_details={"substitution_passed": True},
+        )
+        solver = SimpleNamespace(
+            solve=lambda _question: invalid_truth,
+            training_reasoning=lambda _truth: [],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "invalid_decimal"))
+            with (
+                patch.object(
+                    math_autobencher,
+                    "gen_from_prompt",
+                    return_value=self._result(
+                        [{"question": "Compute the decimal value of 2 / 3."}]
+                    ),
+                ),
+                patch.object(
+                    math_autobencher.TruthSolver,
+                    "from_config",
+                    return_value=solver,
+                ),
+            ):
+                result = math_autobencher._generate_question_text_with_truth(
+                    self._description("Fraction and Decimal Operations"),
+                    "model",
+                    None,
+                    object(),
+                    prefix,
+                    question_count=1,
+                    research_config=config,
+                )
+
+            self.assertEqual(result, [[]])
+            summary = json.loads(
+                Path(f"{prefix}.generation_batch_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                summary["failure_counts"][FailureType.TRUTH_PARSE_FAIL.value],
+                1,
+            )
+
     def test_invalid_candidate_is_skipped_while_valid_sibling_continues(self):
         config, _ = load_project_config(
             ROOT / "configs" / "math_flywheel_smoke_test.yaml",
