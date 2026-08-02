@@ -43,6 +43,8 @@ class ExperimentRecord:
     completed_at: str | None = None
     return_code: int | None = None
     error: str | None = None
+    resume_source_root: str | None = None
+    runtime_patch_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in EXPERIMENT_STATUSES:

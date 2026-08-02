@@ -86,7 +86,8 @@ from autobencher.training_protocol import (
 )
 from autobencher.evaluation_sets import load_evaluation_registry
 from autobencher.evaluation_audit import load_json_questions
-from autobencher.fingerprints import artifact_fingerprint
+from autobencher.fingerprints import artifact_fingerprint, canonical_sha256
+from autobencher.numeric import finite_float, finite_int
 from util import gen_from_prompt, helm_process_args, process_args_for_models
 from tool_util import (
     DEFAULT_SYSTEM_MESSAGE,
@@ -113,6 +114,16 @@ from tool_util import (
     update_meta_summary,
 )
 from run_scripts import log_math_iteration_metrics
+
+
+_CANDIDATE_DATA_EXCEPTIONS = (
+    ValueError,
+    TypeError,
+    KeyError,
+    IndexError,
+    ArithmeticError,
+    RuntimeError,
+)
 
 DEFAULT_JSON_MESSAGE = """You are a helpful AI assistant.
 Solve tasks using your reasoning and language skills.
@@ -1961,9 +1972,45 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
 
     solved_questions = []
     for index, item in enumerate(accepted_questions):
-        question_text = item["question"]
+        question_text = str(item.get("question", "")).strip()
+        if not question_text:
+            failures.append(
+                {
+                    "stage": "truth_solver",
+                    "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": "Candidate question is empty.",
+                }
+            )
+            continue
         evaluator_truth = evaluator_truths[index]
-        deterministic_truth = truth_solver.solve(question_text)
+        try:
+            deterministic_truth = truth_solver.solve(question_text)
+        except BudgetExhausted:
+            raise
+        except _CANDIDATE_DATA_EXCEPTIONS as exc:
+            failures.append(
+                {
+                    "stage": "truth_solver",
+                    "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        if not hasattr(deterministic_truth, "success"):
+            failures.append(
+                {
+                    "stage": "truth_solver",
+                    "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": "TruthSolver returned an invalid result object.",
+                }
+            )
+            continue
         if evaluator_truth is None:
             if not deterministic_truth.success:
                 failures.append(
@@ -1976,6 +2023,21 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                         "truth_validation_details": (
                             deterministic_truth.truth_validation_details
                         ),
+                    }
+                )
+                continue
+            try:
+                training_reasoning = truth_solver.training_reasoning(
+                    deterministic_truth
+                )
+            except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                failures.append(
+                    {
+                        "stage": "truth_reasoning",
+                        "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                        "item_index": index,
+                        "question": question_text,
+                        "failure_summary": f"{type(exc).__name__}: {exc}",
                     }
                 )
                 continue
@@ -2004,16 +2066,23 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 "python_code_sha256": None,
                 "verification_details": [],
                 "postcheck": {},
-                "training_reasoning_summary": (
-                    truth_solver.training_reasoning(
-                        deterministic_truth
-                    )
-                ),
+                "training_reasoning_summary": training_reasoning,
                 "estimated_difficulty": int(
                     description_json.get("difficulty", 5)
                 ),
                 "difficulty_acceptable": True,
             }
+        if not isinstance(evaluator_truth, dict):
+            failures.append(
+                {
+                    "stage": "privileged_evaluator",
+                    "failure_type": FailureType.EVALUATOR_CODE_FAILURE.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": "Evaluator returned a non-object result.",
+                }
+            )
+            continue
         if evaluator_truth.get("status") != "passed":
             failure_reason = str(
                 evaluator_truth.get(
@@ -2037,9 +2106,20 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 }
             )
             continue
+        if evaluator_truth.get("canonical_answer") is None:
+            failures.append(
+                {
+                    "stage": "privileged_evaluator",
+                    "failure_type": FailureType.EVALUATOR_CODE_FAILURE.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": "Evaluator omitted canonical_answer.",
+                }
+            )
+            continue
         canonical_answer = str(evaluator_truth["canonical_answer"])
         answer_type = normalize_answer_type(
-            evaluator_truth["answer_type"],
+            evaluator_truth.get("answer_type", "text"),
             canonical_answer,
         )
         try:
@@ -2106,13 +2186,25 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                     }
                 )
                 continue
-            deterministic_agreement = answers_equivalent(
-                canonical_answer,
-                deterministic_contract["canonical_answer"],
-                answer_type,
-                research_config,
-                tolerance=answer_tolerance,
-            )
+            try:
+                deterministic_agreement = answers_equivalent(
+                    canonical_answer,
+                    deterministic_contract["canonical_answer"],
+                    answer_type,
+                    research_config,
+                    tolerance=answer_tolerance,
+                )
+            except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                failures.append(
+                    {
+                        "stage": "truth_agreement",
+                        "failure_type": FailureType.TRUTH_DISAGREEMENT.value,
+                        "item_index": index,
+                        "question": question_text,
+                        "failure_summary": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
             if not deterministic_agreement["equivalent"]:
                 failures.append(
                     {
@@ -2184,40 +2276,70 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
                 deterministic_truth.truth_validation_details
             )
             truth_details["solver_backend"] = "sympy"
-        requested_difficulty = max(
-            int(research_config["generation"]["minimum_difficulty"]),
-            min(
-                int(research_config["generation"]["maximum_difficulty"]),
-                int(
-                    evaluator_truth.get(
-                        "estimated_difficulty",
-                        description_json.get("difficulty", 5),
-                    )
-                ),
-            ),
+        minimum_difficulty = int(
+            research_config["generation"]["minimum_difficulty"]
         )
-        legacy_evaluator_difficulty = requested_difficulty
-        requested_difficulty = max(
-            int(research_config["generation"]["minimum_difficulty"]),
-            min(
-                int(research_config["generation"]["maximum_difficulty"]),
-                int(description_json.get("difficulty", 5)),
-            ),
+        maximum_difficulty = int(
+            research_config["generation"]["maximum_difficulty"]
         )
-        gold_reasoning_summary = list(
+        estimated_difficulty = finite_int(
             evaluator_truth.get(
-                "training_reasoning_summary",
-                evaluator_truth.get("analysis_summary", []),
+                "estimated_difficulty",
+                description_json.get("difficulty", 5),
             )
         )
-        difficulty_profile = assess_difficulty(
-            question_text,
-            answer_type,
-            truth_details,
-            gold_reasoning_summary,
-            requested_difficulty,
-            research_config,
+        if estimated_difficulty is None:
+            failures.append(
+                {
+                    "stage": "difficulty_profile",
+                    "failure_type": FailureType.DIFFICULTY_REJECTED.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": "Evaluator difficulty is not a finite integer.",
+                }
+            )
+            continue
+        requested_difficulty = max(
+            minimum_difficulty,
+            min(maximum_difficulty, estimated_difficulty),
         )
+        legacy_evaluator_difficulty = requested_difficulty
+        configured_difficulty = finite_int(
+            description_json.get("difficulty"),
+            5,
+        )
+        assert configured_difficulty is not None
+        requested_difficulty = max(
+            minimum_difficulty,
+            min(maximum_difficulty, configured_difficulty),
+        )
+        raw_reasoning = evaluator_truth.get(
+            "training_reasoning_summary",
+            evaluator_truth.get("analysis_summary", []),
+        )
+        gold_reasoning_summary = (
+            list(raw_reasoning) if isinstance(raw_reasoning, list) else []
+        )
+        try:
+            difficulty_profile = assess_difficulty(
+                question_text,
+                answer_type,
+                truth_details,
+                gold_reasoning_summary,
+                requested_difficulty,
+                research_config,
+            )
+        except _CANDIDATE_DATA_EXCEPTIONS as exc:
+            failures.append(
+                {
+                    "stage": "difficulty_profile",
+                    "failure_type": FailureType.DIFFICULTY_REJECTED.value,
+                    "item_index": index,
+                    "question": question_text,
+                    "failure_summary": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
         difficulty_profile["legacy_evaluator_estimated_score"] = (
             legacy_evaluator_difficulty
         )
@@ -2411,6 +2533,98 @@ Correct every listed failure. Do not repeat the same invalid output pattern.
     return [solved_questions]
 
 
+_GENERATION_CHECKPOINT_SCHEMA_VERSION = "1.0"
+_PLAN_RUNTIME_FIELDS = {
+    "verified_question_count",
+    "question_shortfall",
+    "quota_repair_rounds_used",
+}
+
+
+def _generation_plan_sha256(plan_json):
+    stable_plan = [
+        {
+            key: value
+            for key, value in dict(item).items()
+            if key not in _PLAN_RUNTIME_FIELDS
+        }
+        for item in plan_json
+    ]
+    return canonical_sha256(stable_plan)
+
+
+def _load_generation_checkpoint(checkpoint_path, plan_json):
+    path = Path(checkpoint_path)
+    plan_sha256 = _generation_plan_sha256(plan_json)
+    empty = {
+        "schema_version": _GENERATION_CHECKPOINT_SCHEMA_VERSION,
+        "plan_sha256": plan_sha256,
+        "entries": {},
+    }
+    if not path.is_file():
+        return empty
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Generation checkpoint is unreadable: {path}"
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("entries"), dict
+    ):
+        raise RuntimeError(f"Generation checkpoint has an invalid shape: {path}")
+    if (
+        payload.get("schema_version")
+        != _GENERATION_CHECKPOINT_SCHEMA_VERSION
+        or payload.get("plan_sha256") != plan_sha256
+    ):
+        raise RuntimeError(
+            "Generation checkpoint does not match the current generation plan; "
+            "refusing to mix cached questions from another plan."
+        )
+    return payload
+
+
+def _generation_checkpoint_key(index, plan_line):
+    stable = {
+        key: value
+        for key, value in dict(plan_line).items()
+        if key not in _PLAN_RUNTIME_FIELDS
+    }
+    return f"{index:04d}:{canonical_sha256(stable)[:16]}"
+
+
+def _validated_checkpoint_records(entry, plan_line):
+    if not isinstance(entry, dict) or entry.get("status") != "completed":
+        return None
+    records = entry.get("records")
+    if not isinstance(records, list):
+        raise RuntimeError("Completed generation checkpoint has no record list.")
+    if entry.get("records_sha256") != canonical_sha256(records):
+        raise RuntimeError("Generation checkpoint record hash mismatch.")
+    expected_count = int(entry.get("verified_count", -1))
+    target_count = int(plan_line.get("question_count", 50))
+    if expected_count != len(records) or not 0 <= len(records) <= target_count:
+        raise RuntimeError("Generation checkpoint record count mismatch.")
+    category = str(plan_line.get("category", ""))
+    subcategory = str(plan_line.get("sub_category", ""))
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError("Generation checkpoint contains a non-object record.")
+        if (
+            str(record.get("category", "")) != category
+            or str(record.get("sub_category", "")) != subcategory
+        ):
+            raise RuntimeError("Generation checkpoint category identity mismatch.")
+        try:
+            validate_generated_question(record)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise RuntimeError(
+                "Generation checkpoint contains an invalid verified question."
+            ) from exc
+    return records
+
+
 def _ask_question_v3(
     agent_info,
     history,
@@ -2460,6 +2674,13 @@ def _ask_question_v3(
     # [MODIFIED] Keep question fragments in memory; inference is canonical.
     question_json_full = []
     normalized_question_texts = set()
+    generation_checkpoint_path = (
+        f"{outfile_prefix}.generation_subcategory_checkpoint.json"
+    )
+    generation_checkpoint = _load_generation_checkpoint(
+        generation_checkpoint_path,
+        plan_json,
+    )
     hard_pool = HardSamplePool(hard_pool_file) if hard_pool_file else None
     repair_limit = (
         int(
@@ -2551,6 +2772,78 @@ def _ask_question_v3(
                 health_state.get("cooldown_until_iteration", 0)
             )
             target_count = int(plan_line.get("question_count", 50))
+            checkpoint_key = _generation_checkpoint_key(idx, plan_line)
+            checkpoint_entry = generation_checkpoint["entries"].get(
+                checkpoint_key
+            )
+            cached_questions = _validated_checkpoint_records(
+                checkpoint_entry,
+                plan_line,
+            )
+            if cached_questions is not None:
+                accepted = copy.deepcopy(cached_questions)
+                question_json_full.extend(accepted)
+                normalized_question_texts.update(
+                    normalize_question_text(item.get("question"))
+                    for item in accepted
+                )
+                verified_count = len(accepted)
+                shortfall = max(0, target_count - verified_count)
+                repair_round = int(
+                    checkpoint_entry.get("repair_rounds", 0)
+                )
+                plan_line["verified_question_count"] = verified_count
+                plan_line["question_shortfall"] = shortfall
+                plan_line["quota_repair_rounds_used"] = repair_round
+                cached_failure_counts = dict(
+                    checkpoint_entry.get("failure_counts", {})
+                )
+                cached_health_state = checkpoint_entry.get("health_state")
+                if isinstance(cached_health_state, dict):
+                    generation_health[health_key] = dict(cached_health_state)
+                subcategory_statistics.append(
+                    {
+                        "category": plan_line["category"],
+                        "sub_category": plan_line["sub_category"],
+                        "generated_total": int(
+                            checkpoint_entry.get("generated_total", 0)
+                        ),
+                        "valid_samples": verified_count,
+                        "failure_counts": cached_failure_counts,
+                        "coverage_gap": shortfall,
+                    }
+                )
+                if shortfall:
+                    subcategory_shortfalls.append(
+                        {
+                            "category": plan_line["category"],
+                            "sub_category": plan_line["sub_category"],
+                            "requested": target_count,
+                            "verified": verified_count,
+                            "shortfall": shortfall,
+                            "repair_rounds": repair_round,
+                            "reason": (
+                                "insufficient_unique_gold_verified_questions"
+                            ),
+                        }
+                    )
+                print(
+                    "[Generate] subcategory_resume_hit "
+                    f"index={idx + 1}/{len(plan_json)} "
+                    f"sub_category={plan_line['sub_category']!r} "
+                    f"verified={verified_count}/{target_count}",
+                    flush=True,
+                )
+                if progress is not None:
+                    progress.update(verified_count)
+                    progress.set_postfix(
+                        verified=len(question_json_full),
+                        shortfall=sum(
+                            item["shortfall"]
+                            for item in subcategory_shortfalls
+                        ),
+                    )
+                continue
             subcategory_started_at = time.monotonic()
             print(
                 "[Generate] subcategory_start "
@@ -2659,6 +2952,7 @@ def _ask_question_v3(
                     if error_counts
                     else None
                 )
+            generation_error = None
             try:
                 question_json = _generate_question_text_with_truth(
                     plan_line,
@@ -2685,6 +2979,18 @@ def _ask_question_v3(
                 )
                 print(f"[Budget] generation_stopped reason={exc}", flush=True)
                 break
+            except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                # One malformed or repeatedly invalid generator batch is a
+                # subcategory shortfall, not a reason to discard the other
+                # completed allocations in this iteration.
+                generation_error = exc
+                question_json = []
+                print(
+                    "[Generate] subcategory_batch_failed "
+                    f"sub_category={plan_line['sub_category']!r} "
+                    f"type={type(exc).__name__} error={str(exc)[:300]}",
+                    flush=True,
+                )
             if len(question_json) == 1:
                 question_json = question_json[0]
             question_json = [
@@ -2716,6 +3022,8 @@ def _ask_question_v3(
                 {},
             ).items():
                 aggregate_failures[str(key)] += int(value)
+            if generation_error is not None:
+                aggregate_failures[FailureType.GENERATOR_FORMAT_ERROR.value] += 1
             repair_round = 0
             while (
                 len(question_json) < target_count
@@ -2749,6 +3057,18 @@ def _ask_question_v3(
                         flush=True,
                     )
                     break
+                except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                    aggregate_failures[
+                        FailureType.GENERATOR_FORMAT_ERROR.value
+                    ] += 1
+                    print(
+                        "[Generate] quota_repair_failed "
+                        f"sub_category={plan_line['sub_category']!r} "
+                        f"round={repair_round}/{repair_limit} "
+                        f"type={type(exc).__name__} error={str(exc)[:300]}",
+                        flush=True,
+                    )
+                    continue
                 question_json_new = question_json_new[0]
                 repair_summary_records = read_json_records(
                     f"{outfile_prefix2}.generation_batch_summary.json"
@@ -2834,6 +3154,23 @@ def _ask_question_v3(
                     "coverage_gap": shortfall,
                 }
             )
+            checkpoint_records = copy.deepcopy(accepted)
+            generation_checkpoint["entries"][checkpoint_key] = {
+                "status": "completed",
+                "category": plan_line["category"],
+                "sub_category": plan_line["sub_category"],
+                "target_count": target_count,
+                "verified_count": verified_count,
+                "shortfall": shortfall,
+                "repair_rounds": repair_round,
+                "generated_total": aggregate_generated,
+                "failure_counts": dict(sorted(aggregate_failures.items())),
+                "health_state": dict(health_state),
+                "records": checkpoint_records,
+                "records_sha256": canonical_sha256(checkpoint_records),
+                "completed_at": _utc_timestamp(),
+            }
+            atomic_json(generation_checkpoint, generation_checkpoint_path)
             if shortfall:
                 subcategory_shortfalls.append(
                     {
@@ -2968,23 +3305,21 @@ def _build_compare_summary(iter_number, inference_records, research_config=None)
     difficulty_gaps = []
     for record in inference_records:
         grouped[(record["category"], record["sub_category"])].append(record)
-        difficulty_grouped[int(record.get("difficulty", 5))].append(record)
+        difficulty = finite_int(record.get("difficulty"), 5)
+        if difficulty is None:
+            difficulty = 5
+        difficulty_grouped[difficulty].append(record)
         profile = record.get("difficulty_profile")
         if isinstance(profile, dict):
-            try:
-                difficulty_gaps.append(
-                    abs(
-                        float(profile["score"])
-                        - float(
-                            profile.get(
-                                "requested_score",
-                                record.get("target_difficulty"),
-                            )
-                        )
-                    )
+            observed = finite_float(profile.get("score"))
+            requested = finite_float(
+                profile.get(
+                    "requested_score",
+                    record.get("target_difficulty"),
                 )
-            except (KeyError, TypeError, ValueError):
-                pass
+            )
+            if observed is not None and requested is not None:
+                difficulty_gaps.append(abs(observed - requested))
     category_statistics = []
     for (category, sub_category), records in sorted(grouped.items()):
         correct_count = sum(record["is_correct"] for record in records)
@@ -3292,6 +3627,57 @@ def _finite_confidence(value, default=0.0):
     return confidence if math.isfinite(confidence) else float(default)
 
 
+def _failed_equivalence_result(answer_type, exc):
+    error = f"{type(exc).__name__}: {exc}"[:300]
+    normalized_failure = {
+        "success": False,
+        "answer_type": normalize_answer_type(answer_type),
+        "value": None,
+    }
+    return {
+        "equivalent": False,
+        "status": "normalization_error",
+        "confidence": 0.0,
+        "needs_review": True,
+        "authoritative_method": None,
+        "backend_results": {},
+        "disagreement": False,
+        "gold_normalized": dict(normalized_failure),
+        "predicted_normalized": dict(normalized_failure),
+        "deterministic_checks": {
+            "answer_parse_success": False,
+            "typed_parse_success": False,
+            "typed_equivalence": False,
+            "typed_error": error,
+        },
+    }
+
+
+def _failed_attribution_result(exc):
+    return {
+        "is_correct": False,
+        "primary_error_tag": "unknown_error",
+        "secondary_error_tags": [],
+        "evidence": [
+            {
+                "response_span": "",
+                "reason": (
+                    "Error attribution could not safely process this record: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:300],
+                "check_name": "attribution_runtime_abstention",
+            }
+        ],
+        "attribution_confidence": 0.0,
+        "needs_review": True,
+        "deterministic_checks": {},
+        "attribution_method": "runtime_abstention",
+        "verification_tier": "abstained",
+        "first_error_step": None,
+        "taxonomy_version": "math_error_taxonomy_v4",
+    }
+
+
 # [MODIFIED] Persist only canonical inference details and comparison statistics.
 def test_and_eval(
     question_json,
@@ -3510,16 +3896,22 @@ def test_and_eval(
                 ),
                 "tool_violation": standardized.get("tool_violation", False),
             }
-            equivalence = answers_equivalent(
-                standardized.get(
-                    "canonical_answer",
-                    standardized["gold_answer"],
-                ),
-                standardized["test_taker_response"],
-                standardized.get("answer_type", "text"),
-                research_config,
-                tolerance=standardized.get("tolerance"),
-            )
+            try:
+                equivalence = answers_equivalent(
+                    standardized.get(
+                        "canonical_answer",
+                        standardized["gold_answer"],
+                    ),
+                    standardized["test_taker_response"],
+                    standardized.get("answer_type", "text"),
+                    research_config,
+                    tolerance=standardized.get("tolerance"),
+                )
+            except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                equivalence = _failed_equivalence_result(
+                    standardized.get("answer_type", "text"),
+                    exc,
+                )
             candidate_truth_check = None
             if (
                 truth_solver is not None
@@ -3527,10 +3919,17 @@ def test_and_eval(
                 and "=" in standardized.get("question", "")
                 and standardized.get("test_taker_response")
             ):
-                candidate_truth_check = truth_solver.validate_candidate(
-                    standardized["question"],
-                    standardized["test_taker_response"],
-                )
+                try:
+                    candidate_truth_check = truth_solver.validate_candidate(
+                        standardized["question"],
+                        standardized["test_taker_response"],
+                    )
+                except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                    candidate_truth_check = {
+                        "status": "failed",
+                        "failure_type": FailureType.TRUTH_PARSE_FAIL.value,
+                        "failure_summary": f"{type(exc).__name__}: {exc}",
+                    }
                 standardized["test_taker_truth_validation"] = (
                     candidate_truth_check
                 )
@@ -3577,12 +3976,15 @@ def test_and_eval(
             attribution_equivalence["equivalent"] = bool(
                 standardized["is_correct"]
             )
-            attribution = attribute_error(
-                standardized,
-                parse_result,
-                attribution_equivalence,
-                research_config,
-            )
+            try:
+                attribution = attribute_error(
+                    standardized,
+                    parse_result,
+                    attribution_equivalence,
+                    research_config,
+                )
+            except _CANDIDATE_DATA_EXCEPTIONS as exc:
+                attribution = _failed_attribution_result(exc)
             evaluator_tool_calls = [
                 {
                     "tool_name": "language_model",

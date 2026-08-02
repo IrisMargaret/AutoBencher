@@ -1,933 +1,121 @@
-# AutoBencher 数学数据飞轮
+# AutoBencher
 
-少量题目生成、SymPy 金标、微调和固定集复测的完整操作步骤见
-[`docs/mini_flywheel_zh-CN.md`](docs/mini_flywheel_zh-CN.md)。
-七种基线与消融方法、组件矩阵和运行清单检查见
-[`docs/baselines_and_ablations_zh-CN.md`](docs/baselines_and_ablations_zh-CN.md)。
-三级评测集、540 题正式集组装、盲测门禁、模板簇划分与内部验证选模见
-[`docs/evaluation_and_training_protocol_zh-CN.md`](docs/evaluation_and_training_protocol_zh-CN.md)。
+AutoBencher 是一个可配置的基准生成、模型评测与训练流水线。本仓库在原始 AutoBencher
+流程上增加了数学答案验证、数据过滤、断点恢复和本地微调支持。
 
-简体中文 | [English](README.md)
+English documentation: [README.md](README.md)
 
-AutoBencher 是一个自适应数学评测与本地训练数据飞轮。它保留原 AutoBencher 的
-“规划、出题、评测、收集错题、训练、再评测”框架，同时对标准答案生成、答案判定、
-分级评测集和缓存保留策略进行了可配置、可审计的加强。原 81 题现定位为开发
-回归集；论文正式集与最终盲测集使用独立版本、权限和哈希。
+## 开源项目声明
 
-当前维护的入口是 `math_autobencher.py`。本仓库现已专注数学数据飞轮，原 Wiki 和
-Multilingual 入口已移除。
+本项目基于或参考了以下开源项目的代码、工具或设计：
 
-## 系统能力
+- [XiangLi1999/AutoBencher](https://github.com/XiangLi1999/AutoBencher)
+- [SymPy](https://github.com/sympy/sympy)
+- [Hugging Face Math-Verify](https://github.com/huggingface/Math-Verify)
+- [Microsoft ToRA](https://github.com/microsoft/ToRA)
+- [Hugging Face TRL](https://github.com/huggingface/trl)
+- [dottxt-ai Outlines](https://github.com/dottxt-ai/outlines)
+- [Guidance](https://github.com/guidance-ai/guidance)
+- [datasketch](https://github.com/ekzhu/datasketch)
+- [Sentence Transformers](https://github.com/huggingface/sentence-transformers)
+- [DSPy](https://github.com/stanfordnlp/dspy)
+- [Ragas](https://github.com/vibrantlabsai/ragas)
 
-- 固定覆盖 9 个数学大类、27 个细分题型。
-- 将调度器要求的目标难度与客观、可复算的五维难度画像分开；后续自适应采样使用
-  实测难度，而不是未经证实的 LLM 自我评级。
-- test-taker 不接收任何工具 schema，也不能调用外部工具，只能依靠自身推理，并按
-  严格 JSON 协议作答。
-- 默认使用本地 SymPy 作为标准答案唯一来源，执行精确求解和方程/方程组逐式回代；
-  LLM 生成求解代码仅作为显式兼容模式保留。
-- 对数值、分数、符号表达式、集合、区间、有序元组、矩阵、布尔值和文本答案做
-  规范化。
-- 使用独立的大模型语义判定两个答案是否表达相同含义，同时保留确定性比较证据和
-  语义判定结果，避免仅因格式差异误判。
-- 只有解析器、类型检查、SymPy 等式验证、候选解回代或数值错误签名提供可复现证据
-  时才归因；证据不足时明确输出 `unknown_error`。
-- 每个 Cycle 的训练集只使用本 Cycle 数据，严格由 25% 做对题和 75% 本轮错题组成；
-  每条导出样本都包含已验证的正确答案和非空安全解题步骤。
-- 启动时用项目原生固定测试集评测原始 test-taker，每轮训练后评测合并后的新模型，
-  并报告总分、分题型、分答案类型和分难度结果；Hugging Face 数据集不再提供题目。
-- 使用精确/模板检查、参考 Text-Dedup 的 datasketch MinHash/LSH 和
-  Sentence-Transformers 语义相似度，拒绝与固定测试集相同或高度相似的训练题。
-- 直接加载的本地模型可使用 Outlines 做 token 级 JSON 约束，并以 Guidance
-  作为后备；W&B 支持离线、在线和关闭三种可配置模式。
-- 每轮迭代结束后只保留目标规划、test-taker 作答和答案比较三类 JSON 缓存。
+以下公开数据集或仓库仅在用户显式准备数据时使用，或作为设计参考：
 
-## 端到端流程
+- [OpenAI GSM8K](https://github.com/openai/grade-school-math)
+- [Hendrycks MATH](https://github.com/hendrycks/math)
+- [Hendrycks MMLU](https://github.com/hendrycks/test)
+- [DeepMind Mathematics Dataset](https://github.com/google-deepmind/mathematics_dataset)
 
-```text
-YAML 配置 + 显式 CLI 覆盖
-  → 原 AutoBencher Quota / 自适应调度
-  → 中等难度 question-only 出题
-  → 受控 SymPy 求解子句
-  → 确定性解析 + 本地精确执行
-  → 方程/方程组逐式回代和 fail-closed 校验
-  → 五维客观难度画像和实际生效难度
-  → 根据求解证据生成训练推理步骤
-  → 接受规范标准答案
-  → 无工具 test-taker 独立推理
-  → 确定性规范化 / Math-Verify 兜底
-  → 隔离的大模型语义等价判定
-  → 错误归因 + 错题池 + 覆盖率更新
-  → 本 Cycle 25% 正确 / 75% 错题训练集
-  → 固定测试集泄漏过滤
-  → 本地 4-bit QLoRA、合并权重、切换模型
-  → 固定测试集复测并计算正确率增量
-```
-
-出题器、语义判定器和 test-taker 使用彼此独立的提示词和模型调用；gold 生成本身
-在本地确定性执行。
-
-## 项目结构
-
-```text
-AutoBencher/
-├── autobencher/
-│   ├── config.py
-│   ├── coverage.py
-│   ├── dataset.py
-│   ├── difficulty.py
-│   ├── evaluator.py
-│   ├── fixed_benchmark.py
-│   ├── output_schemas.py
-│   ├── policies.py
-│   ├── reasoning.py
-│   ├── similarity.py
-│   ├── structured.py
-│   └── truth_solver.py
-├── benchmarks/
-│   └── fixed_math_test_set.json
-├── configs/
-│   ├── environments/
-│   ├── experiments/
-│   ├── studies/
-│   └── math_flywheel.yaml
-├── docs/
-├── prompts/
-│   ├── evaluator_python_solver.txt
-│   ├── evaluator_independent_solver.txt
-│   ├── evaluator_postcheck.txt
-│   ├── semantic_answer_judge.txt
-│   └── tora_evaluator_strategy.txt
-├── tests/
-├── evaluate_error_attribution.py
-├── prepare_fixed_math_benchmark.py
-├── math_autobencher.py
-├── run_scripts.py
-├── train_llm.py
-├── tool_util.py
-├── THIRD_PARTY_NOTICES.md
-├── requirements.txt
-└── requirements-lock.txt
-```
-
-## 环境要求
-
-- Python 3.10 或更高版本。
-- 出题与评测 Agent 使用 DeepSeek/OpenAI 兼容模型。
-- test-taker 可使用本地 Transformers 模型目录、vLLM 服务或 Ollama。
-- `data_flywheel` 的 bitsandbytes 4-bit QLoRA 训练需要 NVIDIA CUDA GPU。
-- 需要足够持久化空间保存基础模型、Adapter、合并模型和运行产物。
-
-如果 test-taker 由独立服务提供，纯评测可以不使用训练 GPU。`train_llm.py` 会对
-CPU 上的 4-bit QLoRA 明确报错。
+项目不会自动下载这些上游数据集。使用前必须检查实际数据归档的许可证与再分发条款。
+依赖版本、许可证、固定 revision 及具体使用方式见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 安装
 
-Windows PowerShell：
+建议使用 Python 3.10 或更高版本。
 
-```powershell
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements-lock.txt
-python -m pip check
-```
-
-Linux 或 macOS：
-
-```bash
-python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
-python -m pip check
+cp .env.example .env
 ```
 
-`requirements-lock.txt` 是唯一精确复现实验环境，`requirements.txt` 只声明受支持的
-直接依赖范围。若 `pip check` 报冲突，应新建虚拟环境，不要通过静默修改项目版本去
-修补共享基础环境。在 CUDA 服务器上修改 PyTorch 前先检查现有环境：
+Windows 使用 `.\.venv\Scripts\Activate.ps1` 激活环境。`.env` 只能保存在本地，禁止提交
+或打印密钥。
 
-```bash
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-nvidia-smi
+运行数据应写入配置的数据目录，不要写入源码仓库。生产配置使用：
+
+```text
+/vepfs-mlp2/queue010/20262202597/math_flywheel/
 ```
 
-从 `.env.example` 创建 `.env`，或在作业平台的安全变量界面配置：
+## 基础检查
 
-```dotenv
-DEEPSEEK_API_KEY=replace-me
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
-VLLM_BASE_URL=http://127.0.0.1:8000/v1
-VLLM_API_KEY=EMPTY
-```
-
-不要提交 `.env`、访问密钥、私有服务地址或 SSH 凭据。
-
-## 权威运行顺序
-
-安装完成后以及每次修改代码后，先执行以下离线检查。这些命令不会加载模型、使用
-GPU 或调用付费 API：
+以下命令为离线检查，不会启动 API 推理或 GPU 训练：
 
 ```bash
 python verify_project.py
 python smoke_test.py
-python -m ruff check .
 python -m pytest -q
 ```
 
-在 Linux 训练服务器上，先把 Python 字节码和全部运行产物约束到 VEPFS，安装项目
-原生固定测试集，再执行失败关闭的预检；预检通过前不要开始付费生成或 GPU 训练：
+## 基础运行
+
+选择实验 YAML、环境 YAML，并设置唯一的运行 ID：
 
 ```bash
-export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
-export PYTHONDONTWRITEBYTECODE=1
-
-python -B prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-
-python -B run_scripts.py math \
-  --config configs/experiments/mini_flywheel_8.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --run-id mini-chain-preflight-v1 \
-  --preflight-only
+python run_scripts.py math \
+  --config <experiment.yaml> \
+  --environment <environment.yaml> \
+  --run-id <run-id>
 ```
 
-最小真实“基线评测 → 生成 → QLoRA → 固定集复测”链路：
+使用完全相同的配置和运行 ID 恢复：
 
 ```bash
-python -B run_scripts.py math \
-  --config configs/experiments/mini_flywheel_8.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --run-id mini-chain-v1
-```
-
-中断后必须使用相同 `run_id` 恢复：
-
-```bash
-python -B run_scripts.py math \
-  --config configs/experiments/mini_flywheel_8.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --run-id mini-chain-v1 \
+python run_scripts.py math \
+  --config <experiment.yaml> \
+  --environment <environment.yaml> \
+  --run-id <run-id> \
   --resume true
 ```
 
-API 连通性探测是可选操作，只有显式添加 `--api` 才会联网：
+运行或恢复 Study Suite：
 
 ```bash
-python -B smoke_test.py --api --model deepseek-v4-pro
+python run_study.py --suite <study-suite.yaml>
+python run_study.py --suite <study-suite.yaml> --resume
 ```
 
-## 配置
-
-所有可调行为都声明在 YAML 中。Python 代码只提供经过验证的安全默认值，不写死
-实验路径或密钥。
+如果 suite 变化导致普通恢复被拒绝，应先恢复 Registry 中登记的 Git commit，再恢复对应记录：
 
 ```bash
-python run_scripts.py math \
-  --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/local.yaml
+python resume_experiment.py \
+  --registry <experiment_index.json> \
+  --study-id <study-id>
 ```
 
-临时参数可通过 `--override` 修改，不需要编辑源码：
+聚合已完成的 Study：
 
 ```bash
-python run_scripts.py math \
-  --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --override experiment.seed=43 finetune.gpu=1
+python aggregate_study.py --index <experiment_index.json>
 ```
 
-配置优先级依次为：安全默认值、继承的基础 YAML、环境 YAML、实验 YAML、显式兼容
-CLI、`--override`。未知字段和不安全值会在加载模型前直接报错。
-
-`configs/math_flywheel.yaml` 的重要节点：
-
-| 节点 | 用途 |
-| --- | --- |
-| `study` | 采样策略、命名 variant、基线参数与组件开关。 |
-| `budget` | 公平协议、数据/Token/API/GPU 上限与可选单价。 |
-| `generation` | 默认允许难度 2–6、推理步数、重试与 Quota 修复。 |
-| `difficulty` | 客观难度量表、维度权重、目标容差、重标/拒绝策略和采样分数来源。 |
-| `evaluator_pipeline` | 主求解、盲审、裁决和语义提示词路径，以及 Python 限制与重试。 |
-| `test_taker_prompt` | 无工具、严格 JSON、推理和输出注入限制。 |
-| `answer_normalization` | 数值误差、符号规则和 Math-Verify 开关。 |
-| `adaptive_sampling` | 上一轮整体正确率区间和细分题型 Beta-Binomial 自适应采样。 |
-| `dataset` | 去重和固定测试集相似度阈值。 |
-| `training_mix` | 严格 25/75 比例与 `current_cycle` 范围。 |
-| `fixed_test` | 测试集路径、题型覆盖、基线与训练后复测。 |
-| `finetune` | GPU、Epoch、Batch、LoRA Rank、序列长度和学习率。 |
-| `structured_output` | Outlines/Guidance 本地 JSON 后端与失败策略。 |
-| `tracking.wandb` | W&B 模式、项目、分组、标签与模型记录。 |
-
-evaluator 与出题器的难度边界必须一致；默认配置禁止竞赛级题目。
-
-### 基线与消融实验
-
-统一策略接口支持 `base`、`random`、`uniform`、`error_only`、`full`、
-`full_no_hard_pool`、`full_no_error_targeting`、
-`full_no_observed_difficulty_sampling` 和 `full_no_difficulty_module`。配置位于
-`configs/studies/`；默认仍为 `full`，因此旧配置继续使用完整自适应行为。
+查看 checkpoint 绑定评测入口的参数：
 
 ```bash
-python run_scripts.py math \
-  --config configs/studies/uniform.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --override experiment.seed=42 \
-  --run-id uniform-seed-42
-```
-
-方法定义、公平比较约束、更多命令和 manifest 检查见
-[`docs/baselines_and_ablations_zh-CN.md`](docs/baselines_and_ablations_zh-CN.md)。
-
-正式实验前先冻结已提交的基准版本。清单会计算 generator、test-taker 和
-semantic-judge 三个真实 Prompt 文件的内容哈希，而不是对版本字符串做哈希；同时
-记录 Git、Python/CUDA、Transformers/TRL/PEFT、基础模型、固定测试集和解析后配置
-指纹：
-
-```bash
-python freeze_baseline.py \
-  --baseline-id baseline-ablation-v1 \
-  --config configs/studies/full.yaml \
-  --environment configs/environments/volcengine.yaml
-
-git tag -a baseline-ablation-v1 -m "Frozen ablation baseline v1"
-```
-
-正式清单默认拒绝未提交的工作区；`--allow-dirty` 只能用于临时诊断，不能作为论文
-基准。清单默认写入
-`/vepfs-mlp2/queue010/20262202597/math_flywheel/baselines/`。
-
-一条命令展开第一轮九种方法并完成完整 smoke 矩阵：
-
-```bash
-python run_study.py \
-  --suite configs/study_suites/smoke.yaml \
-  --dry-run
-
-python run_study.py \
-  --suite configs/study_suites/smoke.yaml
-```
-
-中断后加 `--resume`。每个 `study_id` 唯一映射到
-`run_<study-id>_<sha12>/`，partial 实验会重新打开原目录中的 Cycle 记录、历史、
-Hard Pool、预算账本和 checkpoint，不会创建 `test_2` 从头运行。打开可变状态之前会
-核对配置、Git commit、Prompt bundle 和基础模型哈希。已完成实验会跳过，只继续
-pending、failed 或 partial 实验。
-`main.yaml` 会展开“九方法 × 三个 seed × 一个模型 × 一个总题目预算”。每个矩阵单元
-独占输出、缓存、Hard Pool/历史状态、训练集、checkpoint 与模型目录。Runner 会拒绝
-脏代码、已登记实验的指纹变化、不同基础模型/固定集/Prompt，以及六种训练方法之间
-任何非策略配置差异。`base` 是只评测参考点，因此只比较共同起点，不要求
-`finetune.enabled=true`。
-
-```bash
-python run_study.py \
-  --suite configs/study_suites/main.yaml
-
-python aggregate_study.py \
-  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json
-```
-
-子进程返回码为 0 只是必要条件。只有 Registry 绑定的运行清单、实验摘要、已完成账本、
-固定集快照与完整逐题结果、resolved config、训练模型（非 Base）和 artifact 哈希全部
-存在且身份一致，Runner 才标记 completed。Registry 显式保存产物路径与哈希，聚合器
-不再按修改时间猜目录。正式聚合默认要求所有预注册单元完成；仅开发诊断可显式放宽：
-
-```bash
-python aggregate_study.py \
-  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
-  --allow-partial-development-results
-```
-
-suite 中的 `budgets` 表示整个实验的生成题目总预算，必须能被
-`experiment.num_iterations * experiment.max_cycles` 整除；Runner 不会用隐式取整
-改变实验成本。旧名称 `full_no_observed_difficulty` 仅作为弃用的兼容入口，运行清单
-统一记录规范名 `full_no_observed_difficulty_sampling`。
-
-第一轮结果稳定后再运行 `configs/study_suites/ablation_round2.yaml`。陈旧后验应使用
-独立的 `configs/study_suites/history_modes.yaml` 比较：`cumulative` 使用
-\(w_i=1\)，`cycle_reset` 使用 \(w_i=\mathbf{1}[c_i=c_t]\)，正式默认
-`time_decay` 使用 \(w_i=\exp[-\lambda\max(0,c_t-c_i)]\)，默认
-`decay_lambda: 0.5`。运行清单和每轮生成计划会记录实际权重与运行时断言，证明被关闭
-的组件确实没有参与分配。
-
-### 公平预算与论文结果表
-
-每个运行都会从真实 generator、SymPy、Judge、去重、训练、GPU 和耗时事件生成
-`budget_ledger.json`，并分别记录候选池、train、validation、internal test 与真实参与
-训练的样本数。`data_matched` 在模板簇划分后匹配实际 train 数量及正确/错题比例；
-`generation_token_matched` 会在每次生成前预留输入估算 Token 与声明的最大输出
-Token，并在生成 Token 上限耗尽后停止。它不再被误称为 Cost-matched：Judge、重试、
-训练 Token 与 GPU 时间都会计量，但并未被压缩成一个可交换的统一硬预算。provider
-usage 可用时使用精确 Token；否则标记 `cost_quality=estimated` 或 `mixed`，成本不能
-标成 complete；账本同时记录末次调用成本和越界量。
-
-```bash
-python -B run_study.py \
-  --suite configs/study_suites/fair_budget.yaml
-
-python -B aggregate_study.py \
-  --index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/fair_budget_v1/experiment_index.json
-```
-
-聚合器从固定集原始逐题记录重建 `results_long.csv`，按评测集 ID/版本/哈希、预算协议、
-模型、预算、方法、变体与 seed 隔离结果。显著性检验只运行 suite 预注册的比较；主检验
-按 seed 分别做 McNemar 后组合，并报告 seed/item 簇 Bootstrap 区间。跨 seed 汇总的
-95% 区间使用 Student-t（3 个 seed 的临界值为 4.303），不再使用大样本 1.96；跨 seed
-池化 McNemar 仅作描述。完整定义见
-[`docs/fair_budget_and_statistics_zh-CN.md`](docs/fair_budget_and_statistics_zh-CN.md)。
-
-### 客观难度定义
-
-`difficulty` 是进入统计分桶和自适应采样的实际生效分数，不再从出题计划原样复制。
-每道已求解题目同时保存：
-
-- `target_difficulty`：调度器要求的目标难度；
-- `observed_difficulty`：求解后按客观量表重新计算的难度；
-- `difficulty`：下一轮采样真正使用的生效难度。
-
-`observable_math_v1` 将 1–10 分难度拆成五个可观测、可复算的维度：
-
-| 维度 | 默认权重 | 可观测含义 |
-| --- | ---: | --- |
-| 推理步骤 | 0.30 | 相互依赖且经过验证的变换步数 |
-| 运算数量 | 0.20 | 数学运算符和函数数量 |
-| 约束数量 | 0.20 | 方程、不等式和定义域条件 |
-| 符号深度 | 0.20 | 变量、函数、幂和嵌套结构 |
-| 表征负荷 | 0.10 | 文字转译、单位、比率、分情况、矩阵或几何表征 |
-
-难度区间定义为：1–2 基础直接题，3–4 常规多步题，5–6 综合题，7–8 高阶题，
-9–10 专家题。生产出题仍限制在 2–6。单纯增大数字、拉长题干、使用冷僻名字或加入
-无意义计算不会提高难度。
-
-`difficulty.mismatch_action: relabel` 会保留数学上合法且通过 SymPy 验证的题目，
-但按实测难度重新标记，并记录目标偏差；设为 `reject` 时，超出
-`target_tolerance` 的题目会被拒绝。正式配置和 27 题配置会拒绝实测难度超出 2–6
-的题目；8 题功能测试只记录并重标，避免把有限修复预算浪费在难度校准上。
-
-`observable_math_v1` 是结构基线。经验版 `calibrated_math_v2` 必须使用独立难度
-校准集，禁止使用正式固定集或盲测集：
-
-```bash
-python calibrate_difficulty.py prepare-panel \
-  --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
-  --panel-config configs/difficulty_panels/panel_v1.yaml \
-  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_tasks.json
-
-python calibrate_difficulty.py calibrate \
-  --questions /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/questions.jsonl \
-  --responses /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/panel_responses.jsonl \
-  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/difficulty/calibrated_math_v2.json \
-  --minimum-model-coverage 0.80 --minimum-models-per-item 3 \
-  --minimum-models-per-tier 1 --maximum-missing-rate 0.20 \
-  --freeze
-```
-
-冻结产物包含模型面板错误率、Pearson/Spearman/MAE、分桶校准、不同能力层一致性、
-Rasch/1PL、探索性 2PL 和校准后的五维权重。Rasch 只施加“题目难度均值为零”这一
-个位置约束，不再同时把模型能力强制中心化；产物会报告收敛损失和按模型聚类
-Bootstrap 的题目难度标准误。模型数量较少时，2PL 只能解释为探索分析。启用 v2 时，配置中的产物 SHA-256 与
-权重必须和冻结文件完全一致。五个难度维度使用冻结的原始量纲（或已验证的 0–1
-归一化值），维度缺失、非有限值或越界都会失败。论文指标使用逐题确定性交叉验证的
-out-of-fold 预测，不把全数据拟合指标冒充验证结果。重复的 model×item、覆盖不足或
-少于三个能力层都会失败；每条响应必须绑定模型目录 SHA、tokenizer SHA、提示词 SHA、
-完整解码配置及其 SHA、provider revision 和原始响应，防止相同 model ID 静默指向不同
-快照；面板配置中的重复 model ID 会在生成任务时直接失败。覆盖率门槛会写入冻结产物。
-
-### 自适应难度与题目分配
-
-下一轮首先读取“紧邻上一轮”的 test-taker 整体正确率（不使用固定测试集分数）作为
-全局难度保护：
-
-| 上一轮整体正确率 | 默认的下一轮难度偏置 |
-| --- | --- |
-| 低于 `0.30` | 降低 1 级 |
-| `0.30` 到 `0.60`（含边界） | 保持 |
-| 高于 `0.60` | 提高 1 级 |
-
-达到 `adaptive_sampling.global_accuracy_min_observations: 10` 个有效作答后才启用。
-两个区间边界由 `global_accuracy_low` 和 `global_accuracy_high` 配置，调整步长由
-`global_difficulty_step` 配置，单轮安全上限由
-`max_difficulty_change_per_iteration` 配置。最终难度始终受
-`generation.minimum_difficulty` 与 `generation.maximum_difficulty` 限制，默认是
-2–6。
-
-这层规则不会替换 AutoBencher 的自适应框架。全局偏置会与原来的“细分题型 × 难度”
-Beta-Binomial 后验、覆盖 Quota 缺口、不确定性、持续错题、保留探测和合格 hard-pool
-变式共同决定题型与难度。局部目标区间仍由
-`target_accuracy_low/mid/high` 单独配置，默认是 0.10/0.20/0.30。每个细分题型还会
-从最近一次实测/生效难度继续调节，不会每轮重置。如果某题目标难度为 5、实测为 3，
-Beta-Binomial 后验会把这条观测计入难度 3，而不是错误地计入难度 5。
-
-## 运行
-
-服务器首次运行前，将仓库内置的项目原生固定测试集离线安装到 VEPFS。该命令不会
-访问 Hugging Face 数据集：
-
-```bash
-export AUTOBENCHER_DATA_ROOT=/vepfs-mlp2/queue010/20262202597/math_flywheel
-
-python prepare_fixed_math_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-```
-
-安装器会检查 schema、27 个子类覆盖、题号唯一性、答案字段和题目来源，明确拒绝
-GSM8K、Hendrycks MATH 与 MMLU 来源；写入时同时生成 SHA-256 清单。相同文件重复
-执行是幂等的，不同文件默认拒绝覆盖。
-
-只评测、不训练：
-
-```bash
-python run_scripts.py math \
-  --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --mode eval \
-  --num-iters 2
-```
-
-27 道题的完整快速飞轮（1 个 Iteration、1 个 Cycle、1 个 Epoch）：
-
-```bash
-python run_scripts.py math \
-  --config configs/experiments/quick_flywheel_27.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --run-id quick-flywheel-27
-```
-
-该配置先用 27 道固定测试题评测原始模型，再生成 27 道自适应训练候选；如果能组成
-完整的 25/75 训练数据块，就执行一轮 QLoRA 和模型合并，最后再次用固定测试集评测
-合并后的模型。
-
-完整数据飞轮：
-
-```bash
-python run_scripts.py math \
-  --config configs/experiments/math_flywheel.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --mode data_flywheel \
-  --num-iters 5 \
-  --max-cycle 3 \
-  --finetune-gpu 0 \
-  --finetune-epoch 3 \
-  --finetune-batch 8 \
-  --lora-rank 8
-```
-
-`math_autobencher.py` 仍兼容原数学工作流的长参数形式。显式 CLI 值会覆盖 YAML。
-
-## SymPy 标准答案流程
-
-标准答案采用互斥的精确/近似协议：
-
-- 含 `pi`、根号、对数等无理常数的精确结果统一保存为
-  `symbolic_expression`；输入别名 `symbolic` 会自动规范化到该类型，不设置小数容差。
-- 只有题面明确要求小数近似时才使用 `decimal`。写入前由 SymPy 把 gold 表达式求值为
-  浮点字符串，并强制设置 `tolerance: 1.0e-3`。
-- decimal gold 归一化可以兼容旧的符号常量，但 test-taker 的 decimal 输出必须已经是
-  数值，符号表达式不能借助语义判定混入 decimal 分支。
-- 错误分类 v3 新增 `numeric_approximation_error`：只有推理中保留正确无理数精确形式、
-  且最终近似超出评分容差时才触发。
-
-默认 `generation.gold_solver_backend: sympy`。每一道生成题执行以下步骤：
-
-1. DeepSeek 只返回题面，不允许返回候选答案、推理或求解代码。
-2. 题面必须包含受控的最终求解子句，例如 `Compute ...`、`Solve for x: ...`、
-   方程组、导数、积分、极限或不等式格式。
-3. 本地 `TruthSolver` 解析该子句并调用 SymPy 精确求解；方程与方程组还会把结果
-   逐式代回，只有所有残差均为 0 才接受。
-4. 系统从 SymPy 的求解分支、规范答案和回代证据生成
-   `gold_reasoning_summary`，再执行训练推理质量检查。
-5. 无法解析、没有有限闭式解、超时或回代失败的题目直接丢弃，由 quota repair
-   生成替代题；不再进入 LLM 自我修复标准答案的循环。
-
-旧的 LLM 生成 Python、双路执行和 postcheck 流程只作为显式兼容模式保留。只有把
-`generation.gold_solver_backend` 改为 `llm_python` 并启用
-`evaluator_pipeline.enabled` 时才会调用；默认生产配置不使用它，因此
-`evaluator_code_failure` 不再是 gold 生成路径的失败来源。
-
-规划、出题、gold 求解、复核、语义判定以及 API 型 test-taker 推理都会使用配置中的
-`request_timeout_seconds`、`max_retries` 和 evaluator 的
-`retry_delay_seconds`。运行日志会输出 `[API] request_start`、
-`request_done`、`request_retry`，出题阶段会输出
-`[Generate] subcategory_start` 和 `subcategory_done`。因此服务端请求卡住时会按配置
-超时并重试，不会让进程在没有任何日志的情况下无限等待。
-
-`evaluator_pipeline.max_parallel_questions` 只对上述非默认
-`llm_python` 兼容模式生效。
-
-## test-taker 隔离与判分
-
-test-taker 每次只接收一道题，并且没有任何外部工具。输出必须是单个 JSON 对象：
-
-```json
-{
-  "reasoning_summary": ["简短推理步骤", "自检步骤"],
-  "final_answer": "规范答案文本",
-  "answer_type": "integer",
-  "confidence": 0.9
-}
-```
-
-工具痕迹、提示词复述、无关输出、损坏 JSON 或额外字段都会按失败处理。判分前会先
-规范化格式，因此等价的分数、小数、符号表达式、集合、区间、元组和矩阵不会仅因
-写法不同被误判。
-
-每个格式有效的答案还会经过隔离的语义判定器。它只能看到题目、规范标准答案、
-答案类型、规范化结果和 test-taker 答案。最终记录同时保留确定性证据和大模型判断，
-包括置信度及两者不一致标记。
-
-### 证据化错误归因
-
-归因按确定性证据阶梯执行：协议/解析失败、答案类型规范化、单位和选择题检查、
-TruthSolver 候选解回代、SymPy 常数等式验证、推理结果到最终答案的一致性、数值错误
-签名以及符号等价性。每条结果保存证据、置信度、验证层级、首个错误步骤和标签版本。
-没有检查能够隔离出可靠机制时，系统输出 `unknown_error`，不会根据关键词猜测模型的
-“认知原因”。
-
-论文级验证默认抽取 400 条错误，并按预测标签、置信度、验证层级、类别与难度分层，
-导出两份独立乱序盲标包；非自然比例抽样通过密封文件中的逆概率权重恢复总体指标：
-
-```bash
-python evaluate_error_attribution.py export-blinded \
-  --input /vepfs-mlp2/queue010/20262202597/math_flywheel/review/errors.jsonl \
-  --output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1 \
-  --sealed-output-dir /vepfs-mlp2/queue010/20262202597/math_flywheel/review_private/blind_v1
-
-python evaluate_error_attribution.py merge \
-  --system-predictions /vepfs-mlp2/queue010/20262202597/math_flywheel/review_private/blind_v1/system_predictions.csv \
-  --annotator-1 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_1.csv \
-  --annotator-2 /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/annotator_2.csv \
-  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv
-
-python evaluate_error_attribution.py score \
-  --review-csv /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/adjudication.csv \
-  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/review/blind_v1/metrics.json
-```
-
-标注者只能看到题目、gold、模型原始答案/推理和冻结的标签 codebook；看不到系统标签、
-首错步骤、验证证据或对方标签。系统预测存放在公共评审目录之外的受限目录中。一致标签自动成为共识，分歧必须由第三方填写
-`adjudicated_label`。报告 Coverage、Selective Accuracy、Macro-F1、Cohen’s Kappa、
-Brier Score、混淆矩阵和 `unknown_error` 比例。只有已裁决样本不少于 300、
-Kappa ≥ 0.70、高置信度准确率 ≥ 0.80、高置信度样本不少于 50、完成率不少于 90%、
-正式模式无未决分歧且各已出现标签达到最小样本数时，错误类型才可作为论文核心信号。
-拼写错误或 taxonomy 外标签会直接失败。
-
-## 固定测试集与泄漏防护
-
-服务器环境使用 VEPFS 中不可变的项目原生
-`benchmarks/fixed_math_test_set.json`。它由仓库内置基准离线复制得到，不执行数据集
-下载；GSM8K、Hendrycks MATH、MMLU 以及其他 Hugging Face 托管题目均不进入当前
-评测链路。v3 固定集共 81 道原创题：27 个细分题型各 3 道，分别覆盖基础、中等和
-较难层级。GSM8K、MATH、MMLU 与 DeepMind Mathematics 只用于参考能力分布，不复制
-任何外部题面。
-
-- 启动时先评测原始 test-taker 并保存基线正确率。
-- 每轮训练成功后，用同一测试集评测合并后的新模型。
-- 每轮摘要保存基线正确率、当前正确率和增量。
-- 摘要还保存分来源和分难度正确率、各客观难度维度均值，以及目标/实测难度平均绝对
-  偏差。
-- 固定测试题不会进入错题训练候选。
-- 训练候选如与测试题文本完全相同、规范模板相同，或者 Token、TF-IDF、
-  datasketch MinHash/LSH、Sentence-Transformers 余弦相似度超过对应阈值，
-  会被拒绝。
-
-默认语义模型是 `sentence-transformers/all-MiniLM-L6-v2`。模型名、Revision、
-设备、缓存目录、Batch Size 和 `local_files_only` 均可在 `dataset` 中配置。
-数据飞轮模式默认要求该后端可用并采用 fail-closed：模型加载失败时停止训练数据
-导出，而不是静默放过可能泄漏的题目。首次联网运行可能下载该模型；离线部署应提前
-准备缓存并启用 `sentence_transformers_local_files_only`。
-
-固定测试集应纳入版本控制。修改它会改变 SHA-256，也就形成了新的测试基准，不能
-再把修改前后的分数当作同一测试集结果直接比较。
-
-辅助留存集已经扩展为 120 道项目原创题，均匀覆盖一般指令、语言变换、严格格式、
-稳定常识、逻辑一致性和非目标字符串推理六个维度。它与开发集、所有本地可见的非盲
-评测集、冻结后的正式集一起进入训练泄漏过滤；总体与分维度遗忘率均报告 Wilson 95%
-区间。盲测题面始终不向训练进程开放。
-
-历史文件 `fixed_math_test_set_v3.json` 保留不动，新的日常运行使用
-`fixed_math_dev_v3.json`，其清单明确标记为 81 题开发回归集，禁止作为训练样本或
-Gold Prompt 上下文。需要更低方差的开发评测时，可在 VEPFS 生成 27×20=540 题的
-静态压力回归集：
-
-```bash
-python -B prepare_large_development_benchmark.py \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_development_static_540_v1.json" \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-
-python -B run_scripts.py math \
-  --config configs/experiments/development_static_540_eval.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --run-id dev-static-540-v1
-```
-
-该 540 题集合为项目原创的确定性公式题，只借鉴 GSM8K、MATH 与 DeepMind
-Mathematics Dataset 的覆盖设计，不复制外部题目，也不能替代正式集或盲测集。
-
-如需构造独立的开源题库候选集，先按
-`configs/open_source_evaluation_sources.yaml` 的目录布局，把固定版本的 GSM8K、
-Hendrycks MATH、MMLU 和 DeepMind Mathematics 测试源文件放入
-`$AUTOBENCHER_DATA_ROOT/source_datasets`，再执行：
-
-```bash
-python -B prepare_open_source_math_benchmark.py \
-  --source-root "$AUTOBENCHER_DATA_ROOT/source_datasets" \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/official_candidates_v1.json" \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-```
-
-该命令不会联网下载；它固定上游提交版本，记录每个输入文件的 SHA-256，执行精确去重、
-模板簇上限和 27×20 确定性平衡，任何子类别不足都会失败。输出仍是候选集：启发式题型
-映射标记为待人工复核，答案最初只有上游金标一个来源，必须补齐独立求解或双人审题证据
-后才能进入 `assemble-official`。公共题库只能支持跨基准泛化分析，不能证明题目未出现在
-模型预训练中；后者仍需独立保管的最终盲测集。
-
-同一批开源候选还可离线蒸馏为 27 个子类别各 10 条、共 270 条的生成指导集：
-
-```bash
-python -B prepare_generation_guidance.py \
-  --source-candidates "$AUTOBENCHER_DATA_ROOT/benchmarks/official_candidates_v1.json" \
-  --output "$AUTOBENCHER_DATA_ROOT/guidance/open_source_generation_guidance_v1.json" \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-```
-
-该产物不是评测集，也不直接作为微调样本。构造器仅保留题型、难度带、答案类型、
-推理结构和来源哈希，明确删除公开题目的题面、答案与解答；选择时拒绝规范化重复、
-参数模板重复及超过阈值的 unigram/bigram 近重复，并为每个子类别配置 10 种变式轴。
-写入时同时生成不可变清单。`main.yaml`、`fair_budget.yaml` 与
-`ablation_round2.yaml` 会在出题提示中最多注入 3 条抽象指导，并把实际 guide ID
-记录到生成题；`smoke.yaml` 默认关闭，避免功能测试增加依赖。Study Runner、基线清单
-和断点恢复均绑定指导集内容 SHA-256，防止不同方法或恢复前后静默换集。公共测试源只
-能支持公开基准覆盖指导，不能据此声称对预训练未见分布的泛化；确认性结论仍须使用与
-指导来源隔离、冻结后才启用的正式集和盲测集。
-
-旧运行可在完全离线、保持原文件不变的前提下重新评分：
-
-```bash
-python -B regrade_run.py \
-  --run-dir "$AUTOBENCHER_DATA_ROOT/run_mini-chain-v2_62e2915f6644" \
-  --evaluator-version typed_equivalence_v2 \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-```
-
-盲测集从独立候选池一次性筛选，并与开发集、训练集和全部历史生成记录执行精确文本、
-近文本、参数模板和数学结构去重。Seed 文件只通过环境变量传入，不打印、不写清单：
-
-```bash
-export AUTOBENCHER_BLIND_SEED_FILE=/secure/blind_seed.bin
-python -B prepare_blind_math_benchmark.py \
-  --candidates "$AUTOBENCHER_DATA_ROOT/benchmarks/blind_candidates.json" \
-  --contamination-data "$AUTOBENCHER_DATA_ROOT/benchmarks/fixed_math_dev_v3.json" \
-  --contamination-data "$AUTOBENCHER_DATA_ROOT/audits/all_training_and_generation.json" \
-  --output "$AUTOBENCHER_DATA_ROOT/benchmarks/blind/fixed_math_blind_v1.json" \
-  --manifest-output "$AUTOBENCHER_DATA_ROOT/benchmarks/blind/fixed_math_blind_v1.manifest.json" \
-  --allowed-data-root "$AUTOBENCHER_DATA_ROOT"
-```
-
-绑定式盲测会写入私有 receipt；同一模型目录哈希与盲测集哈希的组合默认只允许执行
-一次。
-
-结题研究配置中，`full_no_observed_difficulty_sampling`（对照）与 `full`（完整方法）
-已作为预注册直接比较；`main`、`fair_budget` 和 `ablation_round2` 会运行 120 题保持集。
-保持集结果仅作描述性遗忘监测，不是非劣效证明。81 题
-`development_regression_v3` 只支持开发性判断，冻结方法后的确认性结论使用 540 题
-`official_fixed_v1`。`generation_token_matched` 仅表示生成 Token 匹配，不代表完整
-cost-matched。
-
-正式集和盲测只能由 checkpoint 绑定入口启动。直接加载对应 YAML 会因缺少来源信息
-而失败；入口会把 source study/method/seed/run ID、checkpoint 路径及目录 SHA 与已完成
-Registry 逐项核对：
-
-正式固定集发布前必须同时提供最终训练语料和全部生成候选语料，审计任一缺失都会
-失败：
-
-```bash
-python prepare_evaluation_sets.py assemble-official \
-  --candidates /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_candidates_v1.json \
-  --training-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_final_training_questions.json \
-  --generation-data /vepfs-mlp2/queue010/20262202597/math_flywheel/audits/all_generated_questions.json \
-  --output /vepfs-mlp2/queue010/20262202597/math_flywheel/benchmarks/official_fixed_v1.json
-```
-
-选定 checkpoint 后只通过绑定入口执行正式评测：
-
-```bash
-python run_formal_evaluation.py \
-  --config configs/experiments/official_fixed_eval.yaml \
-  --environment configs/environments/volcengine.yaml \
-  --source-index /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/experiment_index.json \
-  --source-study-id '<registered-study-id>' \
-  --source-method full --source-seed 42 \
-  --checkpoint-path /vepfs-mlp2/queue010/20262202597/math_flywheel/runs/main_v1/.../model \
-  --checkpoint-sha256 '<directory-sha256>' \
-  --run-id official-full-seed42
-```
-
-正式集发布要求：每题必须“独立重求解通过”，或在求解器不覆盖/冲突时完成两名独立
-审题者复核，并由第三名独立仲裁者解决分歧；所有未解决冲突必须清零。两个验证来源的
-source ID、方法和执行者均须独立，模型来源还必须绑定不同的模型快照 SHA；
-通过参数模板、词法、数学 AST/方程结构与 embedding 泄漏审计；发布清单绑定候选语料、
-训练语料、生成语料、算法版本、阈值与审计报告哈希。盲测发布必须校验预注册或独立
-提供的 token SHA-256，任意非空 token 不能解锁盲测。
-
-错题池采用 `active`、`mastered`、`stale`、`retired` 生命周期。每个新模型版本复测高
-优先级 active/stale 题；连续答对后转为 mastered，长期未复现则 stale/retired；只有
-active 题能注入生成提示或进入旧版错题训练导出。
-
-## 训练集协议
-
-只有本 Cycle 产生的记录才有训练资格。质量过滤、固定测试集过滤和去重后，系统按
-四条一组进行选择：
-
-- 1 条做对保留样本（25%）；
-- 3 条来自本轮错题池的错题（75%）。
-
-错题部分按 `training_mix` 分配给边界错题、覆盖修复和格式/指令错误。某一错题来源
-不足时可以由其他错题补足，但正确题绝不会占用错题位置。不完整的四条数据块不会
-导出；微调前 manifest 会记录计数并断言比例严格正确。
-
-模板簇使用目标偏差最小化算法整体划分，不再把第二、第三大簇机械放入留出集。25/75
-比例会在真实 train split 上再次强制；manifest 报告 train/validation/internal-test 的
-比例，以及类别、来源、正确性和难度分布。`data_matched` 匹配划分后的真实 train 样本
-数和比例。触发训练 Token 上限时，Trainer 按类别、来源、正确性、难度和模板簇进行
-确定性轮询抽样，不再保留文件前缀；eval/save 间隔受有效 optimizer steps 约束，短训练
-也至少执行一次评测和保存。
-
-每条合格记录还必须包含满足配置步数和单步字符限制的具体
-`gold_reasoning_summary`。默认流程根据 SymPy 的精确求解、规范最终答案和回代
-证据生成真实变形与验证步骤。`["compute", "solve", "check"]` 这类只有计划而没有推导的列表，
-以及缺失步骤、角色注入、工具请求、Markdown 围栏、没有落到最终答案和超长内容，
-都会被拒绝。Alpaca 输出固定包含这份复核后的步骤、`final_answer`、
-`answer_type` 和置信度，不再用泛化占位句冒充解题过程。
-
-QLoRA 使用 Hugging Face TRL 的 `SFTConfig`/`SFTTrainer`。当
-`tracking.wandb.enabled` 为真时，Trainer 向 W&B 记录指标；默认 `offline` 模式只
-写入本地数据，不会自动上传，切换到 `online` 必须显式修改配置。
-
-## 输出与缓存保留
-
-每次运行会保留解析后的配置、配置来源、校验结果、配置哈希、环境快照、运行
-manifest、日志、全局错题池、训练产物、模型产物和固定测试结果。
-
-配置的输出根目录会把每个 `run_id` 唯一映射到稳定的
-`run_<规范化-run-id>_<sha12>/` 目录；恢复时重新打开同一目录，不会另建 `test_2`。
-Study Runner 会在 suite/方法/seed 的隔离目录下保存该绑定运行。服务器配置强制
-所有运行产物、缓存、临时文件、日志、训练集、checkpoint 和模型位于
-`/vepfs-mlp2/queue010/20262202597/math_flywheel`；任何指向系统盘、
-`/root/code/` 或该根目录之外的可写路径都会在启动时被拒绝。正式结果必须读取
-`experiment_index.json` 中绑定的精确路径，禁止按修改时间猜测“最新目录”。
-
-完成运行的顶层文件契约为：
-
-```text
-run_<id>_<sha12>/
-├── run_manifest.json
-├── resolved_config.json
-├── resolved_config.yaml
-├── config_sources.json
-├── config_validation.json
-├── environment.json
-├── budget_ledger.json
-├── cycle_record.json
-├── experiment_summary.json
-├── artifact_manifest.json
-├── logs/
-├── cycle/
-└── fixed_test/
-```
-
-`artifact_manifest.json` 使用 `research_run_v2` 布局，记录每个普通文件的相对路径、
-字节数、类型和 SHA-256；存在残留 `.tmp` 文件时拒绝完成运行。所有自动生成的 section
-和 artifact 名称都拒绝路径穿越及不安全字符，二进制模型文件同样计算 SHA-256。
-
-当 `experiment.clean_cycle_cache: true` 时，每个迭代目录在 `finally` 清理后严格只
-保留以下三个 JSON：
-
-```text
-cycle/cycle_<N>/iter_<M>/
-├── <prefix>.question_plan_with_aim.json
-├── <prefix>.test_taker_inference.json
-└── <prefix>.compare_answers.json
-```
-
-所有 `subcat*.json`、生成尝试、evaluator Python 缓存、临时判定、空/损坏 JSON 和
-冗余迭代摘要都会删除。清理操作可重复执行，并且成功或失败路径都会运行。Cycle
-级训练、指标、错题池与固定测试文件属于正式结果，不按迭代缓存清理。
-
-固定测试结果单独保存：
-
-```text
-fixed_test/
-├── dataset_snapshot.json
-├── baseline/
-│   ├── fixed_math.test_taker_inference.json
-│   ├── fixed_math.compare_answers.json
-│   └── summary.json
-└── cycle_<N>/
-    ├── fixed_math.test_taker_inference.json
-    ├── fixed_math.compare_answers.json
-    └── summary.json
-```
-
-原始 test-taker 首次加载后会立即执行基线测试。每个 Cycle 成功训练并合并模型后，
-系统会加载该轮新模型并用同一固定测试集复测。每个阶段不仅保存一个总正确率，还会
-保留原始作答、解析后的 `reasoning_summary`、规范化答案、语义判定、按答案类型和
-细分题型统计的正确率，以及模型置信度数据。
-
-## 开源项目基础
-
-评测闭环继续保留
-[XiangLi1999/AutoBencher](https://github.com/XiangLi1999/AutoBencher) 的规划、出题、
-评测和反馈拓扑。evaluator 策略适配了 MIT 许可证的
-[Microsoft ToRA](https://github.com/microsoft/ToRA) 工具集成推理方法，但将其自由
-工具执行替换为上文所述的受限本地运行时。
-
-项目还使用 Hugging Face
-[Math-Verify](https://github.com/huggingface/Math-Verify) 作为数学答案解析和表达式
-比较的高质量兜底实现，其许可证为 Apache-2.0。AutoBencher 自己的类型化规范化和
-SymPy 检查优先执行，隔离的大模型语义判断默认仍为必需步骤。精确复用边界和许可
-说明见 `THIRD_PARTY_NOTICES.md`。
-
-训练集与固定测试集的泄漏防护还使用了参考
-[ChenghaoMou/text-dedup](https://github.com/ChenghaoMou/text-dedup) 设计的
-Apache-2.0 兼容 MinHash 独立后备实现、MIT 许可的
-[datasketch](https://github.com/ekzhu/datasketch) MinHash/LSH，以及 Apache-2.0
-许可的 [Hugging Face Sentence Transformers](https://github.com/huggingface/sentence-transformers)。
-本地结构化 JSON 使用 [Outlines](https://github.com/dottxt-ai/outlines)，失败时可
-回退到 [Guidance](https://github.com/guidance-ai/guidance)；微调使用
-[TRL](https://github.com/huggingface/trl)，实验追踪使用可配置的
-[Weights & Biases](https://github.com/wandb/wandb)。
-
-固定测试集完全采用项目原生题目，不导入外部数据集题目。错误归因合同借鉴
-[DSPy](https://github.com/stanfordnlp/dspy) 的声明式职责拆分；人工审计把准确率、覆盖率、
-证据、一致性和置信度校准分开报告，借鉴了
-[Ragas](https://github.com/vibrantlabsai/ragas) 的可组合评测思想。DSPy 和 Ragas
-只是设计参考，不是运行时依赖。
-
-精确复用边界和许可说明见 `THIRD_PARTY_NOTICES.md`。
-
-## 检查与验证
-
-运行 CPU 测试：
-
-```bash
-python -m pytest -q
-```
-
-离线项目、语法、Schema、配置、存储、基准集、明文凭据和 CLI 检查：
-
-```bash
-python verify_project.py
-python smoke_test.py
-python -m ruff check .
-python math_autobencher.py --help
-python run_scripts.py --help
-python run_study.py --help
-python aggregate_study.py --help
 python run_formal_evaluation.py --help
 ```
 
-真实 API 推理、本地大模型加载、CUDA QLoRA 和远程调度需要相应密钥、模型文件与
-硬件；单元测试不会把这些未执行的外部集成声明为已通过。
+组装评测集时，应同时提供训练记录与生成记录进行泄漏检查：
+
+```bash
+python prepare_evaluation_sets.py assemble-official \
+  --candidates <candidates.json> \
+  --training-data <training-records.json> \
+  --generation-data <generation-records.json> \
+  --output <evaluation-set.json>
+```

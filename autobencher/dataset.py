@@ -12,6 +12,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .numeric import finite_float
+
 from .coverage import largest_remainder
 from .similarity import (
     SimilarityBatch,
@@ -247,13 +249,18 @@ def holdout_leakage_reason(
 
 
 def _quality_score(record: Mapping[str, Any]) -> float:
-    confidence = float(
+    confidence = finite_float(
         record.get(
             "attribution_confidence",
             record.get("evaluator_confidence", 1.0),
-        )
+        ),
+        0.0,
     )
-    subcategory_accuracy = float(record.get("sub_category_accuracy", 0.2))
+    subcategory_accuracy = finite_float(
+        record.get("sub_category_accuracy"),
+        0.2,
+    )
+    assert confidence is not None and subcategory_accuracy is not None
     boundary = math.exp(-abs(subcategory_accuracy - 0.2) / 0.15)
     return confidence * 0.6 + boundary * 0.3 + min(
         len(str(record.get("question", ""))) / 300,
@@ -269,8 +276,13 @@ def _candidate_source(record: Mapping[str, Any]) -> str:
         return "format_instruction_samples"
     if bool(record.get("is_correct")):
         return "correct_retention_samples"
+    subcategory_accuracy = finite_float(
+        record.get("sub_category_accuracy"),
+        0.2,
+    )
     if record.get("sample_grade") == "train_eligible" or (
-        0.1 <= float(record.get("sub_category_accuracy", 0.2)) <= 0.4
+        subcategory_accuracy is not None
+        and 0.1 <= subcategory_accuracy <= 0.4
     ):
         return "incorrect_boundary_samples"
     return "coverage_repair_samples"
@@ -300,12 +312,14 @@ def _rejection_reasons(
         and record.get("answer_validation_success", True) is not True
     ):
         reasons.append("answer_validation_failed")
-    confidence = float(
+    confidence = finite_float(
         record.get(
             "evaluator_confidence",
             record.get("attribution_confidence", 1.0),
-        )
+        ),
+        0.0,
     )
+    assert confidence is not None
     if confidence < float(dataset_config["evaluator_confidence_threshold"]):
         reasons.append("low_evaluator_confidence")
     if dataset_config["filter_ambiguous_samples"] and record.get("ambiguous"):

@@ -6,6 +6,8 @@ import math
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
+from .numeric import finite_int
+
 def taxonomy_items(config: Mapping[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
     default_quota = int(config["coverage"]["default_min_quota"])
     items = []
@@ -179,7 +181,10 @@ def beta_binomial_state(
         list[tuple[Mapping[str, Any], float]],
     ] = defaultdict(list)
     for record in records:
-        key = (_record_subcategory(record), int(record.get("difficulty", 5)))
+        difficulty = finite_int(record.get("difficulty"), 5)
+        if difficulty is None:
+            continue
+        key = (_record_subcategory(record), difficulty)
         weight = history_weight(
             record,
             config,

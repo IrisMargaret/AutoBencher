@@ -168,6 +168,40 @@ def test_fixed_test_summary_keeps_solution_level_metrics():
     assert summary["subcategory_statistics"][0]["accuracy"] == 0.5
 
 
+def test_fixed_test_summary_ignores_malformed_optional_numeric_fields():
+    records = [
+        {
+            "question_id": "q-null",
+            "category": "Algebra",
+            "sub_category": "Linear Equations",
+            "answer_type": "integer",
+            "difficulty": None,
+            "is_correct": False,
+            "difficulty_profile": {
+                "requested_score": None,
+                "score": "not-a-number",
+                "dimensions": {
+                    "reasoning_steps": {"value": None},
+                },
+            },
+            "parsed_response": {"confidence": None},
+            "semantic_judge": {"status": "failed"},
+        }
+    ]
+
+    summary = fixed_benchmark_summary(
+        records,
+        stage="cycle_1",
+        model_name="model",
+        dataset_sha256="dataset-sha",
+    )
+
+    assert summary["total_questions"] == 1
+    assert summary["accuracy"] == 0.0
+    assert summary["difficulty_calibration"]["mean_absolute_target_gap"] is None
+    assert summary["mean_test_taker_confidence"] is None
+
+
 def test_math_verify_fraction_decimal_equivalence_without_worker_timeout():
     available, equivalent = _math_verify_equal("1/2", "0.5")
     if not available:

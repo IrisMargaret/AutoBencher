@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -128,6 +128,82 @@ def test_fixed_benchmark_resume_reuses_complete_stage_artifacts(
         "stage=cycle_1 questions=2",
         cycle=1,
     )
+
+
+def test_fixed_benchmark_rebuilds_partial_stage_without_api_calls(tmp_path):
+    config = load_resolved_config(
+        ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+    )[0]
+    stage_dir = tmp_path / "fixed_test" / "cycle_1"
+    judge_dir = stage_dir / "temp_log"
+    judge_dir.mkdir(parents=True)
+    question = {
+        "id": "q1",
+        "question_id": "q1",
+        "question": "Compute 2 + 2.",
+        "answer": "4",
+        "canonical_answer": "4",
+        "gold_answer": "4",
+        "display_answer": "4",
+        "answer_type": "integer",
+        "category": "Arithmetic",
+        "sub_category": "Integer Operations",
+        "difficulty": 2,
+    }
+    inference = {
+        **question,
+        "test_taker_response": "4",
+        "parse_status": "success",
+        "parsed_response": {"final_answer": "4", "confidence": 1.0},
+        "parser_version": "structured_v2",
+    }
+    judgment = {
+        "question": question["question"],
+        "gold_answer": "4",
+        "test_taker_answer": "4",
+        "is_correct": True,
+        "confidence": 1.0,
+        "reasons": "equivalent",
+        "semantic_judge": {"status": "success"},
+    }
+    (stage_dir / "fixed_math.test_taker_inference.json").write_text(
+        json.dumps([inference]),
+        encoding="utf-8",
+    )
+    (judge_dir / "judge.compare_answers.json").write_text(
+        json.dumps([judgment]),
+        encoding="utf-8",
+    )
+    logger = Mock()
+    research_run = SimpleNamespace(
+        run_dir=tmp_path,
+        logger=logger,
+        config=config,
+        progress=None,
+        metadata=lambda: {},
+    )
+    args = SimpleNamespace(research_run=research_run)
+
+    with patch("tool_util.gen_from_prompt") as inference_api, patch(
+        "math_autobencher.judge_answer_semantics"
+    ) as judge_api:
+        summary = _run_fixed_test_benchmark(
+            args,
+            model_name="/models/cycle_1",
+            test_taker_info=("cached-model", None, None),
+            agent_info=None,
+            evaluator_info=("cached-judge", None, None),
+            fixed_questions=[question],
+            fixed_metadata={"sha256": "fixed-sha"},
+            stage_name="cycle_1",
+            cycle_number=1,
+        )
+
+    inference_api.assert_not_called()
+    judge_api.assert_not_called()
+    assert summary["total_questions"] == 1
+    assert (stage_dir / "fixed_math.compare_answers.json").is_file()
+    assert (stage_dir / "summary.json").is_file()
 
 
 def test_cycle_checkpoint_resume_reuses_verified_merged_model(tmp_path):

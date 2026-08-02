@@ -159,6 +159,23 @@ def test_dataset_exact_dedup_and_noise_filter(config):
     assert len(rejected) == 2
 
 
+def test_dataset_rejects_malformed_optional_numeric_fields(config):
+    config["training_mix"]["strict_correct_incorrect_ratio"] = False
+    dirty = record(
+        "What is 8 + 1?",
+        "9",
+        evaluator_confidence=None,
+        attribution_confidence=None,
+        sub_category_accuracy=None,
+    )
+
+    selected, manifest, rejected = build_training_dataset([dirty], config)
+
+    assert selected == []
+    assert len(rejected) == 1
+    assert manifest["rejection_reasons"]["low_evaluator_confidence"] == 1
+
+
 def test_training_safety_rejects_blind_and_equivalence_conflicts(config):
     config["training_mix"]["strict_correct_incorrect_ratio"] = False
     blind = record(

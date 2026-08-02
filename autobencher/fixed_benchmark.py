@@ -9,6 +9,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .numeric import finite_float, finite_int
+
 from .config import DEFAULT_TAXONOMY
 from .difficulty import analyze_difficulty
 from .evaluation_sets import (
@@ -504,7 +506,8 @@ def fixed_benchmark_summary(
         source_groups[source]["correct"] += int(
             bool(record.get("is_correct"))
         )
-        difficulty = int(record.get("difficulty", 5))
+        difficulty = finite_int(record.get("difficulty"), 5)
+        assert difficulty is not None
         difficulty_groups[difficulty]["total"] += 1
         difficulty_groups[difficulty]["correct"] += int(
             bool(record.get("is_correct"))
@@ -519,17 +522,19 @@ def fixed_benchmark_summary(
                 "score",
                 record.get("observed_difficulty"),
             )
-            if requested is not None and observed is not None:
-                difficulty_gaps.append(abs(float(observed) - float(requested)))
+            requested_value = finite_float(requested)
+            observed_value = finite_float(observed)
+            if requested_value is not None and observed_value is not None:
+                difficulty_gaps.append(abs(observed_value - requested_value))
             dimensions = profile.get("dimensions", {})
             if isinstance(dimensions, Mapping):
                 for name, dimension in dimensions.items():
                     if isinstance(dimension, Mapping):
                         try:
-                            dimension_values[str(name)].append(
-                                float(dimension["value"])
-                            )
-                        except (KeyError, TypeError, ValueError):
+                            value = finite_float(dimension.get("value"))
+                            if value is not None:
+                                dimension_values[str(name)].append(value)
+                        except (AttributeError, TypeError):
                             pass
         parsed = record.get("parsed_response")
         if isinstance(parsed, Mapping):
@@ -538,10 +543,7 @@ def fixed_benchmark_summary(
                 str(step).strip() for step in reasoning
             ):
                 reasoning_record_count += 1
-            try:
-                confidence = float(parsed.get("confidence"))
-            except (TypeError, ValueError):
-                confidence = None
+            confidence = finite_float(parsed.get("confidence"))
             if confidence is not None and 0 <= confidence <= 1:
                 parsed_confidences.append(confidence)
         semantic = record.get("semantic_judge")

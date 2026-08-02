@@ -128,6 +128,211 @@ def _question_ids(path: Path) -> set[str]:
     return identifiers
 
 
+def _runtime_patch_sha256(project_root: Path) -> str | None:
+    """Fingerprint a dirty recovery tree without exposing patch contents."""
+    status = git_state(project_root)
+    if not status["dirty"]:
+        return None
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD", "--"],
+        cwd=project_root,
+        text=False,
+        capture_output=True,
+        check=False,
+    )
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=project_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if diff.returncode != 0 or untracked.returncode != 0:
+        raise StudyConfigurationError(
+            "Unable to fingerprint the dirty recovery source tree"
+        )
+    untracked_files = []
+    for relative in sorted(untracked.stdout.splitlines()):
+        path = (project_root / relative).resolve()
+        if path.is_file() and path.is_relative_to(project_root):
+            untracked_files.append(
+                {"path": relative, "sha256": file_sha256(path)}
+            )
+    return canonical_sha256(
+        {
+            "tracked_diff_sha256": canonical_sha256(diff.stdout.hex()),
+            "untracked_files": untracked_files,
+        }
+    )
+
+
+def _validate_resume_identity(record: ExperimentRecord) -> None:
+    if not record.run_dir:
+        raise StudyConfigurationError("Registry record has no bound run_dir")
+    run_dir = Path(record.run_dir).resolve()
+    if not run_dir.is_dir():
+        raise StudyConfigurationError(
+            f"Bound run directory does not exist: {run_dir}"
+        )
+    manifest_path = Path(
+        record.run_manifest_path or run_dir / "run_manifest.json"
+    ).resolve()
+    if not manifest_path.is_relative_to(run_dir):
+        raise StudyConfigurationError("run_manifest_path escapes bound run_dir")
+    manifest = _json_mapping(manifest_path)
+    expected = {
+        "run_id": record.study_id,
+        "config_hash": record.config_hash,
+        "git_commit": record.git_commit,
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise StudyConfigurationError(
+                f"Resume identity mismatch for {key}: "
+                f"{manifest.get(key)!r} != {value!r}"
+            )
+    fingerprint_checks = {
+        "prompt_hash": record.fingerprints.get("prompt_bundle", {}).get(
+            "combined_sha256"
+        ),
+        "base_model_sha256": record.fingerprints.get("base_model", {}).get(
+            "sha256"
+        ),
+        "generation_guidance_sha256": record.fingerprints.get(
+            "generation_guidance", {}
+        ).get("sha256"),
+    }
+    for key, value in fingerprint_checks.items():
+        if value is not None and manifest.get(key) != value:
+            raise StudyConfigurationError(
+                f"Resume identity mismatch for {key}"
+            )
+
+
+def _rebind_registered_command(
+    record: ExperimentRecord,
+    project_root: Path,
+) -> list[str]:
+    """Move only repository-owned command paths to the exact source tree."""
+    command = list(record.command)
+    script_indices = [
+        index
+        for index, value in enumerate(command)
+        if Path(str(value)).name == "math_autobencher.py"
+    ]
+    if len(script_indices) != 1:
+        raise StudyConfigurationError(
+            "Registered command must contain exactly one math_autobencher.py"
+        )
+    script_index = script_indices[0]
+    original_root = Path(command[script_index]).expanduser().resolve().parent
+    command[0] = sys.executable
+    command[script_index] = str(project_root / "math_autobencher.py")
+    for option in ("--config", "--environment"):
+        if option not in command:
+            continue
+        value_index = command.index(option) + 1
+        registered_path = Path(command[value_index]).expanduser().resolve()
+        if registered_path.is_relative_to(original_root):
+            relative = registered_path.relative_to(original_root)
+            rebound = (project_root / relative).resolve()
+            if not rebound.is_file():
+                raise StudyConfigurationError(
+                    f"Recovery source lacks registered {option} file: {rebound}"
+                )
+            command[value_index] = str(rebound)
+    if "--run_id" not in command:
+        raise StudyConfigurationError("Registered command has no --run_id")
+    run_id = command[command.index("--run_id") + 1]
+    if run_id != record.study_id:
+        raise StudyConfigurationError("Registered command run_id mismatch")
+    if "--resume" not in command:
+        raise StudyConfigurationError("Registered command has no --resume flag")
+    command[command.index("--resume") + 1] = "true"
+    return command
+
+
+def resume_registered_experiment(
+    registry_path: str | Path,
+    study_id: str,
+    *,
+    project_root: str | Path,
+    allow_dirty_worktree: bool = False,
+    executor: Callable[[list[str], Path], int] | None = None,
+) -> ExperimentRecord:
+    """Resume one exact Registry record without rebuilding the suite matrix."""
+    root = Path(project_root).resolve()
+    index = Path(registry_path).expanduser().resolve()
+    payload = _json_mapping(index)
+    validate_registry(payload)
+    records = [
+        ExperimentRecord.from_dict(item) for item in payload["experiments"]
+    ]
+    matches = [item for item in records if item.study_id == study_id]
+    if len(matches) != 1:
+        raise StudyConfigurationError(
+            f"Registry must contain exactly one study_id={study_id!r}"
+        )
+    record = matches[0]
+    if record.status == "completed":
+        validate_experiment_completion(record)
+        return record
+    source = git_state(root)
+    if source["commit"] != record.git_commit:
+        raise StudyConfigurationError(
+            "Recovery source commit does not match Registry: "
+            f"{source['commit']!r} != {record.git_commit!r}"
+        )
+    if source["dirty"] and not allow_dirty_worktree:
+        raise StudyConfigurationError(
+            "Recovery source is dirty; pass --allow-dirty only for an audited "
+            "compatibility patch"
+        )
+    _validate_resume_identity(record)
+    command = _rebind_registered_command(record, root)
+    run_executor = executor or StudyRunner._subprocess_executor
+
+    def save() -> None:
+        payload["updated_at"] = utc_now()
+        payload["experiments"] = [item.to_dict() for item in records]
+        atomic_json(payload, index)
+
+    record.status = "running"
+    record.started_at = record.started_at or utc_now()
+    record.completed_at = None
+    record.error = None
+    record.resume_source_root = str(root)
+    record.runtime_patch_sha256 = _runtime_patch_sha256(root)
+    save()
+    try:
+        return_code = int(run_executor(command, root))
+        record.return_code = return_code
+        record.completed_at = utc_now()
+        if return_code == 0:
+            try:
+                completion = validate_experiment_completion(record)
+            except StudyConfigurationError as error:
+                record.status = "partial"
+                record.error = f"Completion validation failed: {error}"
+            else:
+                for key, value in completion.items():
+                    if hasattr(record, key):
+                        setattr(record, key, value)
+                record.status = "completed"
+        else:
+            record.status = "partial"
+            record.error = f"Process exited with code {return_code}"
+    except (Exception, KeyboardInterrupt) as error:
+        record.completed_at = utc_now()
+        record.status = "partial"
+        record.error = f"{type(error).__name__}: {error}"
+        save()
+        if isinstance(error, KeyboardInterrupt):
+            raise
+    save()
+    return record
+
+
 def validate_experiment_completion(record: ExperimentRecord) -> dict[str, Any]:
     """Fail closed unless one registry-bound run is complete and self-consistent."""
     if not record.run_dir:

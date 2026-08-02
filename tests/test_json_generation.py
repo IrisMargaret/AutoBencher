@@ -333,6 +333,66 @@ def test_null_confidence_resume_reuses_inference_and_judge_caches(tmp_path):
     assert Path(f"{prefix}.compare_answers.json").is_file()
 
 
+def test_attribution_exception_abstains_without_aborting_fixed_evaluation(
+    tmp_path,
+):
+    config = load_resolved_config(
+        ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+    )[0]
+    inference = {
+        "id": 1,
+        "question_id": "attribution-failure-1",
+        "category": "Linear Algebra",
+        "sub_category": "Matrix Operations",
+        "difficulty": 3,
+        "question": "Compute det(Matrix([[1, 2], [3, 4]])).",
+        "gold_answer": "-2",
+        "canonical_answer": "-2",
+        "display_answer": "-2",
+        "answer_type": "integer",
+        "test_taker_response": "0",
+        "parse_status": "success",
+        "parsed_response": {"final_answer": "0", "confidence": 0.5},
+        "parser_version": "structured_v2",
+    }
+    judgment = {
+        "question": inference["question"],
+        "gold_answer": "-2",
+        "test_taker_answer": "0",
+        "is_correct": False,
+        "confidence": 1.0,
+        "reasons": "wrong answer",
+        "semantic_judge": {"status": "success"},
+    }
+    prefix = str(tmp_path / "attribution_failure")
+    with patch.object(
+        math_autobencher,
+        "generate_math_inference",
+        return_value=[inference],
+    ), patch.object(
+        math_autobencher,
+        "_evaluate_semantic_judgments",
+        return_value=[judgment],
+    ), patch.object(
+        math_autobencher,
+        "attribute_error",
+        side_effect=TypeError("malformed normalized component"),
+    ):
+        records = math_autobencher.test_and_eval(
+            [inference],
+            prefix,
+            test_taker_info=None,
+            agent_info=None,
+            tool_info=None,
+            research_config=config,
+        )
+
+    assert records[0]["is_correct"] is False
+    assert records[0]["primary_error_tag"] == "unknown_error"
+    assert records[0]["verification_tier"] == "abstained"
+    assert Path(f"{prefix}.compare_answers.json").is_file()
+
+
 def test_checkpoint_manifest_has_one_authoritative_writer():
     tree = ast.parse(
         (ROOT / "math_autobencher.py").read_text(encoding="utf-8")
@@ -802,6 +862,137 @@ class GenerationQuotaRepairTests(unittest.TestCase):
         self.assertEqual(
             plan["generation_result"]["question_shortfall"],
             1,
+        )
+
+    def test_completed_subcategory_checkpoint_is_reused_after_crash(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        plan = {
+            "question_budget": 2,
+            "cycle": 1,
+            "global_iteration": 1,
+            "allocations": [
+                {
+                    "category": "Arithmetic",
+                    "sub_category": "Integer Operations",
+                    "question_count": 1,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 2,
+                },
+                {
+                    "category": "Arithmetic",
+                    "sub_category": "Fraction and Decimal Operations",
+                    "question_count": 1,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 2,
+                },
+            ],
+        }
+        first = self._verified_question()
+        second = {
+            **self._verified_question(),
+            "id": "q3",
+            "question_id": "q3",
+            "question": "What is 1/2 + 1/4?",
+            "subcategory": "Fraction and Decimal Operations",
+            "sub_category": "Fraction and Decimal Operations",
+            "answer_type": "rational",
+            "canonical_answer": "3/4",
+            "display_answer": "3/4",
+            "answer": "3/4",
+            "gold_answer": "3/4",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "iteration"))
+            with patch.object(
+                math_autobencher,
+                "_generate_question_text_with_truth",
+                side_effect=[[[first]], KeyboardInterrupt("simulated interruption")],
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated interruption",
+                ):
+                    math_autobencher._ask_question_v3(
+                        ("model", None, object()),
+                        [],
+                        1,
+                        prefix,
+                        generation_plan=plan,
+                        research_config=config,
+                    )
+
+            checkpoint = Path(
+                f"{prefix}.generation_subcategory_checkpoint.json"
+            )
+            self.assertTrue(checkpoint.is_file())
+            with patch.object(
+                math_autobencher,
+                "_generate_question_text_with_truth",
+                return_value=[[second]],
+            ) as generator:
+                questions, _ = math_autobencher._ask_question_v3(
+                    ("model", None, object()),
+                    [],
+                    1,
+                    prefix,
+                    generation_plan=plan,
+                    research_config=config,
+                )
+
+            self.assertEqual(generator.call_count, 1)
+            self.assertEqual(len(questions), 2)
+            self.assertEqual(
+                [item["question"] for item in questions],
+                [first["question"], second["question"]],
+            )
+
+    def test_generator_runtime_failure_becomes_subcategory_shortfall(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml"
+        )
+        plan = {
+            "question_budget": 1,
+            "cycle": 1,
+            "global_iteration": 1,
+            "allocations": [
+                {
+                    "category": "Arithmetic",
+                    "sub_category": "Integer Operations",
+                    "question_count": 1,
+                    "generation_source": "coverage_deficit",
+                    "generation_strategy": "quota_repair",
+                    "difficulty": 2,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(
+                math_autobencher,
+                "_generate_question_text_with_truth",
+                side_effect=RuntimeError("invalid generated batch"),
+            ):
+                questions, _ = math_autobencher._ask_question_v3(
+                    ("model", None, object()),
+                    [],
+                    1,
+                    str(Path(temp_dir, "iteration")),
+                    generation_plan=plan,
+                    research_config=config,
+                )
+
+        self.assertEqual(questions, [])
+        result = plan["generation_result"]
+        self.assertTrue(result["partial_iteration"])
+        self.assertEqual(result["question_shortfall"], 1)
+        self.assertEqual(
+            result["subcategory_statistics"][0]["failure_counts"][
+                FailureType.GENERATOR_FORMAT_ERROR.value
+            ],
+            4,
         )
 
     def test_truth_failure_does_not_block_replacement_candidate(self):
@@ -1310,6 +1501,53 @@ class QuestionOnlyTruthPipelineTests(unittest.TestCase):
             ):
                 result = math_autobencher._generate_question_text_with_truth(
                     self._description("Fraction and Decimal Operations"),
+                    "model",
+                    None,
+                    object(),
+                    prefix,
+                    question_count=1,
+                    research_config=config,
+                )
+
+            self.assertEqual(result, [[]])
+            summary = json.loads(
+                Path(f"{prefix}.generation_batch_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                summary["failure_counts"][FailureType.TRUTH_PARSE_FAIL.value],
+                1,
+            )
+
+    def test_truth_solver_exception_rejects_only_candidate(self):
+        config, _ = load_project_config(
+            ROOT / "configs" / "math_flywheel_smoke_test.yaml",
+            temporary_overrides=["evaluator_pipeline.enabled=false"],
+        )
+        solver = SimpleNamespace(
+            solve=lambda _question: (_ for _ in ()).throw(
+                ValueError("malformed candidate expression")
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = str(Path(temp_dir, "solver_exception"))
+            with (
+                patch.object(
+                    math_autobencher,
+                    "gen_from_prompt",
+                    return_value=self._result(
+                        [{"question": "Compute the malformed expression."}]
+                    ),
+                ),
+                patch.object(
+                    math_autobencher.TruthSolver,
+                    "from_config",
+                    return_value=solver,
+                ),
+            ):
+                result = math_autobencher._generate_question_text_with_truth(
+                    self._description(),
                     "model",
                     None,
                     object(),

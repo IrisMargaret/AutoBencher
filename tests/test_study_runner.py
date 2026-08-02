@@ -21,6 +21,7 @@ from autobencher.result_schema import (
 from autobencher.study_runner import (
     StudyConfigurationError,
     StudyRunner,
+    resume_registered_experiment,
     validate_experiment_completion,
 )
 from artifact_fixtures import write_completed_run
@@ -716,3 +717,81 @@ def test_study_runner_resume_reuses_same_directory_in_real_subprocess(tmp_path):
     assert resumed[0].status == "completed"
     assert resumed[0].run_dir == first_run_dir
     assert (Path(first_run_dir) / "child.marker").read_text() == "resumed"
+
+
+def test_registry_bound_resume_does_not_rebuild_changed_suite(tmp_path):
+    suite = _write_suite(tmp_path, methods=["base"])
+    runner = StudyRunner(suite, project_root=ROOT)
+    planned = runner.build_plan()[0]
+    records = runner.initialize_registry([planned], resume=False)
+    record = records[0]
+    run_dir = Path(record.run_dir)
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": record.study_id,
+                "config_hash": record.config_hash,
+                "git_commit": record.git_commit,
+                "prompt_hash": record.fingerprints["prompt_bundle"][
+                    "combined_sha256"
+                ],
+                "base_model_sha256": record.fingerprints["base_model"][
+                    "sha256"
+                ],
+                "generation_guidance_sha256": record.fingerprints[
+                    "generation_guidance"
+                ]["sha256"],
+                "status": "failed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Prove the recovery path is Registry-bound rather than suite-derived.
+    suite.write_text("study_suite: {name: changed}\n", encoding="utf-8")
+    calls = []
+
+    def executor(command, cwd):
+        calls.append((command, cwd))
+        return 17
+
+    resumed = resume_registered_experiment(
+        runner.index_path,
+        record.study_id,
+        project_root=ROOT,
+        allow_dirty_worktree=True,
+        executor=executor,
+    )
+
+    assert resumed.status == "partial"
+    assert resumed.run_dir == record.run_dir
+    assert resumed.resume_source_root == str(ROOT)
+    assert resumed.runtime_patch_sha256 is None or len(
+        resumed.runtime_patch_sha256
+    ) == 64
+    assert len(calls) == 1
+    command, cwd = calls[0]
+    assert cwd == ROOT
+    assert command[command.index("--run_id") + 1] == record.study_id
+    assert command[command.index("--resume") + 1] == "true"
+    assert Path(command[2]) == ROOT / "math_autobencher.py"
+
+
+def test_registry_bound_resume_rejects_wrong_source_commit(tmp_path):
+    suite = _write_suite(tmp_path, methods=["base"])
+    runner = StudyRunner(suite, project_root=ROOT)
+    record = runner.build_plan()[0]
+    record.git_commit = "not-the-registered-source"
+    runner.initialize_registry([record], resume=False)
+
+    with pytest.raises(
+        StudyConfigurationError,
+        match="Recovery source commit does not match Registry",
+    ):
+        resume_registered_experiment(
+            runner.index_path,
+            record.study_id,
+            project_root=ROOT,
+            allow_dirty_worktree=True,
+            executor=lambda _command, _cwd: 0,
+        )
