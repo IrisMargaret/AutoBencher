@@ -398,6 +398,44 @@ def test_clean_answer_candidate_preserves_numeric_zero():
     assert clean_answer_candidate(0) == "0"
 
 
+def test_matrix_with_unparseable_component_fails_normalization(config):
+    result = answers_equivalent("[[1, 2], [3, 4]]", "[[1, 2], [3, x]]", "matrix", config)
+
+    assert result["equivalent"] is False
+    assert result["predicted_normalized"]["success"] is False
+    assert result["deterministic_checks"]["answer_parse_success"] is False
+
+
+def test_matrix_attribution_handles_legacy_none_component(config):
+    parsed = {
+        "parse_status": "success",
+        "parsed_response": {
+            "reasoning_summary": ["Construct the matrix."],
+            "final_answer": "[[1, 2], [3, x]]",
+        },
+    }
+    equivalence = {
+        "equivalent": False,
+        "gold_normalized": {"success": True, "value": [[1.0, 2.0], [3.0, 4.0]]},
+        "predicted_normalized": {"success": True, "value": [[1.0, 2.0], [3.0, None]]},
+        "deterministic_checks": {"answer_parse_success": True},
+    }
+
+    result = attribute_error(
+        {
+            "question": "Return the matrix.",
+            "canonical_answer": "[[1, 2], [3, 4]]",
+            "answer_type": "matrix",
+        },
+        parsed,
+        equivalence,
+        config,
+    )
+
+    assert result["primary_error_tag"] == "format_output_error"
+    assert result["evidence"][0]["check_name"] == "matrix_component_normalization"
+
+
 def test_numeric_equivalence_cleans_prediction_without_mutating_parse(config):
     parsed = parse_test_taker_output(
         response("x = 1", "rational"),

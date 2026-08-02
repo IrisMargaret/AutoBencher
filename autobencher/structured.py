@@ -901,8 +901,16 @@ def normalize_answer(
         normalized = _unit_value(value)
     else:
         normalized = _clean_text(value).lower()
+    success = normalized is not None
+    if answer_type == "matrix" and success:
+        success = bool(normalized) and all(
+            isinstance(row, list)
+            and bool(row)
+            and all(item is not None for item in row)
+            for row in normalized
+        )
     return {
-        "success": normalized is not None,
+        "success": success,
         "answer_type": answer_type,
         "value": normalized,
     }
@@ -1763,7 +1771,28 @@ def attribute_error(
                 "value"
             )
             mismatch = None
-            if isinstance(gold_matrix, list) and isinstance(predicted_matrix, list):
+            matrix_values_valid = (
+                isinstance(gold_matrix, list)
+                and isinstance(predicted_matrix, list)
+                and all(
+                    isinstance(row, list)
+                    and bool(row)
+                    and all(item is not None for item in row)
+                    for matrix in (gold_matrix, predicted_matrix)
+                    for row in matrix
+                )
+            )
+            if not matrix_values_valid:
+                primary = "format_output_error"
+                confidence = 1.0
+                add_evidence(
+                    predicted_text,
+                    "At least one matrix component cannot be normalized as a finite numeric value.",
+                    check_name="matrix_component_normalization",
+                    expected=gold_matrix,
+                    observed=predicted_matrix,
+                )
+            elif isinstance(gold_matrix, list) and isinstance(predicted_matrix, list):
                 for row_index, (gold_row, predicted_row) in enumerate(
                     zip(gold_matrix, predicted_matrix)
                 ):
@@ -1782,18 +1811,19 @@ def attribute_error(
                             break
                     if mismatch is not None:
                         break
-            primary = "matrix_element_error"
-            confidence = 0.99
-            add_evidence(
-                predicted_text,
-                "A matrix component differs from the reference at the recorded row and column.",
-                check_name="matrix_elementwise_comparison",
-                expected=(mismatch[2] if mismatch else gold_matrix),
-                observed=(mismatch[3] if mismatch else predicted_matrix),
-            )
-            if mismatch:
-                evidence[-1]["row_index"] = mismatch[0]
-                evidence[-1]["column_index"] = mismatch[1]
+            if matrix_values_valid:
+                primary = "matrix_element_error"
+                confidence = 0.99
+                add_evidence(
+                    predicted_text,
+                    "A matrix component differs from the reference at the recorded row and column.",
+                    check_name="matrix_elementwise_comparison",
+                    expected=(mismatch[2] if mismatch else gold_matrix),
+                    observed=(mismatch[3] if mismatch else predicted_matrix),
+                )
+                if mismatch:
+                    evidence[-1]["row_index"] = mismatch[0]
+                    evidence[-1]["column_index"] = mismatch[1]
         elif answer_type == "vector" and checks.get("answer_parse_success"):
             gold_vector = equivalence.get("gold_normalized", {}).get("value")
             predicted_vector = equivalence.get("predicted_normalized", {}).get(
